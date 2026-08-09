@@ -1,0 +1,45 @@
+# --- Секреты и конфигурация ---
+# ВАЖНО: .env содержит реальные API-ключи (RouterAI, OpenRouter, Yandex) — НИКОГДА не коммитить!
+.env
+!.env.example
+
+# --- Виртуальное окружение ---
+.venv/
+venv/
+env/
+
+# --- Кэш Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# --- Результаты прогонов ---
+logs/
+output/
+evals/results_*.json
+evals/report_*.md
+
+# --- Локальные данные ---
+data/
+.phoenix_local/
+*.db
+
+# --- Черновики / заметки ---
+tmp/
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- OS ---
+Thumbs.db
+.DS_Store
+
+# --- Кэш pytest ---
+.pytest_cache/
+
+# --- Временные артефакты тест-колла ---
+model_probe_results*.json
