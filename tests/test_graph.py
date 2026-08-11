@@ -58,6 +58,7 @@ def deps(make_settings, tmp_path):
         FGOS_REFERENCE_DIR=str(FGOS_DIR),
         TEXTBOOKS_DOWNLOADS_DIR=str(tmp_path / "downloads"),
         MAX_INTAKE_ITERATIONS=8,
+        OCR_MIN_TEXT_CHARS=20,
     )
     embedder = FakeEmbedder()
     store = NumpyVectorStore("t", embedder)
@@ -146,6 +147,23 @@ class TestQuizFlow:
         assert "Объяснение:" in res.agent_message
         assert "§12" in res.agent_message
 
+    def test_records_filled_for_export(self, deps):
+        graph = build_graph(deps)
+        state = TutorState(num_questions=1, sources=[{"type": "web", "url": "x"}], collection_id="web")
+        res = _feed(graph, state, ["студент", "география", "нет", "квиз"])
+        # вопрос сгенерирован → в records появилась запись
+        assert len(res.records) == 1
+        assert res.records[0]["question_id"] == "q1"
+        assert res.records[0]["topic"] == "Атмосфера"
+        assert res.records[0]["student_answer"] is None  # ещё не отвечен
+
+        res = _invoke(graph, {**res.model_dump(), "pending_answer": "Атмосфера — воздушная оболочка Земли."})
+        assert res.records[0]["student_answer"] == "Атмосфера — воздушная оболочка Земли."
+        assert res.records[0]["score01"] == 0.8
+        assert res.records[0]["correct"] is True
+        assert res.records[0]["judge_score"] == 8.0
+        assert res.records[0]["model_used"] == "tutor"
+
 
 class TestSourceFlow:
     def test_source_failed_path(self, deps, monkeypatch):
@@ -192,3 +210,103 @@ class TestBuild:
             config={"configurable": {"thread_id": "t1"}},
         )
         assert res.intake_field == "learner_type"
+
+
+def _minimal_scanned_pdf(tmp_path):
+    """Минимальный PDF с коротким текстом «Hello PDF» → детектируется как скан."""
+    body = b"BT\n/F1 24 Tf\n72 720 Td\n(Hello PDF) Tj\nET\n"
+    content = f"<</Length {len(body)}>>\nstream\n".encode() + body + b"endstream\n"
+    pdf = (
+        b"%PDF-1.1\n"
+        b"1 0 obj <</Type /Catalog /Pages 2 0 R>> endobj\n"
+        b"2 0 obj <</Type /Pages /Kids [3 0 R] /Count 1>> endobj\n"
+        b"3 0 obj <</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+        b"/Resources <</Font <</F1 5 0 R>>>>>> endobj\n"
+        b"4 0 obj " + content + b"endobj\n"
+        b"5 0 obj <</Type /Font /Subtype /Type1 /BaseFont /Helvetica>> endobj\n"
+        b"trailer <</Root 1 0 R /Size 5>>\n%%EOF\n"
+    )
+    p = tmp_path / "scanned.pdf"
+    p.write_bytes(pdf)
+    return p
+
+
+class TestScannedDoc:
+    """Ветка «скан → запрос страниц+темы → OCR → индекс» (3.2)."""
+
+    @pytest.fixture
+    def scanned_deps(self, make_settings, tmp_path):
+        s = make_settings(
+            FGOS_REFERENCE_DIR=str(FGOS_DIR),
+            TEXTBOOKS_DOWNLOADS_DIR=str(tmp_path / "downloads"),
+            MAX_INTAKE_ITERATIONS=8,
+            OCR_DETECT_PAGE_NUMBERS=False,
+            OCR_MAX_ATTEMPTS=3,
+            OCR_PAGE_BUFFER=3,
+        )
+        embedder = FakeEmbedder()
+        store = NumpyVectorStore("scanned", embedder)
+        return GraphDeps(
+            embedder=embedder, store=store, settings=s,
+            tutor_llm=lambda m: _GEN,
+            eval_llm=lambda m: _EVAL_OK,
+            expert_llm=lambda m: _EXPL,
+            judge_llm=lambda m: _JUDGE,
+        )
+
+    def test_scanned_asks_pages_then_indexes(self, scanned_deps, tmp_path, monkeypatch):
+        pdf = _minimal_scanned_pdf(tmp_path)
+        monkeypatch.setattr(
+            "src.knowledge.ocr_pages",
+            lambda path, page_range, **kw: {
+                "text": "Атмосфера — воздушная оболочка Земли, состоит из азота и кислорода. Много текста.",
+                "pages": list(range(page_range[0], page_range[1] + 1)),
+                "page_numbers": {},
+                "offset": None,
+            },
+        )
+        graph = build_graph(scanned_deps)
+        state = TutorState(
+            num_questions=1, textbook_file=str(pdf),
+            learner_type="student", subject="география", topic="Атмосфера",
+            has_textbook=True, mode="quiz",
+        )
+        # 1) распознан скан → агент просит страницы+тему
+        res = _invoke(graph, state.model_dump())
+        assert res.textbook_scanned is True
+        assert res.agent_question and "страниц" in res.agent_question
+
+        # 2) ответ «1-1, Атмосфера» → OCR(мок) → индекс → вопрос квиза
+        res = _invoke(graph, {**res.model_dump(), "pending_answer": "1-1, Атмосфера"})
+        assert res.textbook_pages == "1-1, Атмосфера"
+        assert res.source_status == "ready"
+        assert res.collection_id == "ocr"
+        assert res.current_question is not None
+        assert res.agent_question
+
+    def test_scanned_retry_then_all(self, scanned_deps, tmp_path, monkeypatch):
+        pdf = _minimal_scanned_pdf(tmp_path)
+        monkeypatch.setattr(
+            "src.knowledge.ocr_pages",
+            lambda path, page_range, **kw: {
+                "text": "Атмосфера — воздушная оболочка. Текст для проверки темы.",
+                "pages": list(range(page_range[0], page_range[1] + 1)),
+                "page_numbers": {},
+                "offset": None,
+            },
+        )
+        graph = build_graph(scanned_deps)
+        state = TutorState(
+            num_questions=1, textbook_file=str(pdf),
+            learner_type="student", subject="география", topic="Атмосфера",
+            has_textbook=True, mode="quiz",
+        )
+        res = _invoke(graph, state.model_dump())
+        # «не знаю» → переспрос
+        res = _invoke(graph, {**res.model_dump(), "pending_answer": "не знаю"})
+        assert res.doc_pages_attempts == 1
+        assert res.agent_question and "открой" in res.agent_question
+        # «все» → полный OCR
+        res = _invoke(graph, {**res.model_dump(), "pending_answer": "все"})
+        assert res.source_status == "ready"
+        assert res.current_question is not None

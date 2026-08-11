@@ -106,6 +106,15 @@ class Settings(BaseSettings):
     FGOS_REFERENCE_DIR: Path = Field(default=BASE_DIR / "data" / "fgos_reference")
     TEXTBOOKS_DOWNLOADS_DIR: Path = Field(default=BASE_DIR / "downloads")
 
+    # --- OCR сканированных учебников (3.2) ---
+    OCR_LANGUAGES: str = Field(default="ru,en")
+    OCR_MIN_TEXT_CHARS: int = Field(default=100, ge=0)
+    OCR_PAGE_BUFFER: int = Field(default=3, ge=0)
+    OCR_MAX_PAGES: int = Field(default=50, ge=1)
+    OCR_MAX_ATTEMPTS: int = Field(default=3, ge=1)
+    OCR_DETECT_PAGE_NUMBERS: bool = Field(default=True)
+    OCR_FORMULA_ENGINE: str = Field(default="")
+
     # --- Хранилище ---
     CHROMA_PERSIST_DIR: Path = Field(default=BASE_DIR / "data" / "chroma")
     SOURCES_CACHE_DIR: Path = Field(default=BASE_DIR / "data" / "sources_cache")

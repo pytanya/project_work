@@ -5,9 +5,10 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, Response, UploadFile
 
 from src.config import settings as default_settings
+from src.export import questions_csv
 
 from ..deps import get_session, get_store
 from ..engine import SessionStore, run_step
@@ -38,12 +39,15 @@ async def upload_document(
         update={"textbook_file": str(dest), "has_textbook": True}
     )
     await run_step(session)
+    st = session.state
     return {
         "ok": True,
         "filename": file.filename,
-        "status": session.state.source_status,
-        "note": session.state.source_note,
-        "num_chunks": session.state.sources[0].get("num_chunks") if session.state.sources else None,
+        "status": st.source_status,
+        "note": st.source_note,
+        "scanned": st.textbook_scanned,
+        "num_chunks": st.sources[0].get("num_chunks") if st.sources else None,
+        "next_question": st.agent_question or "",
     }
 
 
@@ -55,3 +59,18 @@ def list_knowledge(session_id: str, store: SessionStore = Depends(get_store)):
         "collection_id": session.state.collection_id,
         "note": session.state.source_note,
     }
+
+
+@router.get("/export")
+def export_session(session_id: str, store: SessionStore = Depends(get_store)):
+    """Экспорт для учителя: CSV вопросов сессии (расширение 15.1 п.7)."""
+    session = get_session(store, session_id)
+    csv_text = questions_csv(session.state.records, session_id)
+    headers = {
+        "Content-Disposition": f'attachment; filename="{session_id}_questions.csv"'
+    }
+    return Response(
+        content=csv_text.encode("utf-8-sig"),
+        media_type="text/csv; charset=utf-8",
+        headers=headers,
+    )

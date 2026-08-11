@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 
 import pytest
@@ -11,13 +12,18 @@ from src.config import BASE_DIR, Settings
 from src.knowledge import (
     ApiEmbedder,
     NumpyVectorStore,
+    _consistent_offset,
+    _extract_printed_number,
     clean_pdf_text,
+    detect_text_layer,
     extract_sections,
     make_embedder,
     make_store,
+    ocr_pages,
     parse_document,
     parse_pdf,
     process_document,
+    validate_topic_in_text,
 )
 
 
@@ -65,10 +71,25 @@ class TestExtractSections:
         )
         sections = extract_sections(text)
         assert len(sections) == 2
-        num, title, content = sections[0]
+        label, num, title, content = sections[0]
+        assert label == "параграф"
         assert num == "12"
         assert title == "Атмосфера"
         assert "Строение атмосферы" in content
+
+    def test_lesson_sections(self):
+        text = "Урок 1: Россия — наша Родина\nСодержание урока.\n\nУрок 2. Культура и религия\nЕщё текст.\n"
+        sections = extract_sections(text)
+        assert len(sections) == 2
+        assert sections[0][0] == "урок"
+        assert sections[0][1] == "1"
+
+    def test_english_sections(self):
+        text = "Module 1: Family\nSome content.\n\nUnit 2: School\nMore.\n"
+        sections = extract_sections(text)
+        assert len(sections) == 2
+        assert sections[0][0] == "module"
+        assert sections[1][0] == "unit"
 
     def test_no_sections(self):
         assert extract_sections("Просто текст без заголовков.\nЕщё текст.") == []
@@ -329,3 +350,87 @@ class TestRealEmbeddings:
         vecs = emb.encode(["Атмосфера — воздушная оболочка Земли."])
         assert len(vecs) == 1
         assert len(vecs[0]) > 0
+
+
+class TestOcr:
+    def test_detect_text_layer(self):
+        assert detect_text_layer("") is True
+        assert detect_text_layer("маленький текст", min_chars=100) is True
+        assert detect_text_layer("достаточно длинный текст для порога" * 5, min_chars=100) is False
+
+    def test_validate_topic_in_text(self):
+        assert validate_topic_in_text("Атмосфера", "тут много текста про атмосферу и воздух") is True
+        assert validate_topic_in_text("Атмосфера", "тут текст про литосферу") is False
+        assert validate_topic_in_text("", "любой текст") is True  # нет темы — пропускаем
+
+    def test_extract_printed_number_bottom_band(self):
+        items = [
+            ([[0, 10], [200, 10], [200, 40], [0, 40]], "заголовок", 0.9),
+            ([[0, 700], [60, 700], [60, 740], [0, 740]], "23", 0.9),
+        ]
+        assert _extract_printed_number(items) == 23
+
+    def test_extract_printed_number_no_bottom(self):
+        assert _extract_printed_number([([[0, 10], [200, 10], [200, 40], [0, 40]], "заголовок", 0.9)]) is None
+
+    def test_consistent_offset(self):
+        assert _consistent_offset({2: 13, 3: 14}) == 11   # 13-2=11, 14-3=11
+        assert _consistent_offset({2: 13, 3: 10}) is None  # несогласованно
+        assert _consistent_offset({2: None, 3: 14}) is None
+
+    def test_ocr_pages_mocked(self, monkeypatch):
+        import sys
+        import types
+
+        class FakeReader:
+            def __init__(self):
+                self.page = 0
+
+            def readtext(self, image, **kw):
+                self.page += 1
+                num = "13" if self.page == 1 else "14"
+                return [
+                    ([[0, 10], [200, 10], [200, 40], [0, 40]], "текст страницы", 0.9),
+                    ([[0, 700], [60, 700], [60, 740], [0, 740]], num, 0.9),
+                ]
+
+        class FakePage:
+            def render(self, scale=1.0):
+                return self
+
+            def to_pil(self):
+                return None
+
+        class FakeDoc:
+            def __init__(self, n):
+                self.n = n
+
+            def __len__(self):
+                return self.n
+
+            def __getitem__(self, i):
+                return FakePage()
+
+        monkeypatch.setattr("src.knowledge._get_ocr_reader", lambda langs: FakeReader())
+        fake = types.ModuleType("pypdfium2")
+        fake.PdfDocument = lambda path: FakeDoc(100)
+        monkeypatch.setitem(sys.modules, "pypdfium2", fake)
+
+        res = ocr_pages(Path("x.pdf"), (2, 3), langs=("ru",), detect_numbers=True)
+        assert "текст страницы" in res["text"]
+        assert res["page_numbers"] == {2: 13, 3: 14}
+        assert res["offset"] == 11
+
+
+class TestOcrIntegration:
+    """Реальный EasyOCR (тяжёлый: модель ~64MB). Включается флагом EDUTUTOR_RUN_OCR=1."""
+
+    @pytest.mark.skipif(
+        os.getenv("EDUTUTOR_RUN_OCR", "0") != "1",
+        reason="OCR-интеграция: EDUTUTOR_RUN_OCR=1",
+    )
+    def test_ocr_pages_real(self, tmp_path: Path):
+        pdf = _minimal_pdf(tmp_path / "m.pdf")
+        res = ocr_pages(pdf, (1, 1), langs=("en",), detect_numbers=False)
+        assert res["text"].strip(), "OCR не извлёк текст"
+        assert "Hello" in res["text"]

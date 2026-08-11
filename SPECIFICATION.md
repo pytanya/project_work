@@ -168,6 +168,17 @@ stateDiagram-v2
     }
 
     process_document --> chunk_and_index: Docling → чанки
+    process_document --> ask_page_range: Скан (нет текстового слоя)
+    state ask_page_range {
+        [*] --> request_pages: «Открой учебник, укажи страницы + тему/урок»
+        request_pages --> parse_pages: Ответ получен
+        parse_pages --> retry_ask: Не распарсено / «не знаю» (≤ OCR_MAX_ATTEMPTS)
+        retry_ask --> request_pages: «Пожалуйста, посмотри страницы и тему»
+        parse_pages --> ocr_and_index: Диапазон получен (буфер + оффсет)
+        parse_pages --> full_ocr: «все» — полный OCR (предупреждение)
+        full_ocr --> ocr_and_index
+    }
+    ask_page_range --> chunk_and_index: ocr_pages (ru+en) → validate_topic → чанки
     chunk_and_index --> rag_ready: ChromaDB проиндексирована
 
     state tutoring {
@@ -219,10 +230,12 @@ stateDiagram-v2
 |-----------|-----------|-------------|
 | **Разбор PDF/DOCX** | **Docling** | Структурированный разбор: заголовки, параграфы, таблицы, формулы → Markdown |
 | **Fallback-извлечение** | pdfplumber / PyPDF (из geo_tutor-master) | Для файлов >50 страниц и >10MB — надёжно и экономно по памяти |
-| **OCR (резерв)** | EasyOCR | Только для сканированных PDF |
-| **Chunking** | Docling HybridChunker + custom | По главам/параграфам с сохранением иерархии (заголовок → контент); обогащение чанка контекстом параграфа (идея из geo_tutor-master) |
+| **OCR (сканы)** | EasyOCR (`ru`,`en`) | Только для **сканированных** PDF (нет текстового слоя). Детекция: текст < `OCR_MIN_TEXT_CHARS`. **OCR выполняется ТОЛЬКО по страницам, указанным учеником** (`ask_page_range`) с учётом буфера `OCR_PAGE_BUFFER` и автодетекции смещения напечатанных номеров (`detect_page_offset`); язык — всегда `ru,en`, доминирующий — fastText `lid.176.ftz`. Формулы EasyOCR не распознаёт — ограничение; опц. `OCR_FORMULA_ENGINE=pix2tex` (расширение) |
+| **Chunking** | Docling HybridChunker + custom | По главам/параграфам с сохранением иерархии (заголовок → контент); обогащение чанка контекстом параграфа (идея из geo_tutor-master); метаданные `page_number` (напечатанный номер страницы скана, если определён) |
 | **Embeddings** | **`intfloat/multilingual-e5-small` (обязательный, многоязычный, русский — решение заказчика)**; Ollama `nomic-embed-text` — **опционально** | Локально, бесплатно, без внешних API; sentence-transformers — основная (без отдельного сервиса) |
 | **Реранкинг** | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Точность поиска ×3–5 (из geo_tutor-master) |
+
+> **Сканированный учебник (кейс «нет текстового слоя»):** напечатанный номер страницы в скане может отличаться от порядкового номера страницы PDF (обложки/титулы/предисловие дают смещение обычно 1–5 стр.). Пайплайн: 1) `detect_text_layer` → «скан»; 2) агент просит ученика **открыть учебник и назвать страницы + тему/урок**; 3) физический диапазон = `[start − offset − buffer, end − offset + buffer]` (offset — из `detect_page_offset`, best-effort; иначе 0), клампинг 1..N, лимит `MAX_OCR_PAGES`; 4) `ocr_pages` (ru+en) + `validate_topic_in_text` (перекрёстная проверка, повторный запрос при несовпадении); 5) метаданные чанков `page_number`. Retry-цикл «открой учебник и посмотри страницы» ≤ `OCR_MAX_ATTEMPTS`, затем опция «все» (полный OCR с предупреждением) или отмена.
 
 > **Примечание (Ж-доп.):** `bge-small` в спецификации ранее — некорректное имя; исключён. **Основной embedding — `intfloat/multilingual-e5-small`**; Ollama `nomic-embed-text` — опционально. Опция `bge-m3` — на усмотрение реализации, в матрицу не включается.
 
@@ -412,6 +425,11 @@ class IntakeState(BaseModel):
     intake_progress: int = 0                # Число вновь закрытых полей за последнюю итерацию (В-3)
     intake_no_progress_streak: int = 0      # Подряд итераций без прогресса (В-3)
     missing_fields: List[str] = []          # Поля, которые нужно уточнить
+    textbook_scanned: bool = False          # Загруженный файл — скан (нет текстового слоя)
+    textbook_pages: Optional[str] = None    # Диапазон страниц от ученика ("12-15")
+    textbook_topic: Optional[str] = None    # Тема/урок от ученика (для валидации OCR)
+    doc_pages_attempts: int = 0             # Попытки получить страницы (убеждение, ≤ OCR_MAX_ATTEMPTS)
+    page_offset: Optional[int] = None       # Смещение напечатанного номера относительно индекса PDF
 ```
 
 ### 5.2. Валидация достаточности (`validate_intake`)
@@ -455,6 +473,7 @@ class IntakeState(BaseModel):
 | Школьник без учебника, только тема | `grade=6` + `topic="Атмосфера"` → **find_textbook** (по классу+предмету) → не найден → **материалы по теме** (подграф web_search) |
 | Студент указал тему без учебника | `learner_type=student` → `has_textbook=False` → `chapter="все"` → `mode` → **материалы по теме** (web_search) |
 | Студент указал URL | `has_textbook=False` → `textbook_url` → **download_file + Docling** (в клоне `fetch_url` даёт текст, а не HTML — нужен `download_file` для PDF/DOCX) |
+| Школьник загрузил **сканированный** учебник | upload → `detect_text_layer` (нет текстового слоя) → **ask_page_range**: «открой учебник, укажи страницы (12-15) и тему/урок» → `parse_doc_request` → физический диапазон (буфер `OCR_PAGE_BUFFER` + оффсет) → **ocr_pages** (ru+en) → `validate_topic_in_text` → чанки (`page_number`) → индекс → квиз; «не знаю» → повторный запрос (≤ `OCR_MAX_ATTEMPTS`), затем «все»/отмена | 
 | Пользователь отвечает «не знаю» на всё | 2 итерации без прогресса → **экстренный старт** с минимальным набором (В-3) |
 
 ---
@@ -481,6 +500,11 @@ class IntakeState(BaseModel):
 | `fetch_html(url)` | **Новое:** возвращает исходный HTML (для парсинга ссылок и передачи Docling-подобным парсерам), лимит `MAX_FETCH_CHARS_HTML` |
 | `download_file(url, dest)` | Скачивание PDF/DOCX с проверкой: размер, сигнатура `%PDF`, число страниц (только для легально доступных файлов) |
 | `verify_textbook(file)` | Валидация: открывается ли Docling, есть ли структура (§, главы, оглавление) |
+| `detect_text_layer(pdf)` | Определяет, есть ли текстовый слой: текст < `OCR_MIN_TEXT_CHARS` → «скан» |
+| `parse_doc_request(answer, num_pages)` | Разбор ответа «12-15, Атмосфера» → `{pages:(start,end)|"all"|None, topic}`; форматы «стр. 12–15», «с 12 по 15», «12,13,14», «урок 3»; клампинг 1..N |
+| `ocr_pages(pdf, physical_range, langs)` | EasyOCR (ru+en) по указанным страницам (буфер + оффсет); возвращает текст + метрики `ocr_pages_count` |
+| `detect_page_offset(pdf, pages)` | Best-effort: напечатанный номер из нижней полосы страниц vs индекс PDF → согласованный оффсет (иначе None → буфер) |
+| `validate_topic_in_text(topic, text)` | Перекрёстная проверка: ключевые слова темы в OCR-тексте (иначе повторный запрос страниц) |
 
 **Эвристики сбора материалов (JS-рендеринг, без обхода защит):**
 1. Прямые ссылки на материалы: страницы параграфов/уроков, `<a href="*.pdf">`, `<a href="*.docx">` на **легальных платформах** (РЭШ, НЭБ, открытые конспекты) — приоритет; проверка, что целевой хост — лицензионно допустимый (раздел 6.3).
@@ -574,7 +598,8 @@ OBSERVE │ Оценка результата:
 | `crawl_textbook_catalog(...)` | Поиск учебника в каталогах-агрегаторах (crawl4ai, только как указатель) | Нет учебника, есть класс/предмет/автор |
 | `crawl_page_js(url)` | Загрузка JS-рендеримых страниц **без обхода защит** (crawl4ai) | Поиск ссылки на PDF на официальном ресурсе |
 | `download_file(url, dest)` | Скачивание PDF/DOCX с валидацией | Учебник найден на легальном источнике |
-| `process_document(file)` | Docling → чанки → ChromaDB | Обучаемый загрузил / найден PDF/DOCX |
+| `process_document(file)` | Docling → чанки → ChromaDB; если скан → `ask_page_range` → `ocr_pages` | Обучаемый загрузил / найден PDF/DOCX |
+| `ocr_pages(pdf, pages, langs)` | EasyOCR (ru+en) по указанным страницам | Загружен сканированный учебник, страницы известны |
 | `rag_search(query, k)` | Семантический поиск по ChromaDB (фильтр по классу/главе) | Генерация вопроса / объяснение |
 | `classify_intent(query)` | Интент: rule-based/классификатор с few-shot + fallback (В-1) | Разбор первичного запроса |
 | `extract_entities(query)` | NER: шаблонно-регексный парсер + LLM-дополнение (В-1) | Парсинг темы/класса/автора/главы |
@@ -759,7 +784,7 @@ edututor.session                            ← корневой (session_id, to
 | Golden set | `evals/golden_set.json` — сценарии тьюторинга: «школьник 6 класса», «студент с PDF», «авто-поиск учебника», «нет материалов вообще» + **отдельный intent-датасет (В-9)**: набор тестовых сообщений ученика с эталонными интентами |
 | **EduTutorEval (НОВЫЙ модуль)** | `evals/edututor_eval.py` — **не адаптация** `eval_golden.py` из клона (тот жёстко завязан на `ResearchAgent.run(question)` + `check_pass_at_1` по ключевым словам). EduTutorEval прогоняет **последовательность шагов сценария** (intake → источник → квиз → оценка → судья) и считает метрики: `intake_success`, `find_textbook_success`, `judge_score_question`, `judge_score_explanation`, `judge_score_evaluation`, `intent_accuracy` (В-9) |
 | LLM-as-Judge | Три контракта судьи (К-4): вопрос / объяснение / оценка ответа ученика; судья — модель другого семейства (см. 4.2.3) |
-| Метрики | Время ответа, стоимость **по ролям** (cheap/tutor/expert/judge), число LLM-вызовов за сессию, % правильных, успешность find_textbook, **доля отказов дешёвой роли** (В-2), **доля запросов, где NER вернул пусто** (В-1), **intent accuracy ≥ 0.8** (В-9) |
+| Метрики | Время ответа, стоимость **по ролям** (cheap/tutor/expert/judge), число LLM-вызовов за сессию, % правильных, успешность find_textbook, **доля отказов дешёвой роли** (В-2), **доля запросов, где NER вернул пусто** (В-1), **intent accuracy ≥ 0.8** (В-9), **OCR**: `ocr_pages_count`, `page_offset_detected` (3.2) |
 
 > **В-9 (измеримость intent accuracy):** intent accuracy замеряется на **отдельном intent-датасете**, входящем в состав golden set, — набор тестовых сообщений ученика с эталонными интентами из **фактического списка спецификации**: `quiz` / `explain` / `deep_dive` / `homework` (интенты `classify_intent`, раздел 4.2.1). При расширении классификатора дополнительными маршрутизирующими интентами (`off_topic`, `emergency`, `source_switch`, `grade_switch` и т.п.) датасет дополняется соответствующими эталонами. **Формула:** intent accuracy = доля совпадений предсказанного интента с эталонным на intent-датасете (порог ≥ 0.8).
 
@@ -1012,6 +1037,15 @@ MAX_TEXTBOOK_SEARCH_SEC=300
 # открытые коллекции, поиск Tavily/Yandex по открытым сайтам; РЭШ/НЭБ имеют антибот-защиты —
 # капчу НЕ обходим, при блокировке переходим на другие источники Plan A (К-2, раздел 6).
 TEXTBOOK_CATALOGS=ru.wikibooks.org,resh.edu.ru,rusneb.ru
+
+# --- OCR сканированных учебников (раздел 3.2) ---
+OCR_LANGUAGES=ru,en                    # языки EasyOCR (всегда обе)
+OCR_MIN_TEXT_CHARS=100                 # текст ниже порога → «скан» (нет текстового слоя)
+OCR_PAGE_BUFFER=3                      # буфер вокруг диапазона ученика (смещение напечатанных номеров)
+OCR_MAX_PAGES=50                       # лимит страниц за один прогон OCR
+OCR_MAX_ATTEMPTS=3                     # попытки «открой учебник и назови страницы»
+OCR_DETECT_PAGE_NUMBERS=true           # автодетекция напечатанного номера (оффсет)
+OCR_FORMULA_ENGINE=                    # опц.: pix2tex для формул (EasyOCR формулы не распознаёт)
 # Playwright (dynamic rendering) — для crawl_page_js (раздел 6.1), без обхода защит (К-2).
 # ОБЯЗАТЕЛЕН: python -m playwright install chromium (В-3, раздел 11.1).
 CRAWL4AI_PLAYWRIGHT_ENABLED=true
@@ -1127,6 +1161,7 @@ API_PORT=8000
 - [ ] [опц] Спан source.find_textbook показывает цепочку источников и решение license_check
 - [ ] [МВП] Сценарий «материалов по теме нет вообще» → узел `source_failed`: сообщение пользователю, предложение upload, завершение сессии (В-3)
 - [ ] [МВП] Plan B: демо-сценарий `schoolchild_grade6_geography` работает на **локальных PDF из Downloads без авто-поиска** (В-2)
+- [ ] [опц] **Сканированный учебник** (кейс «нет текстового слоя»): `detect_text_layer` → агент просит страницы+тему → OCR **только указанных страниц** (буфер `OCR_PAGE_BUFFER` + оффсет) → `validate_topic_in_text` → чанки → квиз; «не знаю» → повторный запрос (≤ `OCR_MAX_ATTEMPTS`), затем «все»/отмена (3.2, 5.3, 2.2)
 
 ### Этап 4 — Тьюторинг-цикл (квиз, объяснения, оценка) · ~1.5 недели
 **Задачи:** генерация вопросов (дешёвая — простые, TUTOR_MODEL — сложные) с учётом класса (`grade_prompt`, Ж-3) и curriculum; оценка ответов (пре-оценка простоты: rule-based judge-lite → дешёвая → fallback TUTOR_MODEL, В-2; финальная оценка EXPERT_MODEL); объяснение ошибок с цитатой; **`update_knowledge_map` (Ж-6)**; адаптивная сложность; anti-repeat; **судья по трём контрактам (К-4)**.

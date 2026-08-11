@@ -43,6 +43,7 @@ class DocChunk(BaseModel):
     source: str = ""
     subject: Optional[str] = None
     grade: Optional[str] = None
+    page_number: Optional[str] = None  # напечатанный номер страницы скана (если определён)
 
     def metadata(self) -> Dict[str, Any]:
         meta = {"source": self.source}
@@ -54,6 +55,8 @@ class DocChunk(BaseModel):
             meta["subject"] = self.subject
         if self.grade:
             meta["grade"] = self.grade
+        if self.page_number:
+            meta["page_number"] = self.page_number
         return meta
 
 
@@ -185,46 +188,85 @@ def make_embedder(settings: Any = None) -> Embedder:
 # ----------------------------------------------------------------------
 # Чанкинг
 # ----------------------------------------------------------------------
-_SECTION_RE = re.compile(r"^(?:параграф|§|глава|раздел)\s*(\d{1,3})[.\s:-]*([^\n]*)", re.IGNORECASE)
+_SECTION_RE = re.compile(
+    r"^(?:параграф|§|глава|раздел|урок|module|unit|lesson)\s*(\d{1,3})[.\s:-]*([^\n]*)",
+    re.IGNORECASE,
+)
+# Капитализированная подпись секции для префикса чанка «Урок N: название»
+_LABEL_CAP = {
+    "параграф": "Параграф", "§": "Параграф", "глава": "Глава", "раздел": "Раздел",
+    "урок": "Урок", "module": "Module", "unit": "Unit", "lesson": "Lesson",
+}
+
+
+def _label_of(line: str) -> str:
+    """Определяет тип заголовка по началу строки («урок», «module», …)."""
+    for label in ("урок", "module", "unit", "lesson", "параграф", "глава", "раздел", "§"):
+        if line.lower().startswith(label):
+            return label
+    return "параграф"
 
 
 def clean_pdf_text(text: str) -> str:
-    """Очистка текста PDF (из geo_tutor pdf_processor): переносы, колонтитулы, пробелы."""
+    """Очистка текста PDF (из geo_tutor pdf_processor): переносы, колонтитулы, пробелы.
+
+    Дополнительно:
+    - удаляет CID-артефакты встроенных шрифтов `(cid:NN)`;
+    - сохраняет заголовки секций («Урок N», «Параграф N», Module/Unit/Lesson)
+      отдельными строками — чтобы extract_sections их находил.
+    """
     if not text:
         return ""
     # дефисные переносы слов (конец строки)
     text = re.sub(r"-\s*\n", "", text)
     # мягкие переносы
     text = re.sub(r"\u00ad", "", text)
-    # объединяем строки абзацев (одиночные переводы строк)
-    text = re.sub(r"(?<!\n)\n(?!\n)", " ", text)
+    # CID-артефакты (шрифты без ToUnicode)
+    text = re.sub(r"\(cid:\d+\)", "", text)
+    # склеиваем строки внутри абзацев, заголовки секций — отдельной строкой
+    paragraphs = re.split(r"\n\s*\n", text)
+    out: List[str] = []
+    for para in paragraphs:
+        lines = [l.strip() for l in para.split("\n") if l.strip()]
+        if not lines:
+            continue
+        first = lines[0]
+        if _SECTION_RE.match(first) and len(first) < 200:
+            out.append(first)
+            rest = " ".join(lines[1:]).strip()
+            if rest:
+                out.append(rest)
+        else:
+            out.append(" ".join(lines))
+    text = "\n".join(out)
     # множественные пробелы → один
     text = re.sub(r"[ \t]+", " ", text)
     return text.strip()
 
 
-def extract_sections(text: str) -> List[tuple[str, str, str]]:
-    """Детекция параграфов: (номер, заголовок, контент).
+def extract_sections(text: str) -> List[tuple[str, str, str, str]]:
+    """Детекция секций: (тип, номер, заголовок, контент).
 
-    Разбивает текст по заголовкам «Параграф N. Название» / «§N. Название».
-    Если заголовков нет — возвращает пустой список.
+    Разбивает текст по заголовкам «Параграф N. Название» / «§N. Название» /
+    «Урок N. Название» / «Module/Unit/Lesson N». Если заголовков нет —
+    возвращает пустой список.
     """
     lines = text.split("\n")
-    sections: List[tuple[str, str, List[str]]] = []
-    current: Optional[tuple[str, str, List[str]]] = None
+    sections: List[tuple[str, str, str, List[str]]] = []
+    current: Optional[tuple[str, str, str, List[str]]] = None
     for line in lines:
         stripped = line.strip()
         m = _SECTION_RE.match(stripped)
         if m and len(stripped) < 200:
             if current:
                 sections.append(current)
-            current = (m.group(1), m.group(2).strip(), [])
+            current = (_label_of(stripped), m.group(1), m.group(2).strip(), [])
             continue
         if current is not None:
-            current[2].append(line)
+            current[3].append(line)
     if current:
         sections.append(current)
-    return [(num, title or "", "\n".join(content).strip()) for num, title, content in sections]
+    return [(label, num, title or "", "\n".join(content).strip()) for label, num, title, content in sections]
 
 
 def _split_long(text: str, max_chars: int = MAX_CHUNK_CHARS) -> List[str]:
@@ -270,10 +312,11 @@ def _make_chunks(text: str, source: str, subject: Optional[str], grade: Optional
             idx += 1
         return chunks
 
-    for num, title, content in sections:
-        prefix = f"Параграф {num}" + (f": {title}" if title else "")
+    for label, num, title, content in sections:
+        cap = _LABEL_CAP.get(label, "Параграф")
+        prefix = f"{cap} {num}" + (f": {title}" if title else "")
         if not content:
-            chunks.append(_chunk(idx, prefix + "\n(пустой параграф)", source, subject, grade, num, title))
+            chunks.append(_chunk(idx, prefix + f"\n(пустой {label})", source, subject, grade, num, title))
             idx += 1
             continue
         paragraphs = [p.strip() for p in re.split(r"\n\s*\n", content) if p.strip()]
@@ -299,6 +342,7 @@ def _chunk(
     grade: Optional[str],
     section_number: Optional[str] = None,
     section_title: Optional[str] = None,
+    page_number: Optional[str] = None,
 ) -> DocChunk:
     digest = hashlib.md5(f"{source}:{idx}:{text[:40]}".encode("utf-8")).hexdigest()[:12]
     return DocChunk(
@@ -309,6 +353,7 @@ def _chunk(
         source=source,
         subject=subject,
         grade=grade,
+        page_number=page_number,
     )
 
 
@@ -515,7 +560,11 @@ class ChromaStore:
         vec = self.embedder.encode_query(query)
         kwargs: Dict[str, Any] = {"query_embeddings": [vec], "n_results": k}
         if filters:
-            kwargs["where"] = filters
+            if len(filters) == 1:
+                kwargs["where"] = filters
+            else:
+                # ChromaDB: несколько условий требуют явного $and
+                kwargs["where"] = {"$and": [{key: val} for key, val in filters.items()]}
         res = self._collection.query(
             include=["documents", "metadatas", "distances"], **kwargs
         )
@@ -584,3 +633,172 @@ def process_document(
         "num_chunks": len(chunks),
         "collection": getattr(store, "collection_name", "numpy"),
     }
+
+
+# ----------------------------------------------------------------------
+# OCR сканированных учебников (3.2)
+# ----------------------------------------------------------------------
+def detect_text_layer(text: str, min_chars: Optional[int] = None) -> bool:
+    """True — «скан»: извлечённого текста практически нет (нет текстового слоя).
+
+    Порог: OCR_MIN_TEXT_CHARS (по умолчанию 100 символов на весь документ).
+    """
+    s = default_settings
+    threshold = min_chars if min_chars is not None else s.OCR_MIN_TEXT_CHARS
+    cleaned = clean_pdf_text(text or "")
+    return len(cleaned.strip()) < threshold
+
+
+def _extract_printed_number(ocr_items: List[Any]) -> Optional[int]:
+    """Best-effort: напечатанный номер страницы из нижней полосы OCR-результата.
+
+    ocr_items — список (bbox, text, conf); bbox EasyOCR — 4 точки [[x,y]...]
+    (допустим и плоский [x1,y1,x2,y2]). Номера обычно внизу страницы.
+    """
+    if not ocr_items:
+        return None
+
+    def _ys(bbox) -> tuple:
+        try:
+            if bbox and isinstance(bbox[0], (list, tuple)):
+                return min(p[1] for p in bbox), max(p[1] for p in bbox)
+            return bbox[1], bbox[3]
+        except Exception:
+            return (0, 0)
+
+    parsed = []
+    for item in ocr_items:
+        try:
+            top, bottom = _ys(item[0])
+        except Exception:
+            continue
+        parsed.append((top, bottom, str(item[1]).strip()))
+    if not parsed:
+        return None
+    h_max = max(bottom for _, bottom, _ in parsed)
+    bottom_candidates = []
+    for top, bottom, text in parsed:
+        y_center = (top + bottom) / 2.0
+        if h_max > 0 and y_center > h_max * 0.85:
+            for n in re.findall(r"\d{1,4}", text):
+                bottom_candidates.append(int(n))
+    if not bottom_candidates:
+        return None
+    return max(bottom_candidates)
+
+
+def _consistent_offset(page_numbers: Dict[int, Optional[int]]) -> Optional[int]:
+    """Согласованный оффсет: напечатанный − физический, если повторяется ≥2 раз."""
+    offsets: Dict[int, int] = {}
+    for physical, printed in page_numbers.items():
+        if printed is None:
+            continue
+        off = printed - physical
+        offsets[off] = offsets.get(off, 0) + 1
+    if not offsets:
+        return None
+    best = max(offsets, key=offsets.get)
+    if offsets[best] >= 2:
+        return best
+    return None
+
+
+_ocr_reader = None
+
+
+def _get_ocr_reader(langs: tuple) -> Any:
+    """Кэшированный EasyOCR Reader (тяжёлая загрузка моделей — один раз)."""
+    global _ocr_reader
+    if _ocr_reader is None:
+        import easyocr  # noqa: WPS433
+
+        _ocr_reader = easyocr.Reader(list(langs))
+    return _ocr_reader
+
+
+def ocr_pages(
+    pdf_path: Path,
+    page_range: tuple,
+    langs: Optional[tuple] = None,
+    detect_numbers: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """EasyOCR по диапазону страниц PDF (3.2).
+
+    page_range: (start, end) — физические страницы, 1-индекс, включительно.
+    Возвращает {'text', 'pages', 'page_numbers', 'offset'}.
+    """
+    from pypdfium2 import PdfDocument  # noqa: WPS433
+
+    langs = langs or tuple(
+        (default_settings.OCR_LANGUAGES or "ru,en").replace(" ", "").split(",")
+    )
+    if default_settings.OCR_DETECT_PAGE_NUMBERS is not None:
+        detect_numbers = (
+            detect_numbers if detect_numbers is not None else default_settings.OCR_DETECT_PAGE_NUMBERS
+        )
+    else:
+        detect_numbers = detect_numbers is not False
+
+    reader = _get_ocr_reader(langs)
+    start, end = page_range
+    doc = PdfDocument(str(pdf_path))
+    import numpy as np  # noqa: WPS433
+
+    text_parts: List[str] = []
+    page_numbers: Dict[int, Optional[int]] = {}
+    for phys in range(max(1, start), min(end, len(doc)) + 1):
+        pil_image = doc[phys - 1].render(scale=2.0).to_pil()
+        image = np.array(pil_image)  # easyocr принимает numpy, не PIL
+        items = reader.readtext(image, detail=1, paragraph=False)
+        page_text = " ".join(item[1] for item in items).strip()
+        text_parts.append(page_text)
+        if detect_numbers:
+            page_numbers[phys] = _extract_printed_number(items)
+    return {
+        "text": "\n".join(text_parts),
+        "pages": list(range(start, end + 1)),
+        "page_numbers": page_numbers,
+        "offset": _consistent_offset(page_numbers),
+    }
+
+
+def detect_page_offset(pdf_path: Path, sample: tuple = (2, 4), langs: Optional[tuple] = None) -> Optional[int]:
+    """Best-effort: смещение напечатанного номера относительно индекса PDF (3.2).
+
+    OCR-пробу нескольких страниц → согласованный оффсет или None.
+    """
+    try:
+        result = ocr_pages(pdf_path, sample, langs=langs, detect_numbers=True)
+    except Exception as e:  # OCR может быть недоступен
+        logger.warning("detect_page_offset: OCR недоступен (%s)", e)
+        return None
+    return result.get("offset")
+
+
+def validate_topic_in_text(topic: str, text: str) -> bool:
+    """Перекрёстная проверка: ключевые слова темы в OCR-тексте (3.2).
+
+    Учитывает склонения: совпадение по стебу (первые ≥4 символов) со словами текста.
+    """
+    if not topic:
+        return True  # темы нет — пропускаем проверку
+    words = [w for w in re.findall(r"[а-яёa-z]{3,}", topic.lower())]
+    if not words:
+        return True
+    hay = text.lower()
+    hay_words = set(re.findall(r"[а-яёa-z]{3,}", hay))
+    for w in words:
+        if w in hay:
+            return True
+        stem = w[:4]
+        if any(hw.startswith(stem) for hw in hay_words):
+            return True
+    return False
+
+
+def pdf_page_count(path: Path) -> int:
+    """Число страниц PDF (быстро, pypdfium2)."""
+    from pypdfium2 import PdfDocument  # noqa: WPS433
+
+    with PdfDocument(str(path)) as doc:
+        return len(doc)

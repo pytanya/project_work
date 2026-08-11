@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -24,7 +25,16 @@ from .config import settings as default_settings
 from .curriculum import grade_curriculum
 from .intake import INTAKE_QUESTIONS, CHECKLIST_ORDER, apply_answer, compute_missing, validate_intake
 from .judge import judge_evaluation
-from .knowledge import Embedder, VectorStore, _make_chunks, make_embedder, make_store, process_document
+from .knowledge import (
+    Embedder,
+    VectorStore,
+    _make_chunks,
+    detect_text_layer,
+    make_embedder,
+    make_store,
+    parse_document,
+    process_document,
+)
 from .states import TutorState
 
 logger = logging.getLogger("edututor.graph")
@@ -33,6 +43,8 @@ NODE_SOURCE_ENTRY = "source_entry"
 NODE_PROCESS_DOCUMENT = "process_document"
 NODE_FIND_TEXTBOOK = "find_textbook"
 NODE_SOURCE_FAILED = "source_failed"
+NODE_ASK_PAGE_RANGE = "ask_page_range"
+NODE_HANDLE_DOC_PAGES = "handle_doc_pages"
 NODE_TUTOR_NEXT = "tutor_next"
 NODE_GENERATE_QUESTION = "generate_question"
 NODE_EVALUATE_ANSWER = "evaluate_answer"
@@ -64,14 +76,21 @@ def make_graph_deps(settings: Any = None) -> GraphDeps:
     return GraphDeps(embedder=embedder, store=store, settings=s)
 
 
-def _rag_context(store: VectorStore, query: str, state: TutorState, k: int = 3) -> List[str]:
+def _rag_chunks(store: VectorStore, query: str, state: TutorState, k: int = 3) -> List[Any]:
+    """RAG-поиск с метаданными (нужно для section/параграфа в экспорте)."""
+    from .knowledge import SearchResult
+
     filters: Dict[str, Any] = {}
     if state.subject:
         filters["subject"] = state.subject
     if state.grade:
         filters["grade"] = state.grade
-    results = store.search(query, k=k, filters=filters or None)
-    return [r.chunk.text for r in results]
+    results: List[SearchResult] = store.search(query, k=k, filters=filters or None)
+    return results
+
+
+def _rag_context(store: VectorStore, query: str, state: TutorState, k: int = 3) -> List[str]:
+    return [r.chunk.text for r in _rag_chunks(store, query, state, k)]
 
 
 def _emit(deps: GraphDeps, event: str, **data: Any) -> None:
@@ -155,11 +174,26 @@ def route_source(state: TutorState) -> str:
 
 def process_document_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     st = state.model_copy(deep=True)
+    if st.textbook_scanned:
+        # уже знаем, что это скан — ждём/обрабатываем страницы в других узлах
+        return st.model_dump()
     if not st.textbook_file:
         return {"source_status": "failed", "source_note": "no file"}
     path = Path(st.textbook_file)
     _emit(deps, "source.progress", stage="index", url="", status="indexing",
           message=f"Разбор документа {path.name}…")
+    text = parse_document(path)
+
+    if detect_text_layer(text, min_chars=deps.settings.OCR_MIN_TEXT_CHARS):
+        st.textbook_scanned = True
+        st.agent_question = (
+            "Учебник сканированный (без текста). Открой учебник и укажи страницы нужной "
+            "темы и саму тему (например: 12-15, Атмосфера). Или напиши «все» для полного распознавания."
+        )
+        st.agent_message = "Файл не содержит текстового слоя — распознаю по страницам."
+        _emit(deps, "system", message=st.agent_message, kind="doc.scanned")
+        return st.model_dump()
+
     stats = process_document(
         path, source=path.name, store=deps.store, subject=st.subject, grade=st.grade
     )
@@ -170,6 +204,114 @@ def process_document_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     _emit(deps, "source.progress", stage="index", url="", status="done",
           message=st.source_note)
     return st.model_dump()
+
+
+def route_doc_result(state: TutorState) -> str:
+    """Маршрут после process_document: скан → запрос страниц / обработка; иначе квиз."""
+    if not state.textbook_scanned:
+        return NODE_TUTOR_NEXT
+    if state.textbook_pages is None and state.pending_answer is not None:
+        return NODE_HANDLE_DOC_PAGES
+    return NODE_ASK_PAGE_RANGE
+
+
+def ask_page_range_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
+    """Узел «открой учебник и назови страницы + тему» (цикл убеждения, 3.2)."""
+    st = state.model_copy(deep=True)
+    if st.textbook_pages is not None:
+        return st.model_dump()
+    if st.doc_pages_attempts >= deps.settings.OCR_MAX_ATTEMPTS:
+        st.agent_question = "Напиши «все» для полного распознавания (долго) или «отмена»."
+        st.agent_message = "Не удалось получить страницы. Полный OCR может занять много времени."
+    else:
+        st.agent_question = (
+            "Пожалуйста, открой учебник и посмотри: 1) номера страниц нужной темы, "
+            "2) название темы/урока. Ответь, например: «12-15, Атмосфера»."
+        )
+        if not st.agent_message:
+            st.agent_message = "Учебник сканированный — нужны страницы для распознавания."
+    _emit(deps, "intake.question", question=st.agent_question, missing_fields=["textbook_pages"])
+    return st.model_dump()
+
+
+def handle_doc_pages_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
+    """Обработка ответа «страницы + тема»: parse → оффсет/буфер → OCR → валидация → индекс."""
+    from .knowledge import _make_chunks, detect_page_offset, ocr_pages, pdf_page_count, validate_topic_in_text
+    from .nlp import parse_doc_request
+
+    st = state.model_copy(deep=True)
+    answer = (st.pending_answer or "").strip()
+    st.pending_answer = None
+
+    if answer.lower() in ("отмена", "cancel", "не надо"):
+        st.session_status = "failed"
+        st.agent_message = "OCR отменён. Можешь загрузить учебник с текстом или выбрать источник."
+        return st.model_dump()
+
+    path = Path(st.textbook_file)
+    num_pages = pdf_page_count(path)
+    req = parse_doc_request(answer, num_pages)
+
+    if not req.ok:
+        st.doc_pages_attempts += 1
+        st.agent_message = None
+        return st.model_dump()  # ask_page_range_node переспросит (с учётом attempts)
+
+    # диапазон страниц
+    if req.all_pages:
+        phys_start, phys_end = 1, num_pages
+    else:
+        offset = st.page_offset
+        if offset is None:
+            offset = detect_page_offset(path) if deps.settings.OCR_DETECT_PAGE_NUMBERS else None
+            st.page_offset = offset or 0
+        buffer = deps.settings.OCR_PAGE_BUFFER
+        phys_start = max(1, req.pages[0] - (offset or 0) - buffer)
+        phys_end = min(num_pages, req.pages[1] - (offset or 0) + buffer)
+    if phys_end - phys_start + 1 > deps.settings.OCR_MAX_PAGES:
+        phys_end = phys_start + deps.settings.OCR_MAX_PAGES - 1
+
+    st.agent_message = f"Распознаю страницы {phys_start}-{phys_end}…"
+    _emit(deps, "source.progress", stage="ocr", url="", status="indexing",
+          message=st.agent_message)
+    ocr = ocr_pages(path, (phys_start, phys_end))
+    text = ocr["text"]
+
+    if req.topic and not validate_topic_in_text(req.topic, text):
+        st.doc_pages_attempts += 1
+        st.agent_question = (
+            f"В страницах {phys_start}-{phys_end} не нашёл тему «{req.topic}». "
+            "Возможно, страницы указаны неверно. Уточни страницы и тему, пожалуйста."
+        )
+        st.agent_message = None
+        return st.model_dump()
+
+    chunks = _make_chunks(text, source=path.name, subject=st.subject, grade=st.grade)
+    offset = st.page_offset or 0
+    printed_start = phys_start + offset
+    printed_end = phys_end + offset
+    for chunk in chunks:
+        chunk.page_number = f"{printed_start}-{printed_end}"
+    deps.store.add(chunks)
+
+    st.collection_id = "ocr"
+    st.source_status = "ready"
+    st.sources = [{"type": "ocr", "path": str(path), "pages": [phys_start, phys_end],
+                   "num_chunks": len(chunks), "page_offset": offset}]
+    st.source_note = f"OCR страниц {phys_start}-{phys_end}: {len(chunks)} чанков"
+    st.textbook_pages = answer
+    st.textbook_topic = req.topic
+    st.agent_message = None
+    _emit(deps, "source.progress", stage="ocr", url="", status="done",
+          message=st.source_note)
+    return st.model_dump()
+
+
+def route_after_handle(state: TutorState) -> str:
+    """После обработки страниц: готово → квиз; иначе переспросить (ask_page_range)."""
+    if state.source_status == "ready" or state.textbook_pages is not None:
+        return NODE_TUTOR_NEXT
+    return NODE_ASK_PAGE_RANGE
 
 
 def find_textbook_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
@@ -249,16 +391,34 @@ def route_tutor(state: TutorState) -> str:
 def generate_question_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     st = state.model_copy(deep=True)
     topic = st.topic or st.subject or "общая тема"
-    context = _rag_context(deps.store, topic, st, k=3)
+    chunks = _rag_chunks(deps.store, topic, st, k=3)
+    context = [c.chunk.text for c in chunks]
     if not context:
         context = ["Нет контекста по теме."]
     card = tutor_mod.generate_question(
         topic, context, st.difficulty, st, llm_call=deps.tutor_llm
     )
     st.current_question = card
+    st.current_section = chunks[0].chunk.section_number if chunks else None
     st.agent_question = card.question
     st.agent_options = card.options
     # НЕ обнуляем agent_message: там может быть фидбек предыдущей оценки
+    st.records.append({
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "question_id": card.question_id,
+        "question": card.question,
+        "options": card.options,
+        "answer_type": card.answer_type,
+        "difficulty": card.difficulty,
+        "topic": card.topic,
+        "section": st.current_section,
+        "student_answer": None,
+        "score01": None,
+        "correct": None,
+        "feedback": None,
+        "model_used": None,
+        "judge_score": None,
+    })
     _emit(deps, "quiz.card", question_id=card.question_id, question=card.question,
           options=card.options, answer_type=card.answer_type, difficulty=card.difficulty,
           topic=card.topic)
@@ -301,6 +461,17 @@ def evaluate_answer_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     st.agent_message = message
     st.current_question = None
     st.pending_answer = None
+
+    # Экспорт учителю: заполняем запись вопроса оценкой/судьёй
+    if st.records and st.records[-1].get("question_id") == card.question_id:
+        st.records[-1].update({
+            "student_answer": answer,
+            "score01": round(graded.score, 4),
+            "correct": graded.correct,
+            "feedback": graded.feedback,
+            "model_used": graded.model_used,
+            "judge_score": judge_result.avg_score,
+        })
 
     _emit(deps, "tutor.explanation" if not graded.correct else "system",
           message=message, citation=explanation["citation"] if not graded.correct else None)
@@ -345,6 +516,8 @@ def build_graph(deps: Optional[GraphDeps] = None, checkpointer: Any = None) -> A
     g.add_node(NODE_PROCESS_DOCUMENT, lambda s: process_document_node(s, deps))
     g.add_node(NODE_FIND_TEXTBOOK, lambda s: find_textbook_node(s, deps))
     g.add_node(NODE_SOURCE_FAILED, lambda s: source_failed_node(s, deps))
+    g.add_node(NODE_ASK_PAGE_RANGE, lambda s: ask_page_range_node(s, deps))
+    g.add_node(NODE_HANDLE_DOC_PAGES, lambda s: handle_doc_pages_node(s, deps))
     g.add_node(NODE_TUTOR_NEXT, lambda s: {})
     g.add_node(NODE_GENERATE_QUESTION, lambda s: generate_question_node(s, deps))
     g.add_node(NODE_EVALUATE_ANSWER, lambda s: evaluate_answer_node(s, deps))
@@ -362,6 +535,24 @@ def build_graph(deps: Optional[GraphDeps] = None, checkpointer: Any = None) -> A
         },
     )
     g.add_conditional_edges(
+        NODE_PROCESS_DOCUMENT,
+        route_doc_result,
+        {
+            NODE_TUTOR_NEXT: NODE_TUTOR_NEXT,
+            NODE_HANDLE_DOC_PAGES: NODE_HANDLE_DOC_PAGES,
+            NODE_ASK_PAGE_RANGE: NODE_ASK_PAGE_RANGE,
+        },
+    )
+    g.add_conditional_edges(
+        NODE_HANDLE_DOC_PAGES,
+        route_after_handle,
+        {
+            NODE_TUTOR_NEXT: NODE_TUTOR_NEXT,
+            NODE_ASK_PAGE_RANGE: NODE_ASK_PAGE_RANGE,
+        },
+    )
+    g.add_edge(NODE_ASK_PAGE_RANGE, END)
+    g.add_conditional_edges(
         NODE_FIND_TEXTBOOK,
         route_textbook_result,
         {
@@ -370,7 +561,6 @@ def build_graph(deps: Optional[GraphDeps] = None, checkpointer: Any = None) -> A
             NODE_TUTOR_NEXT: NODE_TUTOR_NEXT,
         },
     )
-    g.add_edge(NODE_PROCESS_DOCUMENT, NODE_TUTOR_NEXT)
     g.add_edge(NODE_SOURCE_FAILED, END)
     g.add_conditional_edges(
         NODE_TUTOR_NEXT,

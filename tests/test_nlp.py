@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from src.nlp import classify_intent, extract_entities, ner_empty_rate
+from src.nlp import classify_intent, extract_entities, ner_empty_rate, parse_doc_request
 
 INTENT_DATASET = Path(__file__).resolve().parent.parent / "evals" / "intent_dataset.json"
 
@@ -131,3 +131,38 @@ class TestIntentDataset:
         correct = sum(1 for it in items if classify_intent(it["query"]) == it["intent"])
         accuracy = correct / len(items)
         assert accuracy >= 0.8, f"intent accuracy = {accuracy:.2f} < 0.8"
+
+
+class TestParseDocRequest:
+    """Разбор ответа «страницы + тема» для OCR скана (3.2)."""
+
+    def test_range_and_topic(self):
+        req = parse_doc_request("12-15, Атмосфера", num_pages=100)
+        assert req.ok is True
+        assert req.pages == (12, 15)
+        assert req.topic == "Атмосфера"
+
+    def test_ru_range_formats(self):
+        assert parse_doc_request("стр. 12–15", num_pages=100).pages == (12, 15)
+        assert parse_doc_request("с 12 по 15", num_pages=100).pages == (12, 15)
+        assert parse_doc_request("12,13,14,15", num_pages=100).pages == (12, 15)
+
+    def test_single_page(self):
+        assert parse_doc_request("стр 5", num_pages=100).pages == (5, 5)
+
+    def test_all_pages(self):
+        req = parse_doc_request("все", num_pages=100)
+        assert req.all_pages is True
+
+    def test_lesson_with_topic(self):
+        req = parse_doc_request("урок 3 про Родину", num_pages=100)
+        assert req.lesson == "3"
+        assert req.topic is not None
+
+    def test_clamp_to_num_pages(self):
+        assert parse_doc_request("90-120", num_pages=96).pages == (90, 96)
+
+    def test_invalid_range(self):
+        assert parse_doc_request("20-10", num_pages=100).pages is None
+        assert parse_doc_request("", num_pages=100).ok is False
+        assert parse_doc_request("не знаю", num_pages=100).ok is False

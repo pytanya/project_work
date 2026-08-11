@@ -208,3 +208,132 @@ def ner_empty_rate(queries: List[str]) -> float:
         return 0.0
     empty = sum(1 for q in queries if extract_entities(q).has_empty())
     return round(empty / len(queries), 4)
+
+
+# ----------------------------------------------------------------------
+# Запрос страниц сканированного учебника (3.2)
+# ----------------------------------------------------------------------
+@dataclass
+class DocRequest:
+    """Результат разбора ответа «страницы + тема» для OCR.
+
+    pages: (start, end) — физические страницы PDF (1-индекс), или None.
+    all_pages: True — «все» (полный OCR).
+    topic: тема/урок от ученика (для validate_topic_in_text), или None.
+    """
+
+    pages: Optional[tuple] = None
+    all_pages: bool = False
+    topic: Optional[str] = None
+    lesson: Optional[str] = None
+
+    @property
+    def ok(self) -> bool:
+        return self.all_pages or self.pages is not None
+
+
+_PAGE_RANGE_RE = re.compile(r"(\d{1,4})\s*[-–—]\s*(\d{1,4})")
+_PAGE_SINGLE_RE = re.compile(r"(\d{1,4})")
+_PAGE_LIST_RE = re.compile(r"(\d{1,4})\s*[,;]\s*(\d{1,4})")
+_PAGE_BY_RE = re.compile(r"(\d{1,4})\s*(?:по|до|по-)\s*(\d{1,4})", re.IGNORECASE)
+_ALL_RE = re.compile(r"\b(все|весь учебник|вся|всё)\b", re.IGNORECASE)
+_LESSON_RE = re.compile(r"\b(?:урок|lesson|юнит|unit|модуль|module)\s*(\d{1,3})\b", re.IGNORECASE)
+# «мусорные» слова, которые не являются темой
+_NOISE = {"стр", "страниц", "страница", "страницы", "с", "по", "и", "то", "это", "учебник", "урок", "все", "напечатай"}
+
+
+def parse_doc_request(answer: str, num_pages: int) -> DocRequest:
+    """Разбор ответа ученика: «12-15, Атмосфера», «стр. 12–15», «с 12 по 15»,
+    «12,13,14», «урок 3 про Родину», «все».
+
+    Возвращает DocRequest. pages клампится в 1..num_pages; если диапазон
+    некорректен (start>end, за границами) — pages=None.
+    """
+    text = (answer or "").strip()
+    if not text:
+        return DocRequest()
+
+    req = DocRequest()
+
+    # «все» — полный OCR
+    if _ALL_RE.search(text):
+        req.all_pages = True
+
+    # урок N → lesson (страницы неизвестны без оглавления)
+    lesson_m = _LESSON_RE.search(text)
+    if lesson_m:
+        req.lesson = lesson_m.group(1)
+
+    # диапазон "12-15" / "12–15" / "с 12 по 15" / "от 12 до 15"
+    m = _PAGE_RANGE_RE.search(text)
+    if m:
+        start, end = int(m.group(1)), int(m.group(2))
+        req.pages = _clamp_range(start, end, num_pages)
+    else:
+        m_by = _PAGE_BY_RE.search(text)
+        if m_by:
+            req.pages = _clamp_range(int(m_by.group(1)), int(m_by.group(2)), num_pages)
+        else:
+            # список "12,13,14,15" — берём min..max всех чисел
+            if "," in text or ";" in text:
+                nums = sorted(int(x) for x in _PAGE_SINGLE_RE.findall(text))
+                if nums:
+                    req.pages = _clamp_range(nums[0], nums[-1], num_pages)
+            else:
+                # одно число "12"
+                m3 = _PAGE_SINGLE_RE.search(text)
+                if m3 and not req.all_pages:
+                    n = int(m3.group(1))
+                    req.pages = _clamp_range(n, n, num_pages)
+
+    # тема: остаток после диапазона/«все»
+    topic = _extract_topic(text)
+    if topic and not _is_noise(topic):
+        req.topic = topic
+
+    return req
+
+
+def _clamp_range(start: int, end: int, num_pages: int) -> Optional[tuple]:
+    if start <= 0 or start > end:
+        return None
+    if num_pages and num_pages > 0:
+        end = min(end, num_pages)
+        start = min(start, num_pages)
+        if start > end:
+            return None
+    return (start, end)
+
+
+def _extract_topic(text: str) -> Optional[str]:
+    """Тема после разделителя (запятая, точка с запятой, «тема/про»)."""
+    lowered = text.lower()
+    for sep in [",", ";", "—", "–", "-", "("]:
+        if sep in text:
+            parts = text.split(sep)
+            # берём часть, которая не является только числами/номерами
+            for part in parts:
+                candidate = part.strip(" ()[]{}\"»«")
+                if not candidate:
+                    continue
+                if _PAGE_RANGE_RE.search(candidate) or _PAGE_SINGLE_RE.fullmatch(candidate.strip()):
+                    continue
+                if _is_noise(candidate):
+                    continue
+                if len(candidate) >= 2:
+                    return candidate
+    # «урок N про X» / «по теме X» / «тема X»
+    m = re.search(r"(?:по теме|тема|про|на тему)\s+([^\s,;()]{2,}(?:\s+[^\s,;()]{1,40}){0,6})", lowered, re.IGNORECASE)
+    if m:
+        return m.group(1).strip().strip(".,;")
+    # урок N с названием
+    if _LESSON_RE.search(text):
+        m2 = re.search(r"урок\s*\d+\s+[\"«]?(.+?)[\"»]?$", lowered)
+        if m2 and m2.group(1).strip():
+            return m2.group(1).strip()
+    return None
+
+
+def _is_noise(word: str) -> bool:
+    w = word.strip(".,;:()[]{}«»\"' —–-").lower()
+    return w in _NOISE or not any(ch.isalpha() for ch in w) or w in ("стр", "с", "по", "и", "то")

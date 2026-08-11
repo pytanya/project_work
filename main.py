@@ -75,6 +75,10 @@ def _invoke(graph, state_dict):
 
 def _demo_auto_answer(current: TutorState, scenario: Dict) -> str:
     """Ответы для --auto: сначала чек-лист, затем квиз."""
+    # сканированный учебник: ждём страницы + тему (auto: контентные страницы после обложки)
+    if current.textbook_scanned and not current.textbook_pages:
+        topic = current.topic or current.subject or "тема"
+        return f"5-7, {topic}"
     field = current.intake_field
     if field:
         # ищем ответ в intake_answers сценария, иначе универсальный
@@ -104,15 +108,19 @@ def run(cli_args) -> int:
     state = TutorState(
         num_questions=cli_args.questions or scenario.get("num_questions", 3),
         learner_type=scenario.get("learner_type"),
-        grade=scenario.get("grade"),
-        subject=scenario.get("subject"),
-        topic=scenario.get("topic"),
+        grade=cli_args.grade or scenario.get("grade"),
+        subject=cli_args.subject or scenario.get("subject"),
+        topic=cli_args.topic or scenario.get("topic"),
         mode=scenario.get("mode"),
         has_textbook=scenario.get("has_textbook"),
         textbook_author=scenario.get("textbook_author"),
     )
-    textbook_file = scenario.get("textbook_file")
-    if textbook_file == "auto:downloads" and not cli_args.mock:
+    textbook_file = cli_args.file or scenario.get("textbook_file")
+    if textbook_file and not textbook_file.startswith("auto"):
+        state.textbook_file = str(textbook_file)
+        state.has_textbook = True
+        print_panel("Источник", f"Файл: {Path(textbook_file).name}", "ok")
+    elif textbook_file == "auto:downloads" and not cli_args.mock:
         from src.source_finder import find_local_textbooks
 
         local = find_local_textbooks(default_settings, subject=scenario.get("subject"), author=scenario.get("textbook_author"))
@@ -176,6 +184,19 @@ def run(cli_args) -> int:
         ),
         "metric",
     )
+
+    # Экспорт для учителя (CSV: вопросы + сводка)
+    try:
+        from src.export import write_session_exports
+
+        files = write_session_exports(
+            res, session_id=run_info["session_id"],
+            total_cost_usd=metrics.total_cost, elapsed_sec=metrics.elapsed_sec,
+        )
+        print_panel("Экспорт для учителя", f"Вопросы: {files['questions']}\nСводка: {files['summary']}", "ok")
+    except Exception as e:  # pragma: no cover
+        print_panel("Экспорт", f"Ошибка экспорта: {e}", "err")
+
     run_info["step_logger"].close()
     return 0
 
@@ -187,6 +208,10 @@ def main() -> int:
     parser.add_argument("--questions", type=int, default=None, help="число вопросов квиза")
     parser.add_argument("--auto", action="store_true", help="автоответы (без интерактива)")
     parser.add_argument("--mock", action="store_true", help="офлайн-режим (без сети/LLM)")
+    parser.add_argument("--file", type=str, default=None, help="путь к учебнику (PDF/DOCX/TXT)")
+    parser.add_argument("--subject", type=str, default=None, help="переопределить предмет")
+    parser.add_argument("--grade", type=str, default=None, help="переопределить класс")
+    parser.add_argument("--topic", type=str, default=None, help="переопределить тему")
     args = parser.parse_args()
     return run(args)
 

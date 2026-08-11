@@ -12,8 +12,15 @@ from __future__ import annotations
 import json
 from typing import Any, Callable, Dict, List, Optional
 
-from .knowledge import process_document
-from .nlp import classify_intent, extract_entities
+from .knowledge import (
+    detect_page_offset,
+    detect_text_layer,
+    ocr_pages,
+    pdf_page_count,
+    process_document,
+    validate_topic_in_text,
+)
+from .nlp import classify_intent, extract_entities, parse_doc_request
 from .source_finder import (
     crawl_page_js,
     download_file,
@@ -68,6 +75,13 @@ TOOL_FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "classify_intent": classify_intent,
     "extract_entities": extract_entities,
     "save_progress": save_progress,
+    # Сканированные учебники (3.2)
+    "detect_text_layer": detect_text_layer,
+    "parse_doc_request": parse_doc_request,
+    "pdf_page_count": pdf_page_count,
+    "detect_page_offset": detect_page_offset,
+    "validate_topic_in_text": validate_topic_in_text,
+    "ocr_pages": ocr_pages,
 }
 
 

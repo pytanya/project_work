@@ -96,6 +96,7 @@ python evals/edututor_eval.py --mock    # офлайн-режим
 | Векторное хранилище | `VECTOR_STORE=numpy` (портативный, без MSVC); `chroma` (ChromaDB) — после VC++ |
 | Судья (К-4) | Gemini на RouterAI (без VPN); OpenRouter для судьи не используется |
 | Источники (К-2) | Только легальные: локальные PDF (Plan B), Викиучебник, открытые страницы; капчу не обходим |
+| Сканы (3.2) | `detect_text_layer` → агент просит **страницы + тему** → OCR **только их** (`ocr_pages`, ru+en) с буфером `OCR_PAGE_BUFFER` и автодетекцией смещения номера; валидация темы; CPU-OCR медленный — поэтому только нужные страницы |
 | Дешёвые роли (В-2) | `CHEAP_MODEL=google/gemma-3-4b-it` на RouterAI; при отказе — fallback TUTOR_MODEL |
 
 ## Структура

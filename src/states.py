@@ -38,6 +38,13 @@ class IntakeState(BaseModel):
     intake_no_progress_streak: int = 0
     missing_fields: List[str] = Field(default_factory=list)
 
+    # --- Сканированный учебник (3.2) ---
+    textbook_scanned: bool = False
+    textbook_pages: Optional[str] = None
+    textbook_topic: Optional[str] = None
+    doc_pages_attempts: int = 0
+    page_offset: Optional[int] = None
+
 
 class TutorState(IntakeState):
     """Полное состояние графа агента (intake → источник → тьюторинг)."""
@@ -55,11 +62,14 @@ class TutorState(IntakeState):
     knowledge_map: Dict[str, float] = Field(default_factory=dict)
     asked_questions: List[str] = Field(default_factory=list)
     current_question: Optional[QuizCard] = None
+    current_section: Optional[str] = None
     correct_count: int = 0
     answered_count: int = 0
     correct_streak: int = 0
     wrong_streak: int = 0
     total_llm_calls: int = 0
+    # Лог вопросов сессии для экспорта учителю (вопрос→ответ→оценка→судья)
+    records: List[Dict[str, Any]] = Field(default_factory=list)
 
     # --- Сессия ---
     session_status: Optional[Literal["active", "completed", "failed"]] = None

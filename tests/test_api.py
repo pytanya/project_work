@@ -56,6 +56,7 @@ def client(make_settings, tmp_path):
         FGOS_REFERENCE_DIR=str(BASE_DIR / "data" / "fgos_reference"),
         TEXTBOOKS_DOWNLOADS_DIR=str(tmp_path / "downloads"),
         MAX_INTAKE_ITERATIONS=8,
+        OCR_MIN_TEXT_CHARS=20,
     )
     embedder = FakeEmbedder()
     store = NumpyVectorStore("api", embedder)
@@ -158,6 +159,16 @@ class TestUpload:
         r = client.post(f"/api/sessions/{sid}/upload", files=files)
         assert r.json()["ok"] is False
 
+    def test_upload_scanned_detected(self, client):
+        sid = _new_session(client, num_questions=1)
+        for answer in ["студент", "физика", "да", "квиз"]:
+            client.post(f"/api/sessions/{sid}/intake", json={"answer": answer})
+        # очень короткий текст (< OCR_MIN_TEXT_CHARS) → «скан»
+        files = {"file": ("scan.txt", b"abcd", "text/plain")}
+        r = client.post(f"/api/sessions/{sid}/upload", files=files)
+        assert r.status_code == 200
+        assert r.json()["scanned"] is True
+
 
 class TestFindTextbook:
     def test_find_textbook_mock(self, client):
@@ -178,6 +189,29 @@ class TestCancel:
         r = client.post(f"/api/sessions/{sid}/cancel")
         assert r.status_code == 200
         assert r.json()["status"] == "cancelled"
+
+
+class TestExport:
+    def test_export_csv(self, client):
+        sid = _new_session(client, num_questions=1, sources=[{"type": "web", "url": "x"}], collection_id="web")
+        for answer in ["студент", "физика", "нет", "квиз"]:
+            client.post(f"/api/sessions/{sid}/intake", json={"answer": answer})
+        client.post(f"/api/sessions/{sid}/message", json={"text": "Атмосфера — воздушная оболочка Земли."})
+
+        r = client.get(f"/api/sessions/{sid}/export")
+        assert r.status_code == 200
+        assert "text/csv" in r.headers["content-type"]
+        text = r.content.decode("utf-8-sig")
+        assert "session_id" in text
+        assert "question" in text
+        assert sid in text
+        assert "Что такое атмосфера?" in text  # из mock _GEN
+
+    def test_export_empty_ok(self, client):
+        sid = _new_session(client)
+        r = client.get(f"/api/sessions/{sid}/export")
+        assert r.status_code == 200
+        assert "session_id" in r.content.decode("utf-8-sig")
 
 
 class TestWebSocket:

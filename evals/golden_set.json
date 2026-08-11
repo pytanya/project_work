@@ -50,6 +50,20 @@
       "num_questions": 1,
       "intake_answers": ["студент", "сверхредкийпредмет", "нет", "квиз"],
       "expected": {"intake_success": true, "source_failed": true}
+    },
+    {
+      "id": "schoolchild_grade4_opk",
+      "description": "Школьник 4 класс, «Основы православной культуры» (Кураев), урок 1",
+      "learner_type": "schoolchild",
+      "grade": "4",
+      "subject": "основы православной культуры",
+      "topic": "Россия — наша Родина",
+      "mode": "quiz",
+      "has_textbook": true,
+      "num_questions": 3,
+      "textbook_file": "C:\\Users\\hppro\\OneDrive\\Рабочий стол\\учебники\\основы светской этики\\kuraev-osnovy-pravoslavnoy-kultury-uchebnik-dly-chetvertogo-klassa.pdf",
+      "intake_answers": ["ученик 4 класса", "4"],
+      "expected": {"intake_success": true, "find_textbook_success": true}
     }
   ]
 }
