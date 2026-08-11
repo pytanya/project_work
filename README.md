@@ -69,6 +69,17 @@ python main.py --scenario schoolchild_grade6_geography --mock
 Сценарии описаны в [`evals/golden_set.json`](evals/golden_set.json):
 `schoolchild_grade6_geography`, `student_with_pdf`, `student_no_textbook`, `no_materials`.
 
+## API (FastAPI + WebSocket, раздел 8) и UI (React, раздел 9)
+
+```bash
+uvicorn api.app:app --host 0.0.0.0 --port 8000   # API: http://127.0.0.1:8000/docs
+cd frontend && npm install && npm run dev        # UI: http://localhost:5173
+```
+
+REST: сессии, intake, upload, find-textbook, message, cancel, history, health, metrics.
+WS `/api/sessions/{id}/ws`: `intake.question`, `source.progress`, `quiz.card`,
+`tutor.explanation`, `tutor.summary`, `source.failed`.
+
 ## Тесты и eval
 
 ```bash
