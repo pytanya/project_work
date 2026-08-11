@@ -62,10 +62,11 @@ def _build_deps(metrics: MetricsCollector, mock: bool) -> GraphDeps:
 
 
 def _make_live_store():
-    from src.knowledge import make_embedder, make_store
+    from src.knowledge import make_collection_name, make_embedder, make_store
 
     embedder = make_embedder(default_settings)
-    store = make_store("edututor_cli", embedder, persist_dir=Path(default_settings.CHROMA_PERSIST_DIR), settings=default_settings)
+    collection = make_collection_name(embedder, prefix="edututor_cli")
+    store = make_store(collection, embedder, persist_dir=Path(default_settings.CHROMA_PERSIST_DIR), settings=default_settings)
     return embedder, store
 
 

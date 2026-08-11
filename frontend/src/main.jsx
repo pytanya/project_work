@@ -1,10 +1,6 @@
-import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.jsx'
 
-createRoot(document.getElementById('root')).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-)
+// Без <StrictMode>: в dev он монтирует эффект дважды и создаёт дубликаты сессий.
+createRoot(document.getElementById('root')).render(<App />)

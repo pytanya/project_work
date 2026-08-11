@@ -5,12 +5,12 @@ import SourceSearchPanel from '../SourceSearchPanel'
 describe('SourceSearchPanel', () => {
   it('показывает статус по умолчанию', () => {
     render(<SourceSearchPanel status={null} note={null} onFind={() => {}} />)
-    expect(screen.getByText(/Источник не найден/)).toBeInTheDocument()
+    expect(screen.getByText(/Источник не выбран/)).toBeInTheDocument()
   })
 
   it('показывает статус и заметку', () => {
     render(<SourceSearchPanel status="ready" note="Собрано 2 источника" onFind={() => {}} />)
-    expect(screen.getByText(/Статус: ready/)).toBeInTheDocument()
+    expect(screen.getByText(/Источник готов/)).toBeInTheDocument()
     expect(screen.getByText('Собрано 2 источника')).toBeInTheDocument()
   })
 

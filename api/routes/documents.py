@@ -56,6 +56,7 @@ async def upload_document(
         "scanned": st.textbook_scanned,
         "num_chunks": st.sources[0].get("num_chunks") if st.sources else None,
         "next_question": st.agent_question or "",
+        "current_question": st.current_question.model_dump() if st.current_question else None,
     }
 
 

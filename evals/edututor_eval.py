@@ -26,7 +26,7 @@ sys.path.insert(0, str(BASE_DIR))
 
 from src.config import settings as default_settings  # noqa: E402
 from src.graph import GraphDeps, build_graph  # noqa: E402
-from src.knowledge import DocChunk, NumpyVectorStore, make_embedder, make_store  # noqa: E402
+from src.knowledge import DocChunk, NumpyVectorStore, make_collection_name, make_embedder, make_store  # noqa: E402
 from src.metrics import MetricsCollector  # noqa: E402
 from src.nlp import classify_intent  # noqa: E402
 from src.source_finder import find_local_textbooks  # noqa: E402
@@ -125,7 +125,8 @@ def _make_live_client(role: str, metrics: MetricsCollector) -> Any:
 def build_live_deps(settings: Any, metrics: MetricsCollector) -> GraphDeps:
     """Реальные зависимости: embedder API/numpy + LLM-клиенты с метриками."""
     embedder = make_embedder(settings)
-    store = make_store("edututor_eval", embedder, persist_dir=None, settings=settings)
+    collection = make_collection_name(embedder, prefix="edututor_eval")
+    store = make_store(collection, embedder, persist_dir=None, settings=settings)
 
     tutor = _make_live_client("tutor", metrics)
     cheap = _make_live_client("cheap", metrics)

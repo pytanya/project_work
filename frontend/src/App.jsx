@@ -19,9 +19,15 @@ function App() {
   const [answer, setAnswer] = useState('')
   const [busy, setBusy] = useState(false)
   const wsRef = useRef(null)
+  const sessionIdRef = useRef(null)
 
   const push = useCallback((kind, text, data) => {
-    setFeed((f) => [...f, { id: `${Date.now()}-${Math.random()}`, kind, text, data }])
+    setFeed((f) => {
+      // Дедуп: первое сообщение приходит дважды (HTTP + WS-реплей) — пропускаем
+      const last = f[f.length - 1]
+      if (last && last.kind === kind && last.text === text) return f
+      return [...f, { id: `${Date.now()}-${Math.random()}`, kind, text, data }]
+    })
   }, [])
 
   const handleEvent = useCallback(
@@ -54,10 +60,12 @@ function App() {
           break
         case 'source.progress':
           setSource({ status: d.status, note: d.message })
+          setCurrent(null) // поиск/OCR идёт — устаревший вопрос прячем
           push('source', d.message)
           break
         case 'source.failed':
           setSource({ status: 'failed', note: d.message })
+          setCurrent(null)
           push('error', d.message)
           break
         case 'system':
@@ -72,6 +80,10 @@ function App() {
     },
     [push],
   )
+
+  useEffect(() => {
+    sessionIdRef.current = sessionId
+  }, [sessionId])
 
   useEffect(() => {
     let cancelled = false
@@ -98,11 +110,42 @@ function App() {
       }
     }
     init()
+    // Удаляем сессию на бэкенде при закрытии вкладки (не копим мусор)
+    const unload = () => {
+      if (sessionIdRef.current) api.deleteSession(sessionIdRef.current)
+    }
+    window.addEventListener('beforeunload', unload)
     return () => {
       cancelled = true
+      window.removeEventListener('beforeunload', unload)
       if (wsRef.current) wsRef.current.close()
     }
   }, [handleEvent, push])
+
+  // resync: подтягиваем актуальное состояние сессии по HTTP (страховка, если WS
+  // отвалился во время долгой обработки — парсинг/индексация > WS-idle)
+  const resync = useCallback(async () => {
+    if (!sessionIdRef.current) return
+    try {
+      const d = await api.getSession(sessionIdRef.current)
+      if (d.current_question) {
+        const q = d.current_question
+        setCurrent({
+          kind: 'quiz', question: q.question, options: q.options, answerType: q.answer_type,
+          topic: q.topic, difficulty: q.difficulty, questionId: q.question_id,
+        })
+      } else if (d.intake_field && d.agent_question) {
+        setCurrent({ kind: 'intake', question: d.agent_question, missingFields: d.missing_fields })
+      } else {
+        setCurrent(null)
+      }
+      setKnowledge(d.knowledge_map || {})
+      setScore({ correct: d.correct_count || 0, total: d.answered_count || 0 })
+      if (d.source_status) setSource({ status: d.source_status, note: d.source_note })
+    } catch (e) {
+      push('error', String(e.message || e))
+    }
+  }, [push])
 
   async function submitAnswer() {
     const text = answer.trim()
@@ -119,6 +162,7 @@ function App() {
       const st = await api.intakeStatus(sessionId)
       setIntake({ missingFields: st.missing_fields, complete: st.complete })
       if (st.complete) setCurrent((c) => (c?.kind === 'intake' ? null : c))
+      await resync()
     } catch (e) {
       push('error', String(e.message || e))
     } finally {
@@ -133,12 +177,16 @@ function App() {
   async function handleUpload(file) {
     if (!sessionId) return
     setBusy(true)
+    setSource({ status: 'indexing', note: `Загружаю «${file.name}»…` })
+    push('system', `Загружаю и индексирую «${file.name}», это может занять 1-2 минуты…`)
     try {
       const r = await api.uploadFile(sessionId, file)
       push('system', `Файл «${r.filename}» ${r.status === 'ready' ? 'проиндексирован' : 'принят'}`)
       if (r.status === 'ready') setSource({ status: 'ready', note: r.note })
+      await resync()
     } catch (e) {
       push('error', String(e.message || e))
+      setSource({ status: 'failed', note: String(e.message || e) })
     } finally {
       setBusy(false)
     }
@@ -149,6 +197,7 @@ function App() {
     setBusy(true)
     try {
       await api.findTextbook(sessionId)
+      await resync()
     } catch (e) {
       push('error', String(e.message || e))
     } finally {
@@ -156,13 +205,25 @@ function App() {
     }
   }
 
+  function handleNewSession() {
+    // закрываем текущую и перезагружаем страницу (создаст свежую сессию)
+    if (sessionIdRef.current) api.deleteSession(sessionIdRef.current)
+    window.location.reload()
+  }
+
   return (
     <div className="app">
       <aside className="sidebar">
-        <h1 className="brand">EduTutor</h1>
+        <div className="brand-row">
+          <h1 className="brand">EduTutor</h1>
+          <button className="btn small" onClick={handleNewSession} title="Создать новую сессию">
+            Новая сессия
+          </button>
+        </div>
+        {sessionId && <div className="session-id">сессия: {sessionId}</div>}
         <ProgressDashboard knowledge={knowledge} correct={score.correct} total={score.total} />
-        <SourceSearchPanel status={source.status} note={source.note} onFind={handleFind} />
-        <FileUpload onUpload={handleUpload} />
+        <SourceSearchPanel status={source.status} note={source.note} onFind={handleFind} busy={busy} />
+        <FileUpload onUpload={handleUpload} busy={busy} />
       </aside>
       <main className="chat">
         <ChatStream feed={feed} />

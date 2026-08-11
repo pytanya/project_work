@@ -26,7 +26,8 @@ from src.states import TutorState
 
 logger = logging.getLogger("edututor.api")
 
-WS_IDLE_TIMEOUT_SEC = 30
+# Idle-таймаут WS: должен переживать длинную обработку (парсинг+индексация ~1-2 мин)
+WS_IDLE_TIMEOUT_SEC = 300
 
 
 @dataclass
@@ -104,7 +105,13 @@ class SessionStore:
 
 
 async def run_step(session: SessionData, answer: Optional[str] = None) -> TutorState:
-    """Один шаг графа в worker-потоке (не блокирует event loop)."""
+    """Один шаг графа в worker-потоке (не блокирует event loop).
+
+    Зависший шаг (> RUN_STEP_TIMEOUT_SEC) прерывается таймаутом — сессия не
+    блокируется, возвращается сообщение об ошибке.
+    """
+    from src.config import settings as cfg_settings
+
     if answer is not None:
         session.state = session.state.model_copy(update={"pending_answer": answer})
     state_dict = session.state.model_dump()
@@ -122,7 +129,18 @@ async def run_step(session: SessionData, answer: Optional[str] = None) -> TutorS
             st.session_status = "failed"
             return st
 
-    session.state = await asyncio.to_thread(_invoke)
+    timeout = float(getattr(cfg_settings, "RUN_STEP_TIMEOUT_SEC", 300.0))
+    try:
+        session.state = await asyncio.wait_for(asyncio.to_thread(_invoke), timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.error("run_step: шаг превысил таймаут %ss (сессия %s)", timeout, session.id)
+        st = session.state.model_copy(deep=True)
+        st.agent_message = (
+            "Операция заняла слишком много времени. Попробуйте загрузить файл поменьше "
+            "или «Найти учебник»."
+        )
+        st.session_status = "failed"
+        session.state = st
     return session.state
 
 

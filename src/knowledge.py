@@ -360,29 +360,47 @@ def _chunk(
 # ----------------------------------------------------------------------
 # Парсинг документов
 # ----------------------------------------------------------------------
+def _parse_pdf_pdfplumber(path: Path) -> str:
+    """Извлечение текста pdfplumber (надёжный рабочий парсер)."""
+    import pdfplumber  # noqa: WPS433
+
+    text_parts: List[str] = []
+    with pdfplumber.open(path) as pdf:
+        for page in pdf.pages:
+            t = page.extract_text() or ""
+            if t:
+                text_parts.append(t)
+    return clean_pdf_text("\n".join(text_parts))
+
+
+def _parse_pdf_docling(path: Path) -> str:
+    """Извлечение текста Docling (структурированный разбор, опция DOCLING_ENABLED).
+
+    Требует скачанных моделей Docling; без них может висеть на загрузке —
+    поэтому используется только при явном DOCLING_ENABLED=true.
+    """
+    from docling.document_converter import DocumentConverter  # noqa: WPS433
+
+    result = DocumentConverter().convert(path)
+    md = getattr(result.document, "export_to_markdown", lambda: "")()
+    return clean_pdf_text(md)
+
+
 def parse_pdf(path: Path) -> str:
-    """Извлечение текста из PDF: Docling → pdfplumber (fallback) → error."""
+    """Извлечение текста из PDF.
+
+    Рабочий парсер — pdfplumber (надёжен, не требует скачивания моделей).
+    Docling (структурированный разбор, спека 3.2) — опция DOCLING_ENABLED=true:
+    его модели скачиваются из HF и в некоторых средах недоступны/медленны,
+    поэтому по умолчанию выключен (pdfplumber обрабатывает любые PDF).
+    """
     path = Path(path)
-    try:
-        from docling.document_converter import DocumentConverter  # noqa: WPS433
-
-        result = DocumentConverter().convert(path)
-        md = getattr(result.document, "export_to_markdown", lambda: "")()
-        return clean_pdf_text(md)
-    except Exception as e:  # docling недоступен/падает (нет MSVC и т.п.)
-        logger.warning("Docling недоступен (%s) — использую pdfplumber", e)
+    if getattr(default_settings, "DOCLING_ENABLED", False):
         try:
-            import pdfplumber  # noqa: WPS433
-
-            text_parts: List[str] = []
-            with pdfplumber.open(path) as pdf:
-                for page in pdf.pages:
-                    t = page.extract_text() or ""
-                    if t:
-                        text_parts.append(t)
-            return clean_pdf_text("\n".join(text_parts))
-        except Exception as e2:
-            raise RuntimeError(f"Не удалось разобрать PDF {path}: {e2}") from e2
+            return _parse_pdf_docling(path)
+        except Exception as e:
+            logger.warning("Docling: %s — использую pdfplumber", e)
+    return _parse_pdf_pdfplumber(path)
 
 
 def parse_document(path: Path, source: str = "") -> str:
@@ -613,6 +631,19 @@ def make_store(
     if backend == "numpy":
         return NumpyVectorStore(collection_name, embedder)
     raise ValueError(f"Неизвестный VECTOR_STORE: {backend!r} (numpy|chroma)")
+
+
+def make_collection_name(embedder: Embedder, prefix: str = "edututor") -> str:
+    """Имя коллекции по размерности эмбеддинга (384 local e5-small / 1024 api e5-large).
+
+    ChromaDB фиксирует размерность при создании коллекции — разные эмбеддинги
+    должны жить в разных коллекциях, иначе конфликт «expected 384, got 1024».
+    """
+    try:
+        dim = len(embedder.encode(["dim probe"])[0])
+    except Exception:
+        dim = "unknown"
+    return f"{prefix}_{dim}"
 
 
 def process_document(

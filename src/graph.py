@@ -30,6 +30,7 @@ from .knowledge import (
     VectorStore,
     _make_chunks,
     detect_text_layer,
+    make_collection_name,
     make_embedder,
     make_store,
     parse_document,
@@ -73,8 +74,9 @@ def make_graph_deps(settings: Any = None) -> GraphDeps:
     """Стандартные зависимости (реальные embedder/хранилище, LLM-клиенты по умолчанию)."""
     s = settings or default_settings
     embedder = make_embedder(s)
-    store = make_store("edututor", embedder, persist_dir=Path(s.CHROMA_PERSIST_DIR), settings=s)
-    return GraphDeps(embedder=embedder, store=store, settings=s)
+    collection = make_collection_name(embedder)
+    store = make_store(collection, embedder, persist_dir=Path(s.CHROMA_PERSIST_DIR), settings=s)
+    return GraphDeps(embedder=embedder, store=store, settings=s, collection_name=collection)
 
 
 def _rag_chunks(store: VectorStore, query: str, state: TutorState, k: int = 3) -> List[Any]:
