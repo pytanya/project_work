@@ -43,6 +43,7 @@ NODE_SOURCE_ENTRY = "source_entry"
 NODE_PROCESS_DOCUMENT = "process_document"
 NODE_FIND_TEXTBOOK = "find_textbook"
 NODE_SOURCE_FAILED = "source_failed"
+NODE_WAIT_FOR_UPLOAD = "wait_for_upload"
 NODE_ASK_PAGE_RANGE = "ask_page_range"
 NODE_HANDLE_DOC_PAGES = "handle_doc_pages"
 NODE_TUTOR_NEXT = "tutor_next"
@@ -169,7 +170,23 @@ def route_source(state: TutorState) -> str:
         return NODE_TUTOR_NEXT
     if state.textbook_file:
         return NODE_PROCESS_DOCUMENT
+    if state.has_textbook is True:
+        # «да, есть учебник», но файл ещё не загружен — ждём загрузку, а не веб-поиск
+        return NODE_WAIT_FOR_UPLOAD
     return NODE_FIND_TEXTBOOK
+
+
+def wait_for_upload_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
+    """Узел «загрузите учебник»: has_textbook=True, файла нет — ждём upload."""
+    st = state.model_copy(deep=True)
+    st.agent_question = (
+        "Загрузите, пожалуйста, файл учебника (PDF/DOCX) — перетащите его в блок "
+        "«Загрузить учебник» слева, или нажмите «Найти учебник», если файла нет."
+    )
+    if not st.agent_message:
+        st.agent_message = "Учебник указан, но файл не загружен."
+    _emit(deps, "intake.question", question=st.agent_question, missing_fields=["textbook_file"])
+    return st.model_dump()
 
 
 def process_document_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
@@ -516,6 +533,7 @@ def build_graph(deps: Optional[GraphDeps] = None, checkpointer: Any = None) -> A
     g.add_node(NODE_PROCESS_DOCUMENT, lambda s: process_document_node(s, deps))
     g.add_node(NODE_FIND_TEXTBOOK, lambda s: find_textbook_node(s, deps))
     g.add_node(NODE_SOURCE_FAILED, lambda s: source_failed_node(s, deps))
+    g.add_node(NODE_WAIT_FOR_UPLOAD, lambda s: wait_for_upload_node(s, deps))
     g.add_node(NODE_ASK_PAGE_RANGE, lambda s: ask_page_range_node(s, deps))
     g.add_node(NODE_HANDLE_DOC_PAGES, lambda s: handle_doc_pages_node(s, deps))
     g.add_node(NODE_TUTOR_NEXT, lambda s: {})
@@ -532,8 +550,10 @@ def build_graph(deps: Optional[GraphDeps] = None, checkpointer: Any = None) -> A
             NODE_TUTOR_NEXT: NODE_TUTOR_NEXT,
             NODE_PROCESS_DOCUMENT: NODE_PROCESS_DOCUMENT,
             NODE_FIND_TEXTBOOK: NODE_FIND_TEXTBOOK,
+            NODE_WAIT_FOR_UPLOAD: NODE_WAIT_FOR_UPLOAD,
         },
     )
+    g.add_edge(NODE_WAIT_FOR_UPLOAD, END)
     g.add_conditional_edges(
         NODE_PROCESS_DOCUMENT,
         route_doc_result,

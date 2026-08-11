@@ -35,8 +35,16 @@ async def upload_document(
     dest = _uploads_dir() / f"{uuid.uuid4().hex[:8]}{suffix}"
     dest.write_bytes(await file.read())
 
+    # Upload отменяет веб-поиск/веб-источники: файл становится источником №1
     session.state = session.state.model_copy(
-        update={"textbook_file": str(dest), "has_textbook": True}
+        update={
+            "textbook_file": str(dest),
+            "has_textbook": True,
+            "sources": [],
+            "collection_id": None,
+            "source_status": None,
+            "source_note": None,
+        }
     )
     await run_step(session)
     st = session.state

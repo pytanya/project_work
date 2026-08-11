@@ -198,6 +198,18 @@ class TestSourceFlow:
         assert res.agent_question
         assert res.current_question is not None
 
+    def test_has_textbook_true_without_file_asks_upload(self, deps):
+        """«да, есть учебник», но файл не загружен → просим загрузить, а не веб-поиск."""
+        graph = build_graph(deps)
+        state = TutorState(
+            num_questions=1, learner_type="student", subject="география",
+            topic="Атмосфера", has_textbook=True, mode="quiz",
+        )
+        res = _invoke(graph, state.model_dump())
+        assert res.agent_question and "Загрузите" in res.agent_question
+        assert res.source_status is None
+        assert res.sources == []
+
 
 class TestBuild:
     def test_compiles_with_memory_checkpointer(self, deps):

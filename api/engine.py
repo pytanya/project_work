@@ -13,6 +13,7 @@ import asyncio
 import logging
 import queue as std_queue
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -38,17 +39,26 @@ class SessionData:
     history: list = field(default_factory=list)
     created_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
     cancel_event: threading.Event = field(default_factory=threading.Event)
+    last_activity: float = field(default_factory=time.monotonic)
 
 
 class SessionStore:
-    """Хранилище сессий. deps — базовые зависимости (embedder/store переиспользуются)."""
+    """Хранилище сессий. deps — базовые зависимости (embedder/store переиспользуются).
+
+    Устаревшие сессии (бездействие > SESSION_IDLE_TTL_SEC) удаляются при создании
+    новых — сервер не копит мусор.
+    """
 
     def __init__(self, deps: Optional[GraphDeps] = None):
+        from src.config import settings as cfg_settings
+
         self._base_deps = deps or make_graph_deps()
         self._sessions: Dict[str, SessionData] = {}
         self._lock = threading.Lock()
+        self._ttl = float(getattr(cfg_settings, "SESSION_IDLE_TTL_SEC", 1800.0))
 
     def create(self, initial: Optional[Dict[str, Any]] = None) -> SessionData:
+        self._sweep()
         sid = uuid.uuid4().hex[:12]
         queue: "std_queue.Queue[WsEvent]" = std_queue.Queue()
         deps = replace(self._base_deps, on_event=self._make_publisher(queue))
@@ -59,6 +69,18 @@ class SessionStore:
             self._sessions[sid] = session
         return session
 
+    def _sweep(self, now: Optional[float] = None) -> int:
+        """Удаляет сессии, бездействующие дольше TTL. Возвращает число удалённых."""
+        now = now or time.monotonic()
+        with self._lock:
+            expired = [
+                sid for sid, s in self._sessions.items()
+                if now - s.last_activity > self._ttl
+            ]
+            for sid in expired:
+                self._sessions.pop(sid, None)
+        return len(expired)
+
     @staticmethod
     def _make_publisher(queue):
         def publish(event: str, data: Dict[str, Any]) -> None:
@@ -67,7 +89,10 @@ class SessionStore:
 
     def get(self, session_id: str) -> Optional[SessionData]:
         with self._lock:
-            return self._sessions.get(session_id)
+            session = self._sessions.get(session_id)
+            if session is not None:
+                session.last_activity = time.monotonic()
+            return session
 
     def delete(self, session_id: str) -> bool:
         with self._lock:

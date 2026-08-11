@@ -127,6 +127,8 @@ class Settings(BaseSettings):
     TUTOR_ALLOWANCE_USD: float = Field(default=0.5, ge=0.0)
     JUDGE_ALLOWANCE_USD: float = Field(default=0.5, ge=0.0)
     MAX_QUESTIONS_PER_SESSION: int = Field(default=15, ge=1)
+    # TTL бездействия сессии (сек) — устаревшие сессии очищаются сервером
+    SESSION_IDLE_TTL_SEC: float = Field(default=1800.0, gt=0)
     # Лимит итераций intake. ЗАМЕЧАНИЕ (дефект спеки): чек-лист — 5-6 вопросов,
     # поэтому лимит 3 (из раздела 14) исчерпывается на 4-м ответе и ломает полный
     # чек-лист. Прагматично поднят до 8: первичный чек-лист + запас на уточнения.
