@@ -53,6 +53,7 @@ class GraphDeps:
     settings: Any = None
     collection_name: str = "edututor"
     source_collector: Optional[Callable[..., Any]] = None  # override find_textbook
+    on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None  # (event, data)
 
 
 def make_graph_deps(settings: Any = None) -> GraphDeps:
@@ -73,17 +74,33 @@ def _rag_context(store: VectorStore, query: str, state: TutorState, k: int = 3) 
     return [r.chunk.text for r in results]
 
 
+def _emit(deps: GraphDeps, event: str, **data: Any) -> None:
+    if deps.on_event is not None:
+        try:
+            deps.on_event(event, data)
+        except Exception:  # pragma: no cover — публикация не должна ронять граф
+            logger.warning("on_event(%s) упал", event)
+
+
 # ----------------------------------------------------------------------
 # Узлы
 # ----------------------------------------------------------------------
 def intake_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     st = state.model_copy(deep=True)
 
-    # Применяем ответ на текущий вопрос чек-листа
-    if st.intake_field and st.pending_answer is not None:
-        st = apply_answer(st, st.intake_field, st.pending_answer)
-        st.intake_field = None
-        st.pending_answer = None
+    # Применяем ответ на текущий вопрос чек-листа.
+    # Если поле не задано, но intake ещё не завершён — сам определяем первое
+    # недостающее поле (удобно для API: первый ответ без привязки к полю).
+    if st.pending_answer is not None:
+        if st.intake_field is None and compute_missing(st):
+            for field_name in CHECKLIST_ORDER:
+                if field_name in compute_missing(st):
+                    st.intake_field = field_name
+                    break
+        if st.intake_field:
+            st = apply_answer(st, st.intake_field, st.pending_answer)
+            st.intake_field = None
+            st.pending_answer = None
 
     decision = validate_intake(st, max_iterations=deps.settings.MAX_INTAKE_ITERATIONS)
     if decision.decision == "ask":
@@ -93,10 +110,13 @@ def intake_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
                 st.agent_question = INTAKE_QUESTIONS[field_name]
                 st.agent_message = None
                 break
+        _emit(deps, "intake.question",
+              question=st.agent_question, missing_fields=decision.missing_fields)
         return st.model_dump()
 
     if decision.decision == "emergency_start":
         st.agent_message = decision.warning
+        _emit(deps, "system", message=decision.warning, kind="intake.warning")
 
     # grade_curriculum: сверка темы с ФГОС (В-8)
     if st.subject and st.topic and not st.curriculum:
@@ -138,6 +158,8 @@ def process_document_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     if not st.textbook_file:
         return {"source_status": "failed", "source_note": "no file"}
     path = Path(st.textbook_file)
+    _emit(deps, "source.progress", stage="index", url="", status="indexing",
+          message=f"Разбор документа {path.name}…")
     stats = process_document(
         path, source=path.name, store=deps.store, subject=st.subject, grade=st.grade
     )
@@ -145,6 +167,8 @@ def process_document_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     st.source_status = "ready"
     st.sources = [{"type": "file", "path": str(path), "num_chunks": stats["num_chunks"]}]
     st.source_note = f"Документ проиндексирован: {stats['num_chunks']} чанков"
+    _emit(deps, "source.progress", stage="index", url="", status="done",
+          message=st.source_note)
     return st.model_dump()
 
 
@@ -153,6 +177,8 @@ def find_textbook_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     if st.sources:
         return st.model_dump()
 
+    _emit(deps, "source.progress", stage="catalog", url="", status="searching",
+          message=f"Поиск материалов по теме «{st.topic or st.subject or ''}»…")
     col = (deps.source_collector or source_finder.collect_source_materials)(
         subject=st.subject or "",
         topic=st.topic or "",
@@ -168,8 +194,12 @@ def find_textbook_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
             st.sources = col.sources
             st.source_status = "ready"
             st.source_note = col.message
+            _emit(deps, "source.progress", stage="verify", url="", status="found",
+                  message=col.message)
             return st.model_dump()
         # материалы по теме → индексация
+        _emit(deps, "source.progress", stage="index", url="", status="indexing",
+              message=f"Индексация материалов: {len(col.sources)} источников…")
         chunks: List[Any] = []
         for s, t in zip(col.sources, col.texts):
             chunks.extend(
@@ -180,11 +210,14 @@ def find_textbook_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         st.sources = col.sources
         st.source_status = "ready"
         st.source_note = f"Собрано материалов: {len(col.sources)} источников"
+        _emit(deps, "source.progress", stage="index", url="", status="done",
+              message=st.source_note)
         return st.model_dump()
 
     st.source_status = "failed"
     st.source_note = col.failed_reason or col.message
     st.agent_message = col.message or "Материалы по теме не найдены."
+    _emit(deps, "source.failed", reason=st.source_note, message=st.agent_message)
     return st.model_dump()
 
 
@@ -226,6 +259,9 @@ def generate_question_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]
     st.agent_question = card.question
     st.agent_options = card.options
     # НЕ обнуляем agent_message: там может быть фидбек предыдущей оценки
+    _emit(deps, "quiz.card", question_id=card.question_id, question=card.question,
+          options=card.options, answer_type=card.answer_type, difficulty=card.difficulty,
+          topic=card.topic)
     return st.model_dump()
 
 
@@ -266,6 +302,9 @@ def evaluate_answer_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     st.current_question = None
     st.pending_answer = None
 
+    _emit(deps, "tutor.explanation" if not graded.correct else "system",
+          message=message, citation=explanation["citation"] if not graded.correct else None)
+
     if st.answered_count >= st.num_questions:
         st.quiz_complete = True
         st.session_status = "completed"
@@ -288,6 +327,8 @@ def summary_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     else:
         st.agent_message = st.summary_text
     st.session_status = "completed"
+    _emit(deps, "tutor.summary", correct=st.correct_count, total=st.answered_count,
+          knowledge_map={k: round(v, 2) for k, v in st.knowledge_map.items()})
     return st.model_dump()
 
 
