@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel
 
 from ..deps import get_session, get_store
-from ..engine import SessionStore
+from ..engine import SessionStore, run_step
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
@@ -18,9 +18,11 @@ class CreateSessionBody(BaseModel):
 
 
 @router.post("", status_code=201)
-def create_session(body: Optional[CreateSessionBody] = None, store: SessionStore = Depends(get_store)):
+async def create_session(body: Optional[CreateSessionBody] = None, store: SessionStore = Depends(get_store)):
     initial = (body or CreateSessionBody()).initial or {}
     session = store.create(initial)
+    # Первый шаг графа: чек-лист спрашивает первый вопрос (иначе next_question пуст)
+    await run_step(session)
     return {"session_id": session.id}
 
 

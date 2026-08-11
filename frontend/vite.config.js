@@ -14,4 +14,17 @@ export default defineConfig({
       },
     },
   },
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    setupFiles: ['./src/test/setup.js'],
+    css: false,
+    pool: 'threads',
+    poolOptions: {
+      threads: { singleThread: true },
+    },
+    fileParallelism: false,
+    testTimeout: 30000,
+    exclude: ['node_modules/**', 'dist/**', 'e2e/**'],
+  },
 })
