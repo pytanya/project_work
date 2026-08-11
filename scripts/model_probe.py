@@ -4,13 +4,13 @@ model_probe.py — тест-колл доступности моделей EduTu
 Проверяет (через OpenAI-совместимые endpoints):
   - TUTOR_MODEL (qwen/qwen3.7-flash) на RouterAI (работает в РФ)
   - EXPERT_MODEL (deepseek/deepseek-v4-flash) на RouterAI
-  - CHEAP_MODEL (qwen/qwen2.5-flash) на RouterAI
-  - JUDGE_MODEL (google/gemini-3.5-flash-lite) через OpenRouter — ТОЛЬКО под VPN
-  - JUDGE fallback (google/gemini-3.1-flash-lite) через OpenRouter — ТОЛЬКО под VPN
+  - CHEAP_MODEL (google/gemma-3-4b-it) на RouterAI
+  - JUDGE_MODEL (google/gemini-3.5-flash-lite) на RouterAI (без VPN)
+  - JUDGE fallback (google/gemini-3.1-flash-lite) на RouterAI (без VPN)
   - Yandex Search API (поисковый ключ)
 
 Без зависимостей: .env читается вручную, используется только requests.
-Ключи НЕ выводятся в лог. Результат — model_probe_results_<ts>.json (в .gitignore).
+Ключи НЕ выводятся в лог. Результат — evals/model_probe_results.json (коммитится в репозиторий).
 
 Запуск:
     python scripts/model_probe.py
@@ -149,8 +149,6 @@ def main() -> int:
 
     routerai_key = env.get("ROUTERAI_API_KEY", "").strip()
     routerai_base = env.get("ROUTERAI_BASE_URL", "https://routerai.ru/api/v1").strip()
-    openrouter_key = env.get("OPENROUTER_API_KEY", "").strip()
-    openrouter_base = env.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").strip()
     yandex_key = env.get("YANDEX_API_KEY", "").strip()
     yandex_folder = env.get("YANDEX_FOLDER_ID", "").strip()
 
@@ -163,30 +161,22 @@ def main() -> int:
         for model in [
             env.get("TUTOR_MODEL", "qwen/qwen3.7-flash"),
             env.get("EXPERT_MODEL", "deepseek/deepseek-v4-flash"),
-            env.get("CHEAP_MODEL", "qwen/qwen2.5-flash"),
+            env.get("CHEAP_MODEL", "google/gemma-3-4b-it"),
         ]:
             add(f"routerai:{model}", probe_chat(routerai_base, routerai_key, model))
     else:
         console_lines.append("[SKIP] RouterAI: ROUTERAI_API_KEY не задан")
 
-    # OpenRouter (судья gemini) — ЗАБЛОКИРОВАН в РФ, работает только под VPN
-    if openrouter_key:
+    # RouterAI (судья gemini) — работает в РФ без VPN (Этап 0: 200)
+    if routerai_key:
         fallback_first = env.get("JUDGE_FALLBACK_MODELS", "google/gemini-3.1-flash-lite").split(",")[0].strip()
         for model in [
             env.get("JUDGE_MODEL", "google/gemini-3.5-flash-lite"),
             fallback_first,
         ]:
-            add(
-                f"openrouter:{model}",
-                probe_chat(
-                    openrouter_base,
-                    openrouter_key,
-                    model,
-                    extra_headers={"HTTP-Referer": "http://localhost", "X-Title": "EduTutor-probe"},
-                ),
-            )
+            add(f"routerai:{model}", probe_chat(routerai_base, routerai_key, model))
     else:
-        console_lines.append("[SKIP] OpenRouter: OPENROUTER_API_KEY не задан (судья недоступен без VPN)")
+        console_lines.append("[SKIP] RouterAI судья: ROUTERAI_API_KEY не задан (судья недоступен)")
 
     # Yandex Search (поисковый ключ)
     if yandex_key and yandex_folder:
@@ -201,12 +191,15 @@ def main() -> int:
     ok_count = sum(1 for p in results["probes"] if p.get("ok"))
     print(f"Итого: {ok_count}/{len(results['probes'])} доступных")
     if not ok_count:
-        print("Все модели недоступны. Проверьте: интернет, ключи, VPN (для OpenRouter/gemini).")
+        print("Все модели недоступны. Проверьте: интернет, ключи (ROUTERAI_API_KEY, YANDEX_API_KEY/YANDEX_FOLDER_ID).")
 
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    out = BASE_DIR / f"model_probe_results_{ts}.json"
+    out = BASE_DIR / "evals" / "model_probe_results.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    results["timestamp"] = datetime.datetime.now().isoformat(timespec="seconds")
+    results["probe_script_ts"] = ts
     out.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"Результат: {out.name} (не коммитится)")
+    print(f"Результат: {out} (сохраняется в репозитории, Этап 0)")
 
     return 0 if ok_count == len(results["probes"]) else 1
 

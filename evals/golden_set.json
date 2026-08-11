@@ -1,0 +1,55 @@
+{
+  "scenarios": [
+    {
+      "id": "schoolchild_grade6_geography",
+      "description": "Школьник 6 класс, география, тема «Атмосфера», автор Алексеев (Plan B — локальный PDF)",
+      "learner_type": "schoolchild",
+      "grade": "6",
+      "subject": "география",
+      "topic": "Атмосфера",
+      "mode": "quiz",
+      "has_textbook": false,
+      "textbook_author": "Алексеев",
+      "num_questions": 3,
+      "intake_answers": ["ученик 6 класса", "6", "география", "нет", "квиз"],
+      "expected": {"intake_success": true, "find_textbook_success": true}
+    },
+    {
+      "id": "student_with_pdf",
+      "description": "Студент с PDF-учебником (Plan B — локальный PDF из Downloads)",
+      "learner_type": "student",
+      "subject": "география",
+      "topic": "Атмосфера",
+      "mode": "quiz",
+      "has_textbook": true,
+      "num_questions": 2,
+      "intake_answers": ["студент", "география", "да", "квиз"],
+      "textbook_file": "auto:downloads",
+      "expected": {"intake_success": true, "find_textbook_success": true}
+    },
+    {
+      "id": "student_no_textbook",
+      "description": "Студент без учебника, только тема (веб-материалы по теме)",
+      "learner_type": "student",
+      "subject": "география",
+      "topic": "атмосфера конспект",
+      "mode": "quiz",
+      "has_textbook": false,
+      "num_questions": 2,
+      "intake_answers": ["студент", "география", "нет", "квиз"],
+      "expected": {"intake_success": true, "find_textbook_success": true}
+    },
+    {
+      "id": "no_materials",
+      "description": "Материалов нет вообще → узел source_failed",
+      "learner_type": "student",
+      "subject": "сверхредкийпредмет",
+      "topic": "несуществующаятемаxyz",
+      "mode": "quiz",
+      "has_textbook": false,
+      "num_questions": 1,
+      "intake_answers": ["студент", "сверхредкийпредмет", "нет", "квиз"],
+      "expected": {"intake_success": true, "source_failed": true}
+    }
+  ]
+}

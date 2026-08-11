@@ -1,0 +1,29 @@
+{
+  "intents": ["quiz", "explain", "deep_dive", "homework"],
+  "items": [
+    {"query": "Сделай тест по атмосфере", "intent": "quiz"},
+    {"query": "Проведи квиз по географии 6 класса", "intent": "quiz"},
+    {"query": "Задай мне 5 вопросов по параграфу 12", "intent": "quiz"},
+    {"query": "Хочу контрольную работу по истории", "intent": "quiz"},
+    {"query": "Проверь мои знания по главе 3", "intent": "quiz"},
+    {"query": "Сделай викторину по биологии", "intent": "quiz"},
+    {"query": "Потренируй меня решать уравнения", "intent": "quiz"},
+    {"query": "Прогони меня по проверочной по русскому", "intent": "quiz"},
+    {"query": "Объясни, что такое атмосферное давление", "intent": "explain"},
+    {"query": "Почему дует ветер?", "intent": "explain"},
+    {"query": "Расскажи про строение клетки", "intent": "explain"},
+    {"query": "Чем отличается океан от моря?", "intent": "explain"},
+    {"query": "Зачем нужны приставки в русском языке", "intent": "explain"},
+    {"query": "Как образуется град?", "intent": "explain"},
+    {"query": "Что такое молекула?", "intent": "explain"},
+    {"query": "Из чего состоит атмосфера?", "intent": "explain"},
+    {"query": "Дай развёрнутый ответ по теме океаны", "intent": "deep_dive"},
+    {"query": "Хочу углублённо изучить теорию эволюции", "intent": "deep_dive"},
+    {"query": "Разбери тему Атмосфера детально", "intent": "deep_dive"},
+    {"query": "Нужен исчерпывающий разбор главы 5", "intent": "deep_dive"},
+    {"query": "Помоги с домашним заданием по физике", "intent": "homework"},
+    {"query": "Реши задачу номер 5", "intent": "homework"},
+    {"query": "Сделай конспект по параграфу 3", "intent": "homework"},
+    {"query": "Напиши сочинение о природе", "intent": "homework"}
+  ]
+}

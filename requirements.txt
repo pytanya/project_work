@@ -1,0 +1,52 @@
+# ==============================================================================
+# EduTutor — зависимости (контракт по разделу 11.1 SPECIFICATION.md)
+# Устанавливаются постепенно, по слайсам разработки:
+#   Слайс 0 (фундамент): pydantic, pydantic-settings, rich, pytest, pytest-asyncio, httpx
+#   Слайс 1 (LLM+guardrails): openai, python-dotenv
+#   Слайс 3 (intake): langgraph, langgraph-checkpoint-sqlite
+#   Слайс 4 (RAG): docling, pdfplumber, chromadb, sentence-transformers, cross-encoder
+#   Слайс 5 (source_finder): crawl4ai, playwright, ddgs, beautifulsoup4, lxml
+#   Слайс 5+ (API-схемы уже в слайсе 0; сервер FastAPI — расширение): fastapi, uvicorn
+#   Слайс 6 (observability): arize-phoenix, openinference-instrumentation-openai
+# ==============================================================================
+
+# --- Фундамент (Слайс 0) ---
+pydantic>=2.7.0
+pydantic-settings>=2.2.0
+rich
+pytest
+pytest-asyncio
+httpx
+python-dotenv
+
+# --- LLM-клиент (Слайс 1) ---
+openai>=1.0
+requests
+
+# --- Intake / граф (Слайс 3) ---
+langgraph>=0.2
+langgraph-checkpoint-sqlite
+
+# --- RAG / обработка документов (Слайс 4) ---
+# ВНИМАНИЕ: torch (через sentence-transformers) и chromadb (rust-binding) требуют
+# Microsoft Visual C++ Redistributable (https://aka.ms/vs/17/release/vc_redist.x64.exe).
+# Без него работают альтернативные бэкенды:
+#   EMBEDDING_PROVIDER=api (RouterAI /embeddings) и VECTOR_STORE=numpy (по умолчанию).
+docling
+pdfplumber
+chromadb
+sentence-transformers
+
+# --- Сбор источников (Слайс 5) ---
+crawl4ai
+playwright
+ddgs
+beautifulsoup4
+
+# --- Observability (Слайс 6) ---
+arize-phoenix
+openinference-instrumentation-openai
+
+# --- API (расширение заказчика) ---
+fastapi
+uvicorn

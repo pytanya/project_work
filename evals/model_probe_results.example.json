@@ -1,0 +1,68 @@
+{
+  "_comment": "Этап 0 (EduTutor) — пример структуры результата тест-колла доступности моделей.",
+  "_how_to_reproduce": "python scripts/model_probe.py  (нужен .env с ROUTERAI_API_KEY; для Yandex Search — YANDEX_API_KEY/YANDEX_FOLDER_ID). Реальный прогон требует API-ключей и выполняется на этапе исполнения.",
+  "_fields": "provider — провайдер; model — id модели; role — роль (TUTOR/EXPERT/CHEAP/JUDGE); ok/status — 200 или 4xx; elapsed_sec — латентность; cost_usd — цена запроса (если провайдер вернул usage.total_cost); checked_at — время проверки",
+  "timestamp": "2026-08-08T22:34:38",
+  "probes": [
+    {
+      "role": "TUTOR_MODEL",
+      "model": "qwen/qwen3.7-flash",
+      "provider": "routerai",
+      "ok": true,
+      "status": 200,
+      "elapsed_sec": 2.6,
+      "cost_usd": 0.0002,
+      "checked_at": "2026-08-08T22:34:38"
+    },
+    {
+      "role": "EXPERT_MODEL",
+      "model": "deepseek/deepseek-v4-flash",
+      "provider": "routerai",
+      "ok": true,
+      "status": 200,
+      "elapsed_sec": 1.5,
+      "cost_usd": 0.0003,
+      "checked_at": "2026-08-08T22:34:40"
+    },
+    {
+      "role": "CHEAP_MODEL",
+      "model": "google/gemma-3-4b-it",
+      "provider": "routerai",
+      "ok": true,
+      "status": 200,
+      "elapsed_sec": 1.1,
+      "cost_usd": 0.0001,
+      "checked_at": "2026-08-08T22:34:41"
+    },
+    {
+      "role": "JUDGE_MODEL",
+      "model": "google/gemini-3.5-flash-lite",
+      "provider": "routerai",
+      "ok": true,
+      "status": 200,
+      "elapsed_sec": 2.0,
+      "cost_usd": 0.0004,
+      "checked_at": "2026-08-08T22:34:43"
+    },
+    {
+      "role": "JUDGE_MODEL (fallback)",
+      "model": "google/gemini-3.1-flash-lite",
+      "provider": "routerai",
+      "ok": true,
+      "status": 200,
+      "elapsed_sec": 1.8,
+      "cost_usd": 0.0004,
+      "checked_at": "2026-08-08T22:34:45"
+    },
+    {
+      "role": "MODEL_NOT_EXISTS (пример 4xx)",
+      "model": "qwen/qwen2.5-flash",
+      "provider": "routerai",
+      "ok": false,
+      "status": 400,
+      "error": "Model 'qwen/qwen2.5-flash' not found",
+      "elapsed_sec": 0.3,
+      "checked_at": "2026-08-08T22:34:46"
+    }
+  ]
+}

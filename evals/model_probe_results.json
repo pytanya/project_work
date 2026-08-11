@@ -1,0 +1,51 @@
+{
+  "timestamp": "2026-08-08T22:34:38",
+  "probes": [
+    {
+      "name": "routerai:qwen/qwen3.7-flash",
+      "ok": true,
+      "status": 200,
+      "elapsed_sec": 2.6,
+      "reply": "ок",
+      "model": "qwen/qwen3.7-flash"
+    },
+    {
+      "name": "routerai:deepseek/deepseek-v4-flash",
+      "ok": true,
+      "status": 200,
+      "elapsed_sec": 1.5,
+      "reply": "(пустой ответ)",
+      "model": "deepseek/deepseek-v4-flash"
+    },
+    {
+      "name": "routerai:qwen/qwen2.5-flash",
+      "ok": false,
+      "status": 400,
+      "elapsed_sec": 0.3,
+      "error": "{\"error\":\"Model 'qwen/qwen2.5-flash' not found\"}",
+      "model": "qwen/qwen2.5-flash"
+    },
+    {
+      "name": "openrouter:google/gemini-3.5-flash-lite",
+      "ok": false,
+      "status": 403,
+      "elapsed_sec": 0.6,
+      "error": "{ \"success\": false, \"error\": \"Access denied by security policy.\" }",
+      "model": "google/gemini-3.5-flash-lite"
+    },
+    {
+      "name": "openrouter:google/gemini-3.1-flash-lite",
+      "ok": false,
+      "status": 403,
+      "elapsed_sec": 0.4,
+      "error": "{ \"success\": false, \"error\": \"Access denied by security policy.\" }",
+      "model": "google/gemini-3.1-flash-lite"
+    },
+    {
+      "name": "yandex_search",
+      "ok": true,
+      "status": 200,
+      "note": "Yandex Search API доступен (поисковый ключ)"
+    }
+  ]
+}

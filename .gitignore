@@ -21,7 +21,10 @@ evals/results_*.json
 evals/report_*.md
 
 # --- Локальные данные ---
-data/
+data/*
+# Офлайн-база ФГОС (В-8) — часть репозитория (остальное data/* игнорируется)
+!data/fgos_reference/
+!data/fgos_reference/**
 .phoenix_local/
 *.db
 
@@ -42,4 +45,6 @@ Thumbs.db
 .pytest_cache/
 
 # --- Временные артефакты тест-колла ---
+# Результаты Этапа 0 (доступность моделей) коммитятся в репозиторий — каталог evals/.
 model_probe_results*.json
+!evals/model_probe_results*.json

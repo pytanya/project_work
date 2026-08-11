@@ -1,0 +1,12 @@
+[project]
+name = "edututor"
+version = "0.1.0"
+description = "EduTutor — образовательный агент-тьютор (MVP)"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q"
+pythonpath = ["."]
