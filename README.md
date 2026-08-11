@@ -21,24 +21,37 @@ RouterAI или sentence-transformers) → LangGraph (intake → источни�
      ↑  уточнения (≤8 итераций, 2 без прогресса → экстренный старт)
 ```
 
-## Установка (Windows)
+## Установка (кросплатформенно)
+
+### 0. Системные требования (один раз)
+
+`torch` (sentence-transformers) и `chromadb` (rust-binding) требуют системного
+рантайма/компилятора. Без него работают альтернативные бэкенды по умолчанию
+(`EMBEDDING_PROVIDER=api`, `VECTOR_STORE=numpy`) — устанавливать НЕ обязательно,
+но нужно для локальных embeddings и ChromaDB.
+
+| ОС | Что установить | Команда |
+|----|----------------|---------|
+| **Windows** | Microsoft Visual C++ Redistributable (x64) | скачать и запустить https://aka.ms/vs/17/release/vc_redist.x64.exe |
+| **macOS** | Command Line Tools (Xcode) | `xcode-select --install` |
+| **Linux** (Debian/Ubuntu) | build-essential + python3-dev | `sudo apt-get update && sudo apt-get install -y build-essential python3-dev` |
+| **Linux** (Fedora/RHEL) | Development Tools + python3-devel | `sudo dnf groupinstall "Development Tools" && sudo dnf install python3-devel` |
+
+### 1. Python-окружение
 
 ```bash
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+source .venv/bin/activate        # Linux/macOS
+.\.venv\Scripts\Activate.ps1     # Windows (PowerShell)
 pip install -r requirements.txt
 
 # Браузер для crawl4ai (dynamic rendering, расширение заказчика)
 python -m playwright install chromium
 
 # Конфигурация
-copy .env.example .env        # заполнить ROUTERAI_API_KEY
+cp .env.example .env             # Linux/macOS
+copy .env.example .env           # Windows — заполнить ROUTERAI_API_KEY
 ```
-
-> **MSVC Redistributable** нужен для `sentence-transformers` (torch) и ChromaDB
-> (rust). Без него работают альтернативы (по умолчанию):
-> `EMBEDDING_PROVIDER=api` (RouterAI /embeddings) и `VECTOR_STORE=numpy`.
-> Скачать: https://aka.ms/vs/17/release/vc_redist.x64.exe
 
 ## Запуск (MVP — консольное демо)
 

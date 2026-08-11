@@ -8,6 +8,25 @@
 #   Слайс 5 (source_finder): crawl4ai, playwright, ddgs, beautifulsoup4, lxml
 #   Слайс 5+ (API-схемы уже в слайсе 0; сервер FastAPI — расширение): fastapi, uvicorn
 #   Слайс 6 (observability): arize-phoenix, openinference-instrumentation-openai
+#
+# ==============================================================================
+# СИСТЕМНЫЕ ТРЕБОВАНИЯ (кросплатформенно)
+# ----------------------------------------
+# torch (sentence-transformers) и chromadb (rust-binding) требуют системных
+# компиляторов/рантаймов. Без них работают альтернативные бэкенды по умолчанию:
+#   EMBEDDING_PROVIDER=api (RouterAI /embeddings) и VECTOR_STORE=numpy.
+#
+#   Windows — установить Microsoft Visual C++ Redistributable (x64):
+#       https://aka.ms/vs/17/release/vc_redist.x64.exe
+#     (нужен для локальных embeddings sentence-transformers и ChromaDB;
+#      также требуется для сборки любой C-extension из исходников)
+#
+#   macOS — установить Command Line Tools (Xcode):
+#       xcode-select --install
+#
+#   Linux — установить build-essential (gcc/make) и python3-dev:
+#       Debian/Ubuntu:  sudo apt-get update && sudo apt-get install -y build-essential python3-dev
+#       Fedora/RHEL:    sudo dnf groupinstall "Development Tools" && sudo dnf install python3-devel
 # ==============================================================================
 
 # --- Фундамент (Слайс 0) ---
@@ -28,10 +47,11 @@ langgraph>=0.2
 langgraph-checkpoint-sqlite
 
 # --- RAG / обработка документов (Слайс 4) ---
-# ВНИМАНИЕ: torch (через sentence-transformers) и chromadb (rust-binding) требуют
-# Microsoft Visual C++ Redistributable (https://aka.ms/vs/17/release/vc_redist.x64.exe).
-# Без него работают альтернативные бэкенды:
-#   EMBEDDING_PROVIDER=api (RouterAI /embeddings) и VECTOR_STORE=numpy (по умолчанию).
+# ВНИМАНИЕ: torch (sentence-transformers) и chromadb (rust) требуют системного
+# рантайма/компилятора: Windows — VC++ Redistributable (aka.ms/vs/17/release/vc_redist.x64.exe),
+# macOS — xcode-select --install, Linux — build-essential (см. шапку файла).
+# Без них работают альтернативные бэкенды (по умолчанию):
+#   EMBEDDING_PROVIDER=api (RouterAI /embeddings) и VECTOR_STORE=numpy.
 docling
 pdfplumber
 chromadb
