@@ -22,3 +22,10 @@ npm run dev
 npm run build        # → dist/
 npm run preview      # превью собранного билда
 ```
+
+## Тесты
+
+```bash
+npm test             # Vitest: 21 тестов (компоненты + App, jsdom)
+npm run e2e          # Playwright: E2E против живого бэкенда (автостарт uvicorn+vite)
+```
