@@ -248,6 +248,16 @@ class TestGraph:
         assert r.status_code == 200
         assert "related" in r.json()
 
+    def test_knowledge_package_okf(self, client):
+        sid = self._session_with_graph(client)
+        r = client.get(f"/api/sessions/{sid}/knowledge-package")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["okf_version"] == "0.2"
+        assert body["conformant"] is True
+        assert any("index.md" in f for f in body["files"])
+        assert any(f.startswith("topics/") for f in body["files"])
+
 
 class TestWebSocket:
     def test_ws_streams_quiz_card(self, client):

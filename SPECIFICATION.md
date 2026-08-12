@@ -602,6 +602,7 @@ OBSERVE │ Оценка результата:
 | `ocr_pages(pdf, pages, langs)` | EasyOCR (ru+en) по указанным страницам | Загружен сканированный учебник, страницы известны |
 | `rag_search(query, k)` | Семантический поиск по ChromaDB (фильтр по классу/главе) | Генерация вопроса / объяснение |
 | `get_knowledge_graph()` | Граф знаний учебника (NetworkX): темы/уроки + связи (part_of/prerequisite/related) | Подготовка по темам: выбрать урок → квиз по нему (раздел 7) |
+| `export_knowledge_package()` | **OKF (Open Knowledge Format v0.2)** бандл знаний учебника (index + log + topics/*.md с YAML-frontmatter) | Переносимость/интероперабельность: `GET /api/sessions/{id}/knowledge-package` (раздел 7) |
 | `classify_intent(query)` | Интент: rule-based/классификатор с few-shot + fallback (В-1) | Разбор первичного запроса |
 | `extract_entities(query)` | NER: шаблонно-регексный парсер + LLM-дополнение (В-1) | Парсинг темы/класса/автора/главы |
 | `save_progress(data)` | Сохранение прогресса обучаемого | После каждого ответа |

@@ -1,13 +1,16 @@
-"""Граф знаний учебника: GET /graph, related-узлы, выбор темы для подготовки."""
+"""Граф знаний учебника: GET /graph, related-узлы, выбор темы, OKF-экспорт."""
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
+from src.config import settings as default_settings
 from src.knowledge_graph import KnowledgeGraph
+from src.okf import emit_okf_bundle, validate_bundle
 
 from ..deps import get_session, get_store
 from ..engine import SessionStore, run_step
@@ -66,4 +69,26 @@ async def select_topic(session_id: str, body: TopicBody, store: SessionStore = D
         "title": title,
         "question": session.state.current_question.model_dump() if session.state.current_question else None,
         "next_question": session.state.agent_question or "",
+    }
+
+
+@router.get("/knowledge-package")
+def knowledge_package(session_id: str, store: SessionStore = Depends(get_store)):
+    """OKF-бандл знаний учебника (index + log + topics/*.md с YAML-frontmatter)."""
+    session = get_session(store, session_id)
+    out_dir = Path(default_settings.KNOWLEDGE_GRAPH_DIR).parent / "okf" / session_id
+    source_name = session.state.textbook_name or (session.state.sources[0].get("path") if session.state.sources else "book")
+    bundle = emit_okf_bundle(
+        session.state, out_dir, Path(str(source_name)).name,
+        subject=session.state.subject, grade=session.state.grade,
+        curriculum=session.state.curriculum,
+    )
+    validation = validate_bundle(bundle)
+    return {
+        "okf_version": "0.2",
+        "dir": str(bundle),
+        "conformant": validation["conformant"],
+        "errors": validation["errors"],
+        "files": validation["files"],
+        "index": (bundle / "index.md").read_text(encoding="utf-8"),
     }
