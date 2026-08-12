@@ -62,7 +62,7 @@ def _state(**kw) -> TutorState:
 class TestGenerateQuestion:
     def test_valid_card_from_llm(self):
         state = _state(grade="6", curriculum="ФГОС")
-        fake = lambda msgs: '{"question": "Что такое атмосфера?", "options": ["газ", "жидкость"], "answer_type": "single", "topic": "Атмосфера"}'
+        fake = lambda msgs: '{"question": "Что такое атмосфера?", "options": ["газ", "жидкость"], "answer_type": "single", "topic": "Атмосфера", "correct_answers": ["газ"]}'
         card = generate_question("Атмосфера", ["Атмосфера — оболочка Земли."], "easy", state, llm_call=fake)
         assert card.question_id == "q1"
         assert card.answer_type == "single"
@@ -70,6 +70,9 @@ class TestGenerateQuestion:
         assert card.topic == "Атмосфера"
         assert state.asked_questions == ["q1"]
         assert state.current_question is card
+        # эталонные ответы LLM хранятся в состоянии, но НЕ в QuizCard (не утекают в UI)
+        assert state.current_answers == ["газ"]
+        assert card.model_dump().get("correct_answers") is None
 
     def test_fallback_when_llm_garbage(self):
         state = _state()
@@ -87,10 +90,16 @@ class TestGenerateQuestion:
 class TestSimplicityPrecheck:
     def test_short_answer_rejected(self):
         assert simplicity_precheck("да", ["Атмосфера — воздушная оболочка Земли."]) is False
+        assert simplicity_precheck("", ["Атмосфера — воздушная оболочка Земли."]) is False
 
-    def test_long_without_terms_rejected(self):
-        answer = "x" * 100
-        assert simplicity_precheck(answer, ["Атмосфера — воздушная оболочка Земли."]) is False
+    def test_gibberish_rejected(self):
+        # «x»*100 — одна «буква», реального содержания нет
+        assert simplicity_precheck("x" * 100, ["Атмосфера — воздушная оболочка Земли."]) is False
+
+    def test_paraphrase_accepted(self):
+        # Хороший ответ своими словами (без совпадения терминов чанка) — НЕ режем
+        answer = "Помогать тому, кому самому было бы приятно получить поддержку."
+        assert simplicity_precheck(answer, ["поступай с другими так, как хочешь, чтобы поступали с тобой"]) is True
 
     def test_long_with_term_accepted(self):
         answer = "Атмосфера — это воздушная оболочка Земли, и она важна."
@@ -121,6 +130,31 @@ class TestEvaluateAnswer:
         long_answer = "Атмосфера — это воздушная оболочка, " + "и рассуждение " * 200
         graded = evaluate_answer("Вопрос", long_answer, ["Атмосфера — воздушная оболочка."], state, llm_call=fake)
         assert graded.model_used == "expert"  # Ж-8: развёрнутый ответ → эксперт
+
+    def test_reference_match_marks_correct(self):
+        """Закрытый вопрос: ответ ученика совпал с эталоном LLM → верно без LLM-вызова."""
+        state = _state()
+        fake_gen = lambda m: '{"question":"Вопрос","options":["А","Б"],"answer_type":"single","topic":"Тема","correct_answers":["Б"]}'
+        card = generate_question("Тема", ["контекст"], "medium", state, llm_call=fake_gen)
+        graded = evaluate_answer(card.question, "Б", ["контекст"], state)
+        assert graded.correct is True
+        assert graded.model_used == "reference"
+        assert graded.score == 1.0
+
+    def test_reference_no_match_uses_llm(self):
+        state = _state()
+        fake_gen = lambda m: '{"question":"Вопрос","options":["А","Б"],"answer_type":"single","topic":"Тема","correct_answers":["Б"]}'
+        card = generate_question("Тема", ["контекст"], "medium", state, llm_call=fake_gen)
+        sent = {}
+
+        def fake_eval(messages):
+            sent["user"] = messages[-1]["content"]
+            return '{"score": 2, "correct": false, "feedback": "Неверно.", "citation_ok": false}'
+
+        graded = evaluate_answer(card.question, "В", ["контекст"], state, llm_call=fake_eval)
+        assert graded.correct is False
+        assert graded.model_used != "reference"
+        assert "Б" in sent["user"]  # эталон ответа передан в промпт экзаменатора
 
 
 class TestAdjustDifficulty:
@@ -194,7 +228,7 @@ class TestRealTutorIntegration:
         graded = evaluate_answer(card.question, answer, context, state)
         assert graded.precheck_passed is True
         assert graded.feedback
-        assert graded.model_used in ("tutor", "expert")
+        assert graded.model_used in ("tutor", "expert", "reference")
 
         update_knowledge_map(state, card.topic, graded.score)
         assert state.knowledge_map.get(card.topic) is not None

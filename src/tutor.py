@@ -132,8 +132,10 @@ def _question_prompt(
         )
         + (
             " Верни строго JSON: {\"question\": \"...\", \"options\": [\"...\"] или null, "
-            "\"answer_type\": \"single\"|\"multiple\"|\"open\", \"topic\": \"<тема>\"}. "
-            "Для open-вопроса options=null."
+            "\"answer_type\": \"single\"|\"multiple\"|\"open\", \"topic\": \"<тема>\", "
+            "\"correct_answers\": [\"правильный вариант/модельный ответ\"]}. "
+            "Для open-вопроса options=null, correct_answers = [\"эталонный ответ\"]. "
+            "Для single — ровно 1 правильный вариант, для multiple — все правильные."
         )
     )
     ctx = "\n---\n".join(context)[:MAX_EXPLANATION_CHARS]
@@ -180,6 +182,9 @@ def generate_question(
         difficulty=difficulty,
         topic=str(data.get("topic") or topic),
     )
+    # Эталонные ответы генерирует LLM (мозг); они НЕ входят в QuizCard/UI.
+    refs = data.get("correct_answers")
+    state.current_answers = [str(r).strip() for r in refs if str(r).strip()] if isinstance(refs, list) else []
     state.asked_questions.append(qid)
     state.current_question = card
     return card
@@ -188,15 +193,22 @@ def generate_question(
 # ----------------------------------------------------------------------
 # Оценка ответа (В-2, Ж-8)
 # ----------------------------------------------------------------------
+PRE_CHECK_MIN_LENGTH = 15
+PRE_CHECK_MIN_WORDS = 3
+
+
 def simplicity_precheck(answer: str, context: List[str]) -> bool:
-    """Rule-based judge-lite (В-2): ответ слишком короткий/пустой → False."""
+    """Rule-based judge-lite (В-2): отсекает ТОЛЬКО пустые/слишком короткие ответы.
+
+    Важно: НЕ требуем совпадения ключевых слов с чанком — ученик может ответить
+    своими словами (парафраз), и это корректный ответ. Смысл оценивает LLM
+    (evaluate_answer). Здесь — лишь «не пусто и не мусор».
+    """
     text = (answer or "").strip()
     if len(text) < PRE_CHECK_MIN_LENGTH:
         return False
-    # есть ли хотя бы один значимый термин из контекста
-    terms = re.findall(r"\w{4,}", " ".join(context))
-    significant = [t.lower() for t in terms if t.lower() not in ("что", "это", "как", "его", "она", "они")]
-    if significant and not any(t in text.lower() for t in significant[:20]):
+    words = re.findall(r"[а-яёa-z]{2,}", text.lower())
+    if len(words) < PRE_CHECK_MIN_WORDS:
         return False
     return True
 
@@ -214,15 +226,42 @@ def _decide_eval_model(state: TutorState, answer: str) -> str:
     return "tutor"
 
 
-def _eval_prompt(question: str, answer: str, context: List[str]) -> List[Dict[str, str]]:
+def _eval_prompt(
+    question: str,
+    answer: str,
+    context: List[str],
+    correct_answers: Optional[List[str]] = None,
+) -> List[Dict[str, str]]:
     system = (
         "Ты — строгий экзаменатор EduTutor. Оцени ответ ученика по эталону из контекста. "
         "Верни строго JSON: {\"score\": <0..10>, \"correct\": true|false, "
         "\"feedback\": \"краткое пояснение ошибки\", \"citation_ok\": true|false}."
     )
     ctx = "\n---\n".join(context)[:MAX_EXPLANATION_CHARS]
-    user = f"Вопрос: {question}\nОтвет ученика: {answer}\nЭталон (контекст):\n{ctx}"
+    refs = ", ".join(correct_answers) if correct_answers else ""
+    user = f"Вопрос: {question}\nОтвет ученика: {answer}\n"
+    if refs:
+        user += f"Правильный(е) ответ(ы): {refs}\n"
+    user += f"Эталон (контекст):\n{ctx}"
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def _ref_match(answer: str, refs: List[str]) -> bool:
+    """Сверка ответа ученика с эталонными ответами (нормализация без учёта регистра/пробелов)."""
+    def norm(s: str) -> str:
+        return " ".join(str(s).lower().split())
+
+    a = norm(answer)
+    for r in refs:
+        rn = norm(r)
+        if not rn:
+            continue
+        if a == rn:
+            return True
+        # для длинных эталонов допускаем вхождение (короткий в длинном и наоборот)
+        if len(rn) >= 4 and (rn in a or a in rn):
+            return True
+    return False
 
 
 @dataclass
@@ -245,20 +284,34 @@ def evaluate_answer(
     """Полная оценка ответа: пре-оценка (В-2) → финальная оценка (Ж-8)."""
     from .llm_client import LLMClient
 
-    precheck = simplicity_precheck(answer, context)
-    if not precheck:
-        return GradedAnswer(
-            score=0.0, correct=False,
-            feedback="Ответ слишком короткий или не содержит ключевых терминов — уточните, пожалуйста.",
-            citation_ok=False, model_used="rule-based", precheck_passed=False,
-        )
+    # Эталонные ответы, сгенерированные LLM при создании вопроса (не из UI)
+    refs = list(state.current_answers)
+    q = state.current_question
+    is_closed = bool(q and q.answer_type in ("single", "multiple") and q.options)
+
+    # Закрытый вопрос: ответ = выбранный вариант, пре-проверка длины не нужна.
+    # Сначала — детерминированная сверка с эталоном.
+    if is_closed:
+        if refs and _ref_match(answer, refs):
+            return GradedAnswer(
+                score=1.0, correct=True, feedback="Верно!", citation_ok=True,
+                model_used="reference", precheck_passed=True,
+            )
+    else:
+        precheck = simplicity_precheck(answer, context)
+        if not precheck:
+            return GradedAnswer(
+                score=0.0, correct=False,
+                feedback="Ответ слишком короткий — уточните, пожалуйста.",
+                citation_ok=False, model_used="rule-based", precheck_passed=False,
+            )
 
     role = _decide_eval_model(state, answer)  # Ж-8
     if llm_call is None:
         client = LLMClient(role=role)
         llm_call = lambda msgs: client.chat(msgs, temperature=0.0, max_tokens=300).content or ""
 
-    raw = llm_call(_eval_prompt(question, answer, context))
+    raw = llm_call(_eval_prompt(question, answer, context, correct_answers=refs or None))
     data = parse_llm_json(raw)
     score01 = _score01(data.get("score", 5.0))
     correct = bool(data.get("correct", score01 >= 0.7))

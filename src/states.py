@@ -62,6 +62,7 @@ class TutorState(IntakeState):
     knowledge_map: Dict[str, float] = Field(default_factory=dict)
     asked_questions: List[str] = Field(default_factory=list)
     current_question: Optional[QuizCard] = None
+    current_answers: List[str] = Field(default_factory=list)  # эталонные ответы LLM (не в UI)
     current_section: Optional[str] = None
     correct_count: int = 0
     answered_count: int = 0
