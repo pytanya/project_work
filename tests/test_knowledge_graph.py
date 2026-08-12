@@ -29,6 +29,15 @@ class TestBuild:
         kg = build_textbook_graph("Просто текст без заголовков.", source="x")
         assert kg.graph.number_of_nodes() == 2  # book + topic
 
+    def test_running_header_lessons_detected(self):
+        # колонтитулы вида «4 Урок 1 ОСНОВЫ…» (не начало строки) — ловим номера
+        text = "мир может радоваться или 4 Урок 1 ОСНОВЫ текст\nзатем 6 Урок 2 ОСНОВЫ текст\n8 Урок 1 повторился"
+        kg = build_textbook_graph(text, source="opk")
+        titles = [d["title"] for _, d in kg.graph.nodes(data=True)]
+        assert "Урок 1" in titles
+        assert "Урок 2" in titles
+        assert kg.graph.number_of_nodes() >= 3  # book + 2 урока
+
     def test_llm_prerequisite_links(self):
         def fake_llm(ids):
             return [{"source": ids[1], "target": ids[0], "relation": PREREQUISITE}]

@@ -601,6 +601,7 @@ OBSERVE │ Оценка результата:
 | `process_document(file)` | Docling → чанки → ChromaDB; если скан → `ask_page_range` → `ocr_pages` | Обучаемый загрузил / найден PDF/DOCX |
 | `ocr_pages(pdf, pages, langs)` | EasyOCR (ru+en) по указанным страницам | Загружен сканированный учебник, страницы известны |
 | `rag_search(query, k)` | Семантический поиск по ChromaDB (фильтр по классу/главе) | Генерация вопроса / объяснение |
+| `get_knowledge_graph()` | Граф знаний учебника (NetworkX): темы/уроки + связи (part_of/prerequisite/related) | Подготовка по темам: выбрать урок → квиз по нему (раздел 7) |
 | `classify_intent(query)` | Интент: rule-based/классификатор с few-shot + fallback (В-1) | Разбор первичного запроса |
 | `extract_entities(query)` | NER: шаблонно-регексный парсер + LLM-дополнение (В-1) | Парсинг темы/класса/автора/главы |
 | `save_progress(data)` | Сохранение прогресса обучаемого | После каждого ответа |
@@ -729,6 +730,7 @@ POST /cancel ◀─── task.cancel() + checkpoint сохранён (сост�
 | `SourceSearchPanel` | Статус авто-поиска учебника: каталог → скачивание → проверка → индексация | WS-событие `source.progress` |
 | `FileUpload` | Drag & drop PDF/DOCX с превью | `POST /upload` |
 | `QuizCard` | Карточка вопроса (single/multiple/open) | WS-событие `quiz.card` → `QuizCard` (В-4) |
+| `KnowledgeGraphPanel` | Граф знаний учебника: темы-уроки (мульти-акцентная раскраска); клик → подготовка по теме | `GET /api/sessions/{id}/graph`, `POST /api/sessions/{id}/topic` |
 | `ExplanationPanel` | Объяснение с цитатой из учебника (подсветка источника) | WS-событие `tutor.explanation` |
 | `ProgressDashboard` | Прогресс по темам (knowledge_map), график правильных ответов | `GET /sessions/{id}` |
 | `ChatStream` | WebSocket-стриминг событий агента | WS `/api/sessions/{id}/ws` |

@@ -151,7 +151,11 @@ def build_textbook_graph(
 
     Узлы: корневой «учебник» + секции (Урок/Параграф/Module/...).
     Рёбра: иерархия part_of; опционально — LLM-связи prerequisite между уроками.
+    Если секции не определены на старте строк (колонтитулы типа «4 Урок 1 …»),
+    ловим номера уроков/параграфов в тексте лёгким regex.
     """
+    import re
+
     from .knowledge import extract_sections
 
     kg = KnowledgeGraph()
@@ -166,6 +170,20 @@ def build_textbook_graph(
                      node_type="section", section_number=num)
         kg.add_edge(root_id, nid, PART_OF)
         section_ids.append(nid)
+
+    if not section_ids:
+        # колонтитулы «NN Урок M …» / «Урок M …» / «Параграф N …» в любом месте текста
+        found: List[str] = []
+        for m in re.finditer(r"(?i)\b(?:урок|lesson|module|unit|параграф)\s*(\d{1,3})", text):
+            label = m.group(0).split()[0].lower()
+            num = m.group(1)
+            key = f"{label}:{num}"
+            if key not in found:
+                found.append(key)
+                nid = f"sec:{source}:{num}"
+                kg.add_topic(nid, f"{label.capitalize()} {num}", node_type="topic")
+                kg.add_edge(root_id, nid, PART_OF)
+                section_ids.append(nid)
 
     if not section_ids:
         # нет структуры — один узел-«тема» от источника
