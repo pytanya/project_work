@@ -55,6 +55,7 @@ class WsEvent(BaseModel):
         "quiz.card",
         "tutor.explanation",
         "tutor.summary",
+        "graph.ready",
         "session.error",
     ]
     data: Dict[str, Any] = Field(default_factory=dict)

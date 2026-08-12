@@ -84,6 +84,23 @@ body {
 .bar-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-strong)); border-radius: 4px; transition: width 0.5s ease; }
 .scoreline { margin-top: 8px; font-size: 12.5px; color: var(--ok); font-weight: 600; }
 
+/* --- Граф знаний: темы (мульти-акцентная раскраска) --- */
+.card.graph { display: flex; flex-direction: column; gap: 8px; }
+.active-topic { font-size: 12.5px; color: var(--accent-strong); }
+.active-topic strong { color: var(--ink); }
+.topic-chips { display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; }
+.topic-chip {
+  text-align: left; padding: 8px 11px; border-radius: 9px; cursor: pointer;
+  background: var(--card); border: 1.5px solid var(--line);
+  color: var(--ink); font-family: var(--font-body); font-size: 13px; font-weight: 600;
+  border-left: 4px solid var(--chip-color, var(--accent));
+  transition: all 0.12s ease;
+}
+.topic-chip:hover:not(:disabled) { background: color-mix(in srgb, var(--chip-color, var(--accent)) 12%, var(--card)); transform: translateX(3px); }
+.topic-chip.active { border-color: var(--chip-color, var(--accent)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--chip-color, var(--accent)) 30%, transparent); }
+.topic-chip:disabled { opacity: 0.5; cursor: default; }
+.graph-legend { font-size: 11px; color: var(--muted); }
+
 /* --- Источник / загрузка --- */
 .source-status { font-size: 13px; padding: 7px 10px; border-radius: 9px; background: var(--paper); border: 1px solid var(--line); }
 .source-status.ready { border-color: var(--ok); color: var(--ok); background: var(--ok-soft); }

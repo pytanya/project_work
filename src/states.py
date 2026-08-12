@@ -57,6 +57,9 @@ class TutorState(IntakeState):
 
     # --- RAG ---
     collection_id: Optional[str] = None
+    # Граф знаний учебника (nodes/edges) + активная тема для подготовки по темам
+    knowledge_graph: Optional[Dict[str, Any]] = None
+    active_topic: Optional[str] = None
 
     # --- Тьюторинг (Ж-6) ---
     knowledge_map: Dict[str, float] = Field(default_factory=dict)

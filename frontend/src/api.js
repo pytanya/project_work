@@ -43,6 +43,11 @@ export const api = {
 
   sourceStatus: (id) => jsonFetch(`/api/sessions/${id}/source-status`),
 
+  getGraph: (id) => jsonFetch(`/api/sessions/${id}/graph`),
+
+  selectTopic: (id, topicId) =>
+    jsonFetch(`/api/sessions/${id}/topic`, { method: 'POST', body: JSON.stringify({ topic_id: topicId }) }),
+
   history: (id) => jsonFetch(`/api/sessions/${id}/history`),
 }
 

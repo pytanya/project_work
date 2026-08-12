@@ -36,6 +36,7 @@ from .knowledge import (
     parse_document,
     process_document,
 )
+from .knowledge_graph import build_textbook_graph
 from .states import TutorState
 
 logger = logging.getLogger("edututor.graph")
@@ -88,8 +89,23 @@ def _rag_chunks(store: VectorStore, query: str, state: TutorState, k: int = 3) -
         filters["subject"] = state.subject
     if state.grade:
         filters["grade"] = state.grade
+    # Подготовка по теме: фильтр по разделу активного узла графа
+    if state.active_topic:
+        section = _active_topic_section(state)
+        if section:
+            filters["section_number"] = section
     results: List[SearchResult] = store.search(query, k=k, filters=filters or None)
     return results
+
+
+def _active_topic_section(state: TutorState) -> Optional[str]:
+    """Номер раздела активной темы из графа знаний (если узел — секция)."""
+    if not state.knowledge_graph or not state.active_topic:
+        return None
+    for n in state.knowledge_graph.get("nodes", []):
+        if n.get("id") == state.active_topic:
+            return n.get("section_number")
+    return None
 
 
 def _rag_context(store: VectorStore, query: str, state: TutorState, k: int = 3) -> List[str]:
@@ -220,8 +236,11 @@ def process_document_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     st.source_status = "ready"
     st.sources = [{"type": "file", "path": str(path), "num_chunks": stats["num_chunks"]}]
     st.source_note = f"Документ проиндексирован: {stats['num_chunks']} чанков"
+    st.knowledge_graph = build_textbook_graph(text, source=path.name).to_dict()
     _emit(deps, "source.progress", stage="index", url="", status="done",
           message=st.source_note)
+    _emit(deps, "graph.ready", nodes=len(st.knowledge_graph.get("nodes", [])),
+          edges=len(st.knowledge_graph.get("edges", [])))
     return st.model_dump()
 
 
@@ -318,6 +337,7 @@ def handle_doc_pages_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     st.sources = [{"type": "ocr", "path": str(path), "pages": [phys_start, phys_end],
                    "num_chunks": len(chunks), "page_offset": offset}]
     st.source_note = f"OCR страниц {phys_start}-{phys_end}: {len(chunks)} чанков"
+    st.knowledge_graph = build_textbook_graph(text, source=path.name).to_dict()
     st.textbook_pages = answer
     st.textbook_topic = req.topic
     st.agent_message = None

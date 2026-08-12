@@ -197,6 +197,9 @@ class TestSourceFlow:
         assert res.source_status == "ready"
         assert res.agent_question
         assert res.current_question is not None
+        # построен граф знаний учебника (подготовка по темам)
+        assert res.knowledge_graph is not None
+        assert len(res.knowledge_graph["nodes"]) >= 3  # book + 2 параграфа
 
     def test_has_textbook_true_without_file_asks_upload(self, deps):
         """«да, есть учебник», но файл не загружен → просим загрузить, а не веб-поиск."""

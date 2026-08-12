@@ -6,6 +6,7 @@ import QuizCard from './components/QuizCard'
 import ProgressDashboard from './components/ProgressDashboard'
 import SourceSearchPanel from './components/SourceSearchPanel'
 import FileUpload from './components/FileUpload'
+import KnowledgeGraphPanel from './components/KnowledgeGraphPanel'
 import './index.css'
 
 function App() {
@@ -14,6 +15,7 @@ function App() {
   const [current, setCurrent] = useState(null)
   const [intake, setIntake] = useState({ missingFields: [], complete: false })
   const [source, setSource] = useState({ status: null, note: null })
+  const [graph, setGraph] = useState({ nodes: [], edges: [], activeTopic: null })
   const [knowledge, setKnowledge] = useState({})
   const [score, setScore] = useState({ correct: 0, total: 0 })
   const [answer, setAnswer] = useState('')
@@ -28,6 +30,16 @@ function App() {
       if (last && last.kind === kind && last.text === text) return f
       return [...f, { id: `${Date.now()}-${Math.random()}`, kind, text, data }]
     })
+  }, [])
+
+  const refreshGraph = useCallback(async () => {
+    if (!sessionIdRef.current) return
+    try {
+      const g = await api.getGraph(sessionIdRef.current)
+      setGraph({ nodes: g.nodes || [], edges: g.edges || [], activeTopic: g.active_topic || null })
+    } catch (_) {
+      /* граф может быть ещё не построен — тихо */
+    }
   }, [])
 
   const handleEvent = useCallback(
@@ -68,6 +80,10 @@ function App() {
           setCurrent(null)
           push('error', d.message)
           break
+        case 'graph.ready':
+          refreshGraph()
+          push('system', `Построен граф знаний: ${d.nodes} тем`)
+          break
         case 'system':
           push('system', d.message)
           break
@@ -78,7 +94,7 @@ function App() {
           break
       }
     },
-    [push],
+    [push, refreshGraph],
   )
 
   useEffect(() => {
@@ -105,6 +121,7 @@ function App() {
           setCurrent({ kind: 'intake', question: st.next_question, missingFields: st.missing_fields })
           push('intake', st.next_question)
         }
+        refreshGraph()
       } catch (e) {
         push('error', `Не удалось создать сессию: ${e.message}`)
       }
@@ -142,6 +159,9 @@ function App() {
       setKnowledge(d.knowledge_map || {})
       setScore({ correct: d.correct_count || 0, total: d.answered_count || 0 })
       if (d.source_status) setSource({ status: d.source_status, note: d.source_note })
+      if (d.knowledge_graph && d.knowledge_graph.nodes) {
+        setGraph({ nodes: d.knowledge_graph.nodes, edges: d.knowledge_graph.edges || [], activeTopic: d.active_topic || null })
+      }
     } catch (e) {
       push('error', String(e.message || e))
     }
@@ -205,6 +225,22 @@ function App() {
     }
   }
 
+  async function handleSelectTopic(node) {
+    if (!sessionId) return
+    setBusy(true)
+    setCurrent(null)
+    push('system', `Готовимся по теме: ${node.title}…`)
+    try {
+      const r = await api.selectTopic(sessionId, node.id)
+      setGraph((g) => ({ ...g, activeTopic: r.active_topic }))
+      await resync()
+    } catch (e) {
+      push('error', String(e.message || e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   function handleNewSession() {
     // закрываем текущую и перезагружаем страницу (создаст свежую сессию)
     if (sessionIdRef.current) api.deleteSession(sessionIdRef.current)
@@ -223,6 +259,12 @@ function App() {
         {sessionId && <div className="session-id">сессия: {sessionId}</div>}
         <ProgressDashboard knowledge={knowledge} correct={score.correct} total={score.total} />
         <SourceSearchPanel status={source.status} note={source.note} onFind={handleFind} busy={busy} />
+        <KnowledgeGraphPanel
+          nodes={graph.nodes}
+          activeTopic={graph.activeTopic}
+          onSelect={handleSelectTopic}
+          busy={busy}
+        />
         <FileUpload onUpload={handleUpload} busy={busy} />
       </aside>
       <main className="chat">

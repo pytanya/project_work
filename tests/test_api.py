@@ -214,6 +214,41 @@ class TestExport:
         assert "session_id" in r.content.decode("utf-8-sig")
 
 
+class TestGraph:
+    def _session_with_graph(self, client):
+        sid = _new_session(client, num_questions=1)
+        for answer in ["студент", "физика", "да", "квиз"]:
+            client.post(f"/api/sessions/{sid}/intake", json={"answer": answer})
+        files = {"file": ("doc.txt", "Параграф 12: Атмосфера\nСтроение атмосферы.\n\nПараграф 13: Погода\nПогода меняется.".encode("utf-8"), "text/plain")}
+        client.post(f"/api/sessions/{sid}/upload", files=files)
+        return sid
+
+    def test_get_graph_after_upload(self, client):
+        sid = self._session_with_graph(client)
+        r = client.get(f"/api/sessions/{sid}/graph")
+        assert r.status_code == 200
+        assert len(r.json()["nodes"]) >= 3  # book + 2 параграфа
+        assert r.json()["stats"]["nodes"] >= 3
+
+    def test_select_topic_generates_question(self, client):
+        sid = self._session_with_graph(client)
+        g = client.get(f"/api/sessions/{sid}/graph").json()
+        node = next(n for n in g["nodes"] if n.get("type") == "section")
+        r = client.post(f"/api/sessions/{sid}/topic", json={"topic_id": node["id"]})
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+        assert r.json()["active_topic"] == node["id"]
+        assert r.json()["question"] or r.json()["next_question"]
+
+    def test_related_nodes(self, client):
+        sid = self._session_with_graph(client)
+        g = client.get(f"/api/sessions/{sid}/graph").json()
+        node = g["nodes"][0]
+        r = client.get(f"/api/sessions/{sid}/graph/{node['id']}/related")
+        assert r.status_code == 200
+        assert "related" in r.json()
+
+
 class TestWebSocket:
     def test_ws_streams_quiz_card(self, client):
         sid = _new_session(client, num_questions=1, sources=[{"type": "web", "url": "x"}], collection_id="web")
