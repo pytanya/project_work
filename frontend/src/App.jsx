@@ -206,8 +206,13 @@ function App() {
     push('system', `Загружаю и индексирую «${file.name}», это может занять 1-2 минуты…`)
     try {
       const r = await api.uploadFile(sessionId, file)
-      push('system', `Файл «${r.filename}» ${r.status === 'ready' ? 'проиндексирован' : 'принят'}`)
-      if (r.status === 'ready') setSource({ status: 'ready', note: r.note })
+      if (r.status === 'failed') {
+        push('error', r.note || 'Не удалось проиндексировать документ.')
+        setSource({ status: 'failed', note: r.note || 'Ошибка индексации' })
+      } else {
+        push('system', `Файл «${r.filename}» ${r.status === 'ready' ? 'проиндексирован' : 'принят'}`)
+        if (r.status === 'ready') setSource({ status: 'ready', note: r.note })
+      }
       await resync()
     } catch (e) {
       push('error', String(e.message || e))

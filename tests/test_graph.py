@@ -244,6 +244,29 @@ class TestSourceFlow:
         assert res.source_status is None
         assert res.sources == []
 
+    def test_index_failure_emits_source_failed(self, deps, tmp_path):
+        """Сбой эмбеддингов при индексации → source_status=failed + событие source.failed."""
+        doc = tmp_path / "doc.txt"
+        doc.write_text("Параграф 12: Атмосфера\nСтроение атмосферы.", encoding="utf-8")
+        events = []
+        deps.on_event = lambda event, data: events.append(event)
+
+        class BoomEmbedder:
+            def encode(self, texts):
+                raise RuntimeError("embeddings 503")
+
+            def encode_query(self, text):
+                raise RuntimeError("embeddings 503")
+
+        deps.store.embedder = BoomEmbedder()
+        graph = build_graph(deps)
+        state = TutorState(num_questions=1, textbook_file=str(doc))
+        res = _feed(graph, state, ["студент", "география", "да", "квиз"])
+        assert res.source_status == "failed"
+        assert res.session_status == "failed"
+        assert "source.failed" in events
+        assert res.agent_message and "индексировать" in res.agent_message
+
 
 class TestBuild:
     def test_compiles_with_memory_checkpointer(self, deps):

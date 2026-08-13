@@ -187,6 +187,8 @@ def source_entry(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
 
 
 def route_source(state: TutorState) -> str:
+    if state.source_status == "failed":
+        return NODE_SOURCE_FAILED
     if state.sources or state.collection_id or state.source_status == "ready":
         return NODE_TOPIC_GATE
     if state.textbook_file:
@@ -353,6 +355,18 @@ def wait_for_upload_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     return st.model_dump()
 
 
+def _index_failure(st: TutorState, deps: GraphDeps, err: Exception) -> TutorState:
+    """Помечает источник failed и публикует source.failed (UI показывает ошибку + подсказку)."""
+    st.source_status = "failed"
+    st.source_note = f"Ошибка индексации: {err}"
+    st.agent_message = (
+        "Не удалось проиндексировать документ (похоже, сервис эмбеддингов недоступен). "
+        "Попробуйте ещё раз чуть позже или нажмите «Найти учебник»."
+    )
+    _emit(deps, "source.failed", reason=str(err), message=st.agent_message)
+    return st
+
+
 def process_document_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     st = state.model_copy(deep=True)
     if st.textbook_scanned:
@@ -364,7 +378,10 @@ def process_document_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     source_name = st.textbook_name or path.name
     _emit(deps, "source.progress", stage="index", url="", status="indexing",
           message=f"Разбор документа {source_name}…")
-    text = parse_document(path)
+    try:
+        text = parse_document(path)
+    except Exception as e:
+        return _index_failure(st, deps, e).model_dump()
 
     if detect_text_layer(text, min_chars=deps.settings.OCR_MIN_TEXT_CHARS):
         st.textbook_scanned = True
@@ -376,16 +393,19 @@ def process_document_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         _emit(deps, "system", message=st.agent_message, kind="doc.scanned")
         return st.model_dump()
 
-    stats = process_document(
-        path, source=source_name, store=deps.store, subject=st.subject, grade=st.grade
-    )
-    st.collection_id = stats["collection"]
-    st.source_status = "ready"
-    st.sources = [{"type": "file", "path": str(path), "num_chunks": stats["num_chunks"]}]
-    st.source_note = f"Документ проиндексирован: {stats['num_chunks']} чанков"
-    st.knowledge_graph = build_or_load_textbook_graph(
-        text, source=source_name, path=path, graph_dir=deps.settings.KNOWLEDGE_GRAPH_DIR
-    ).to_dict()
+    try:
+        stats = process_document(
+            path, source=source_name, store=deps.store, subject=st.subject, grade=st.grade
+        )
+        st.collection_id = stats["collection"]
+        st.source_status = "ready"
+        st.sources = [{"type": "file", "path": str(path), "num_chunks": stats["num_chunks"]}]
+        st.source_note = f"Документ проиндексирован: {stats['num_chunks']} чанков"
+        st.knowledge_graph = build_or_load_textbook_graph(
+            text, source=source_name, path=path, graph_dir=deps.settings.KNOWLEDGE_GRAPH_DIR
+        ).to_dict()
+    except Exception as e:
+        return _index_failure(st, deps, e).model_dump()
     st.awaiting_topic = True
     _emit(deps, "source.progress", stage="index", url="", status="done",
           message=st.source_note)
@@ -395,7 +415,9 @@ def process_document_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
 
 
 def route_doc_result(state: TutorState) -> str:
-    """Маршрут после process_document: скан → запрос страниц / обработка; индекс готов → гейт темы."""
+    """Маршрут после process_document: failed → стоп; скан → запрос страниц; индекс готов → гейт темы."""
+    if state.source_status == "failed":
+        return NODE_SOURCE_FAILED
     if not state.textbook_scanned:
         return NODE_TOPIC_GATE
     if state.textbook_pages is None and state.pending_answer is not None:
@@ -475,22 +497,24 @@ def handle_doc_pages_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         return st.model_dump()
 
     source_name = st.textbook_name or path.name
-    chunks = _make_chunks(text, source=source_name, subject=st.subject, grade=st.grade)
-    offset = st.page_offset or 0
-    printed_start = phys_start + offset
-    printed_end = phys_end + offset
-    for chunk in chunks:
-        chunk.page_number = f"{printed_start}-{printed_end}"
-    deps.store.add(chunks)
-
-    st.collection_id = "ocr"
-    st.source_status = "ready"
-    st.sources = [{"type": "ocr", "path": str(path), "pages": [phys_start, phys_end],
-                   "num_chunks": len(chunks), "page_offset": offset}]
-    st.source_note = f"OCR страниц {phys_start}-{phys_end}: {len(chunks)} чанков"
-    st.knowledge_graph = build_or_load_textbook_graph(
-        text, source=source_name, path=path, graph_dir=deps.settings.KNOWLEDGE_GRAPH_DIR
-    ).to_dict()
+    try:
+        chunks = _make_chunks(text, source=source_name, subject=st.subject, grade=st.grade)
+        offset = st.page_offset or 0
+        printed_start = phys_start + offset
+        printed_end = phys_end + offset
+        for chunk in chunks:
+            chunk.page_number = f"{printed_start}-{printed_end}"
+        deps.store.add(chunks)
+        st.collection_id = "ocr"
+        st.source_status = "ready"
+        st.sources = [{"type": "ocr", "path": str(path), "pages": [phys_start, phys_end],
+                       "num_chunks": len(chunks), "page_offset": offset}]
+        st.source_note = f"OCR страниц {phys_start}-{phys_end}: {len(chunks)} чанков"
+        st.knowledge_graph = build_or_load_textbook_graph(
+            text, source=source_name, path=path, graph_dir=deps.settings.KNOWLEDGE_GRAPH_DIR
+        ).to_dict()
+    except Exception as e:
+        return _index_failure(st, deps, e).model_dump()
     st.awaiting_topic = True
     st.textbook_pages = answer
     st.textbook_topic = req.topic
@@ -746,6 +770,7 @@ def build_graph(deps: Optional[GraphDeps] = None, checkpointer: Any = None) -> A
         NODE_PROCESS_DOCUMENT,
         route_doc_result,
         {
+            NODE_SOURCE_FAILED: NODE_SOURCE_FAILED,
             NODE_TOPIC_GATE: NODE_TOPIC_GATE,
             NODE_HANDLE_DOC_PAGES: NODE_HANDLE_DOC_PAGES,
             NODE_ASK_PAGE_RANGE: NODE_ASK_PAGE_RANGE,
