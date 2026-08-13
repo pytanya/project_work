@@ -39,6 +39,7 @@ async def upload_document(
     session.state = session.state.model_copy(
         update={
             "textbook_file": str(dest),
+            "textbook_name": Path(file.filename or "doc").name,
             "has_textbook": True,
             "sources": [],
             "collection_id": None,

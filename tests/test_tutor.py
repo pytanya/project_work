@@ -11,6 +11,7 @@ from src.tutor import (
     difficulty_for_grade,
     evaluate_answer,
     explain_error,
+    generate_lesson,
     generate_question,
     grade_prompt,
     parse_llm_json,
@@ -155,6 +156,19 @@ class TestEvaluateAnswer:
         assert graded.correct is False
         assert graded.model_used != "reference"
         assert "Б" in sent["user"]  # эталон ответа передан в промпт экзаменатора
+
+    def test_generate_lesson_json(self):
+        state = _state()
+        fake = lambda m: '{"text": "Атмосфера — газовая оболочка Земли. Она защищает планету."}'
+        text = generate_lesson("Атмосфера", ["контекст"], state, llm_call=fake)
+        assert "газовая оболочка" in text
+        assert len(text) > 30
+
+    def test_generate_lesson_fallback_on_garbage(self):
+        state = _state()
+        fake = lambda m: "не json вообще"
+        text = generate_lesson("Атмосфера", ["Атмосфера — воздушная оболочка Земли."], state, llm_call=fake)
+        assert "воздушная оболочка" in text
 
 
 class TestAdjustDifficulty:

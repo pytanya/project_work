@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from src.config import settings as default_settings
@@ -55,11 +55,15 @@ async def select_topic(session_id: str, body: TopicBody, store: SessionStore = D
         if n.get("id") == body.topic_id:
             title = n.get("title", "")
             break
-    if not title and not kg.to_dict()["nodes"]:
-        return {"ok": False, "error": "Граф знаний ещё не построен"}
+    if not title:
+        raise HTTPException(status_code=404, detail="Тема не найдена в графе знаний")
 
     session.state = session.state.model_copy(
-        update={"active_topic": body.topic_id, "topic": title or session.state.topic}
+        update={
+            "active_topic": body.topic_id,
+            "topic": title or session.state.topic,
+            "awaiting_topic": False,
+        }
     )
     session.history.append({"role": "system", "text": f"Подготовка по теме: {title or body.topic_id}"})
     await run_step(session)

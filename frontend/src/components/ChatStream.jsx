@@ -1,5 +1,6 @@
 // ChatStream — стриминг событий агента (раздел 9.2)
 import ExplanationPanel from './ExplanationPanel'
+import LessonPanel from './LessonPanel'
 
 export default function ChatStream({ feed }) {
   return (
@@ -9,6 +10,11 @@ export default function ChatStream({ feed }) {
           {m.kind === 'user' && <div className="bubble user">{m.text}</div>}
           {m.kind === 'intake' && <div className="bubble agent intake">📋 {m.text}</div>}
           {m.kind === 'quiz' && <div className="bubble agent quiz">🎯 {m.text}</div>}
+          {m.kind === 'lesson' && (
+            <div className="bubble agent">
+              <LessonPanel text={m.text} topic={m.data?.topic} />
+            </div>
+          )}
           {m.kind === 'explanation' && (
             <div className="bubble agent">
               <ExplanationPanel

@@ -17,6 +17,7 @@ describe('ChatStream', () => {
       { id: 'a6', kind: 'system', text: 'заметка' },
       { id: 'a7', kind: 'source', text: 'поиск…' },
       { id: 'a8', kind: 'error', text: 'ошибка' },
+      { id: 'a9', kind: 'lesson', text: 'Урок про атмосферу', data: { topic: 'Атмосфера' } },
     ]
     render(<ChatStream feed={feed} />)
     expect(screen.getByText('привет')).toBeInTheDocument()
@@ -28,5 +29,7 @@ describe('ChatStream', () => {
     expect(screen.getByText(/заметка/)).toBeInTheDocument()
     expect(screen.getByText(/поиск…/)).toBeInTheDocument()
     expect(screen.getByText(/ошибка/)).toBeInTheDocument()
+    expect(screen.getByText(/Урок про атмосферу/)).toBeInTheDocument()
+    expect(screen.getByText(/Урок: Атмосфера/)).toBeInTheDocument()
   })
 })

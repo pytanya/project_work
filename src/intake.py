@@ -23,7 +23,7 @@ INTAKE_QUESTIONS: Dict[str, str] = {
     "topic": "Какая тема или раздел?",
     "has_textbook": "Есть ли у тебя учебник? (да/нет)",
     "chapter": "Какая глава/раздел нужна? (или 'все')",
-    "mode": "Что будем делать: квиз, объяснение или глубокий разбор?",
+    "mode": "Что будем делать: урок (изучить тему), квиз, объяснение или глубокий разбор?",
 }
 
 # Порядок вопросов чек-листа (5.1)
@@ -34,6 +34,8 @@ CHECKLIST_ORDER = [
 _MODE_MAP = {
     "квиз": "quiz", "квизы": "quiz", "тест": "quiz", "quiz": "quiz",
     "объяснение": "explain", "объясни": "explain", "explain": "explain",
+    "урок": "lesson", "изучить": "lesson", "изучение": "lesson",
+    "изучить тему": "lesson", "lesson": "lesson", "обучение": "lesson",
     "глубокий разбор": "deep_dive", "deep dive": "deep_dive",
     "deep_dive": "deep_dive", "глубоко": "deep_dive", "подробно": "deep_dive",
 }

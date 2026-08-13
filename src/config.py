@@ -119,6 +119,8 @@ class Settings(BaseSettings):
     CHROMA_PERSIST_DIR: Path = Field(default=BASE_DIR / "data" / "chroma")
     SOURCES_CACHE_DIR: Path = Field(default=BASE_DIR / "data" / "sources_cache")
     CHECKPOINT_DB: Path = Field(default=BASE_DIR / "data" / "checkpoints.db")
+    # Дисковый кэш графов знаний учебников (per-textbook, переживает сессии)
+    KNOWLEDGE_GRAPH_DIR: Path = Field(default=BASE_DIR / "data" / "knowledge_graphs")
 
     # --- Лимиты (В-7) ---
     MAX_LLM_CALLS_PER_SESSION: int = Field(default=90, ge=1)
@@ -190,7 +192,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "FGOS_REFERENCE_DIR", "TEXTBOOKS_DOWNLOADS_DIR", "CHROMA_PERSIST_DIR",
-        "SOURCES_CACHE_DIR", "CHECKPOINT_DB", "LOGS_DIR", "OUTPUT_DIR",
+        "SOURCES_CACHE_DIR", "CHECKPOINT_DB", "KNOWLEDGE_GRAPH_DIR", "LOGS_DIR", "OUTPUT_DIR",
         mode="before",
     )
     @classmethod

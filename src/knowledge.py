@@ -100,28 +100,57 @@ class ApiEmbedder:
         model: str = "intfloat/multilingual-e5-large",
         timeout: float = 60.0,
         batch_size: int = API_BATCH,
+        retries: int = 3,
+        retry_backoff: float = 2.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
         self.batch_size = batch_size
+        self.retries = retries
+        self.retry_backoff = retry_backoff
 
     def _call(self, texts: List[str]) -> List[List[float]]:
         out: List[List[float]] = []
         for i in range(0, len(texts), self.batch_size):
             batch = texts[i : i + self.batch_size]
             payload = {"model": self.model, "input": batch}
-            resp = httpx.post(
-                self.base_url + "/embeddings",
-                json=payload,
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                timeout=self.timeout,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            out.extend(d["embedding"] for d in data["data"])
+            out.extend(self._post_batch(payload))
         return out
+
+    def _post_batch(self, payload: Dict[str, Any]) -> List[List[float]]:
+        """POST батча с ретраями на временные сбои (503/таймаут/сеть).
+
+        Провайдер эмбеддингов бывает нестабилен (503/read-timeout) — без ретраев
+        случайный сбой роняет всю индексацию. 4xx и 5xx-константные не ретраим.
+        """
+        import time
+
+        url = self.base_url + "/embeddings"
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        last_err: Optional[Exception] = None
+        for attempt in range(self.retries + 1):
+            if attempt:
+                time.sleep(self.retry_backoff * (2 ** (attempt - 1)))
+            try:
+                resp = httpx.post(url, json=payload, headers=headers, timeout=self.timeout)
+                status = getattr(resp, "status_code", None)
+                if status in (429, 500, 502, 503, 504) and attempt < self.retries:
+                    last_err = httpx.HTTPStatusError(
+                        f"temporary {status}", request=getattr(resp, "request", None), response=resp
+                    )
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                return [d["embedding"] for d in data["data"]]
+            except (httpx.TimeoutException, httpx.TransportError, httpx.NetworkError) as e:
+                last_err = e
+                if attempt >= self.retries:
+                    break
+        if isinstance(last_err, httpx.HTTPStatusError):
+            raise last_err
+        raise (last_err or httpx.TransportError(f"embeddings недоступны: {url}"))
 
     def encode(self, texts: List[str]) -> List[List[float]]:
         return self._call([_e5_prefix(self.model, "passage") + t for t in texts])

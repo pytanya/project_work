@@ -244,6 +244,58 @@ class TestApiEmbedder:
         emb.encode_query("атмосфера")
         assert captured["input"][0].startswith("query: ")
 
+    def test_retries_on_temporary_503(self, monkeypatch):
+        """503 → ретрай с бэк-оффом → успех; итоговая ошибка 5xx бросается."""
+        calls = {"n": 0}
+
+        class FakeResp:
+            def __init__(self, status):
+                self.status_code = status
+
+            def raise_for_status(self):
+                if self.status_code >= 400:
+                    import httpx
+                    raise httpx.HTTPStatusError("err", request=None, response=None)
+
+            def json(self):
+                return {"data": [{"embedding": [1.0]}]}
+
+        def fake_post(url, json, headers, timeout):
+            calls["n"] += 1
+            return FakeResp(503 if calls["n"] < 3 else 200)
+
+        monkeypatch.setattr("src.knowledge.httpx.post", fake_post)
+        emb = ApiEmbedder(
+            base_url="https://x/v1", api_key="k", model="intfloat/multilingual-e5-large",
+            retries=3, retry_backoff=0.0,
+        )
+        vecs = emb.encode(["а"])
+        assert len(vecs) == 1
+        assert calls["n"] == 3  # 2 сбоя + успех
+
+    def test_raises_after_retries_exhausted(self, monkeypatch):
+        import httpx
+
+        class FakeResp:
+            status_code = 503
+
+            def raise_for_status(self):
+                raise httpx.HTTPStatusError("err", request=None, response=None)
+
+            def json(self):
+                return {"data": []}
+
+        def fake_post(url, json, headers, timeout):
+            return FakeResp()
+
+        monkeypatch.setattr("src.knowledge.httpx.post", fake_post)
+        emb = ApiEmbedder(
+            base_url="https://x/v1", api_key="k", model="intfloat/multilingual-e5-large",
+            retries=2, retry_backoff=0.0,
+        )
+        with pytest.raises(httpx.HTTPStatusError):
+            emb.encode(["а"])
+
 
 class TestMakeEmbedder:
     @pytest.fixture

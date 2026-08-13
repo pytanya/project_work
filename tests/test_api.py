@@ -230,6 +230,24 @@ class TestGraph:
         assert len(r.json()["nodes"]) >= 3  # book + 2 параграфа
         assert r.json()["stats"]["nodes"] >= 3
 
+    def test_topic_gate_after_upload(self, client):
+        sid = self._session_with_graph(client)
+        st = client.get(f"/api/sessions/{sid}").json()
+        assert st["awaiting_topic"] is True
+        assert st["active_topic"] is None
+        g = client.get(f"/api/sessions/{sid}/graph").json()
+        node = next(n for n in g["nodes"] if n.get("type") == "section")
+        r = client.post(f"/api/sessions/{sid}/topic", json={"topic_id": node["id"]})
+        assert r.status_code == 200
+        st = client.get(f"/api/sessions/{sid}").json()
+        assert st["awaiting_topic"] is False
+        assert st["active_topic"] == node["id"]
+
+    def test_select_topic_invalid_id(self, client):
+        sid = self._session_with_graph(client)
+        r = client.post(f"/api/sessions/{sid}/topic", json={"topic_id": "nope"})
+        assert r.status_code == 404
+
     def test_select_topic_generates_question(self, client):
         sid = self._session_with_graph(client)
         g = client.get(f"/api/sessions/{sid}/graph").json()

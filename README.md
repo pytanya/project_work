@@ -76,14 +76,27 @@ uvicorn api.app:app --host 0.0.0.0 --port 8000   # API: http://127.0.0.1:8000/do
 cd frontend && npm install && npm run dev        # UI: http://localhost:5173
 ```
 
-REST: сессии, intake, upload, find-textbook, message, cancel, history, health, metrics.
+REST: сессии, intake, upload, find-textbook, message, topic, graph, cancel, history, health, metrics.
 WS `/api/sessions/{id}/ws`: `intake.question`, `source.progress`, `quiz.card`,
-`tutor.explanation`, `tutor.summary`, `source.failed`.
+`tutor.explanation`, `tutor.lesson`, `tutor.summary`, `graph.ready`, `source.failed`.
+
+### Граф знаний и подготовка по темам
+
+После индексации учебника строится граф тем (`data/knowledge_graphs/<hash>.json`),
+и агент **ждёт выбора темы** (гейт): `GET /graph` возвращает nodes/edges,
+`POST /topic {topic_id}` активирует урок и генерирует вопрос по нему.
+Граф кешируется по версии схемы + имени файла + размеру (инвалидация при смене структуры).
+
+### Режимы
+
+- `квиз` — вопросы по теме с адаптивной сложностью (↑ 3 верных, ↓ 2 ошибки), знаниевая карта, объяснение ошибки с цитатой §N.
+- `урок` — перед квизом тьютор объясняет тему по RAG-контексту, спрашивает «готов к квизу?» (да/нет).
+- `объяснение`, `глубокий разбор` — пояснения и экспертные разборы.
 
 ## Тесты и eval
 
 ```bash
-python -m pytest tests/ -v              # 236 тестов (юнит + интеграционные RouterAI)
+python -m pytest tests/ -v              # 321 тестов (юнит + интеграционные RouterAI)
 python evals/edututor_eval.py --runs 3  # EduTutorEval: intake/find_textbook/judge + intent accuracy
 python evals/edututor_eval.py --mock    # офлайн-режим
 ```
@@ -92,7 +105,7 @@ python evals/edututor_eval.py --mock    # офлайн-режим
 
 | Вопрос | Решение |
 |--------|---------|
-| Embeddings | `EMBEDDING_PROVIDER=api` (RouterAI `intfloat/multilingual-e5-large`) — без локального torch/MSVC; `local` (sentence-transformers e5-small) — после установки VC++ |
+| Embeddings | `EMBEDDING_PROVIDER=api` (RouterAI `intfloat/multilingual-e5-large`) — без локального torch/MSVC; `local` (sentence-transformers e5-small) — после установки VC++; ретраи с бэк-оффом на 429/5xx/таймаут |
 | Векторное хранилище | `VECTOR_STORE=numpy` (портативный, без MSVC); `chroma` (ChromaDB) — после VC++ |
 | Судья (К-4) | Gemini на RouterAI (без VPN); OpenRouter для судьи не используется |
 | Источники (К-2) | Только легальные: локальные PDF (Plan B), Викиучебник, открытые страницы; капчу не обходим |

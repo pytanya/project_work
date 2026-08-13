@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 from api.schemas import QuizCard
 
-MODE_LITERAL = Literal["quiz", "explain", "deep_dive"]
+MODE_LITERAL = Literal["quiz", "explain", "deep_dive", "lesson"]
 DIFFICULTY_LITERAL = Literal["easy", "medium", "hard"]
 
 
@@ -27,6 +27,7 @@ class IntakeState(BaseModel):
     topic: Optional[str] = None
     has_textbook: Optional[bool] = None
     textbook_file: Optional[str] = None
+    textbook_name: Optional[str] = None       # оригинальное имя файла (стабильный ключ графа)
     textbook_author: Optional[str] = None
     textbook_url: Optional[str] = None
     chapter: Optional[str] = None
@@ -60,6 +61,12 @@ class TutorState(IntakeState):
     # Граф знаний учебника (nodes/edges) + активная тема для подготовки по темам
     knowledge_graph: Optional[Dict[str, Any]] = None
     active_topic: Optional[str] = None
+    awaiting_topic: bool = False  # после индексации ждём выбор темы/урока
+
+    # --- Режим «урок» (объяснение темы перед квизом) ---
+    lesson_text: Optional[str] = None
+    lesson_done: bool = False      # урок по теме показан
+    lesson_confirmed: bool = False # ученик подтвердил переход к квизу
 
     # --- Тьюторинг (Ж-6) ---
     knowledge_map: Dict[str, float] = Field(default_factory=dict)

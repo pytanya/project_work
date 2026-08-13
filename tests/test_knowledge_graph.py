@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from src.knowledge_graph import (
     KnowledgeGraph,
     PART_OF,
     PREREQUISITE,
     RELATED,
+    build_or_load_textbook_graph,
     build_textbook_graph,
+    graph_cache_key,
+    load_cached_graph,
+    save_graph,
 )
 
 OPK_TEXT = (
@@ -85,3 +91,47 @@ class TestSerialization:
         kg = build_textbook_graph(OPK_TEXT, source="opk")
         for n, d in kg.graph.nodes(data=True):
             assert d.get("color")
+
+
+class TestCache:
+    def test_key_stable_for_same_file(self, tmp_path: Path):
+        f = tmp_path / "book.pdf"
+        f.write_bytes(b"%PDF-1.4 fake")
+        k1 = graph_cache_key("book.pdf", f)
+        k2 = graph_cache_key("book.pdf", f)
+        assert k1 == k2
+
+    def test_key_changes_when_file_changes(self, tmp_path: Path):
+        f = tmp_path / "book.pdf"
+        f.write_bytes(b"%PDF-1.4 fake")
+        k1 = graph_cache_key("book.pdf", f)
+        f.write_bytes(b"%PDF-1.4 fake longer content changed")
+        k2 = graph_cache_key("book.pdf", f)
+        assert k1 != k2
+
+    def test_build_or_load_saves_and_reuses(self, tmp_path: Path):
+        f = tmp_path / "book.pdf"
+        f.write_bytes(b"data")
+        key = graph_cache_key("book", f)
+
+        kg1 = build_or_load_textbook_graph(OPK_TEXT, source="book", path=f, graph_dir=tmp_path / "g")
+        cache_path = tmp_path / "g" / f"{key}.json"
+        assert cache_path.exists()
+        assert load_cached_graph(key, tmp_path / "g") is not None
+
+        # повторный вызов с тем же файлом → грузим из кэша (тот же граф)
+        kg2 = build_or_load_textbook_graph(OPK_TEXT, source="book", path=f, graph_dir=tmp_path / "g")
+        assert kg2.stats() == kg1.stats()
+
+    def test_no_cache_when_path_none(self, tmp_path: Path):
+        kg = build_or_load_textbook_graph(OPK_TEXT, source="book", path=None, graph_dir=tmp_path / "g")
+        assert kg.stats()["nodes"] >= 2  # строится, но не кэшируется
+        assert not list((tmp_path / "g").glob("*.json"))
+
+    def test_save_and_load_roundtrip(self, tmp_path: Path):
+        kg = build_textbook_graph(OPK_TEXT, source="opk")
+        p = save_graph("k1", kg, tmp_path)
+        assert p.exists()
+        loaded = load_cached_graph("k1", tmp_path)
+        assert loaded is not None
+        assert loaded.stats() == kg.stats()

@@ -59,6 +59,7 @@ def deps(make_settings, tmp_path):
         TEXTBOOKS_DOWNLOADS_DIR=str(tmp_path / "downloads"),
         MAX_INTAKE_ITERATIONS=8,
         OCR_MIN_TEXT_CHARS=20,
+        KNOWLEDGE_GRAPH_DIR=str(tmp_path / "kg"),
     )
     embedder = FakeEmbedder()
     store = NumpyVectorStore("t", embedder)
@@ -164,6 +165,32 @@ class TestQuizFlow:
         assert res.records[0]["judge_score"] == 8.0
         assert res.records[0]["model_used"] == "tutor"
 
+    def test_lesson_mode_before_quiz(self, deps):
+        """Режим «урок»: объяснение темы → подтверждение → квиз."""
+        def llm(messages):
+            user = messages[-1]["content"] if messages else ""
+            if "Контекст учебника" in user:
+                return '{"text": "Атмосфера — газовая оболочка Земли. Она защищает планету. Азот и кислород — её основа."}'
+            return _GEN
+
+        deps.tutor_llm = llm
+        graph = build_graph(deps)
+        state = TutorState(num_questions=1, sources=[{"type": "web", "url": "x"}], collection_id="web")
+        res = _feed(graph, state, ["студент", "география", "нет", "урок"])
+        assert res.mode == "lesson"
+        assert res.lesson_done is True
+        assert res.lesson_text and "газовая оболочка" in res.lesson_text
+        assert res.current_question is None  # квиз ещё не начался
+        # «нет» → повтор урока (перегенерируется сразу, квиз не стартует)
+        res = _invoke(graph, {**res.model_dump(), "pending_answer": "нет"})
+        assert res.lesson_done is True
+        assert res.lesson_confirmed is False
+        assert res.current_question is None
+        # «да» → переход к квизу
+        res = _invoke(graph, {**res.model_dump(), "pending_answer": "да"})
+        assert res.lesson_confirmed is True
+        assert res.current_question is not None
+
 
 class TestSourceFlow:
     def test_source_failed_path(self, deps, monkeypatch):
@@ -193,13 +220,17 @@ class TestSourceFlow:
         graph = build_graph(deps)
         state = TutorState(num_questions=1, textbook_file=str(doc))
         res = _feed(graph, state, ["студент", "география", "да", "квиз"])
-        # после upload файл индексируется, задаётся вопрос квиза
+        # после upload файл индексируется, строит граф и ЖДЁТ выбор темы
         assert res.source_status == "ready"
-        assert res.agent_question
-        assert res.current_question is not None
-        # построен граф знаний учебника (подготовка по темам)
+        assert res.awaiting_topic is True
+        assert res.current_question is None
         assert res.knowledge_graph is not None
         assert len(res.knowledge_graph["nodes"]) >= 3  # book + 2 параграфа
+        # выбираем тему по названию → генерируется вопрос
+        res = _invoke(graph, {**res.model_dump(), "pending_answer": "Атмосфера"})
+        assert res.awaiting_topic is False
+        assert res.active_topic is not None
+        assert res.current_question is not None
 
     def test_has_textbook_true_without_file_asks_upload(self, deps):
         """«да, есть учебник», но файл не загружен → просим загрузить, а не веб-поиск."""
@@ -291,11 +322,16 @@ class TestScannedDoc:
         assert res.textbook_scanned is True
         assert res.agent_question and "страниц" in res.agent_question
 
-        # 2) ответ «1-1, Атмосфера» → OCR(мок) → индекс → вопрос квиза
+        # 2) ответ «1-1, Атмосфера» → OCR(мок) → индекс → граф, ЖДЁМ тему
         res = _invoke(graph, {**res.model_dump(), "pending_answer": "1-1, Атмосфера"})
         assert res.textbook_pages == "1-1, Атмосфера"
         assert res.source_status == "ready"
         assert res.collection_id == "ocr"
+        assert res.awaiting_topic is True
+        assert res.current_question is None
+        # 3) выбираем тему → генерируется вопрос квиза
+        res = _invoke(graph, {**res.model_dump(), "pending_answer": "Атмосфера"})
+        assert res.awaiting_topic is False
         assert res.current_question is not None
         assert res.agent_question
 
@@ -321,7 +357,10 @@ class TestScannedDoc:
         res = _invoke(graph, {**res.model_dump(), "pending_answer": "не знаю"})
         assert res.doc_pages_attempts == 1
         assert res.agent_question and "открой" in res.agent_question
-        # «все» → полный OCR
+        # «все» → полный OCR → индекс → ждём тему
         res = _invoke(graph, {**res.model_dump(), "pending_answer": "все"})
         assert res.source_status == "ready"
+        assert res.awaiting_topic is True
+        # выбираем тему → квиз
+        res = _invoke(graph, {**res.model_dump(), "pending_answer": "Атмосфера"})
         assert res.current_question is not None

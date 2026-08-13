@@ -135,7 +135,10 @@ def _question_prompt(
             "\"answer_type\": \"single\"|\"multiple\"|\"open\", \"topic\": \"<тема>\", "
             "\"correct_answers\": [\"правильный вариант/модельный ответ\"]}. "
             "Для open-вопроса options=null, correct_answers = [\"эталонный ответ\"]. "
-            "Для single — ровно 1 правильный вариант, для multiple — все правильные."
+            "Для single — ровно 1 правильный вариант, для multiple — все правильные. "
+            "ВАЖНО: варианты-дистракторы делай правдоподобными — они должны быть похожи "
+            "на правильный по теме/форме, но неверны по смыслу (никакой очевидной абсурдности, "
+            "одинаковой длины и стиля с правильным)."
         )
     )
     ctx = "\n---\n".join(context)[:MAX_EXPLANATION_CHARS]
@@ -188,6 +191,52 @@ def generate_question(
     state.asked_questions.append(qid)
     state.current_question = card
     return card
+
+
+# ----------------------------------------------------------------------
+# Урок: объяснение темы перед квизом (режим lesson)
+# ----------------------------------------------------------------------
+def _lesson_prompt(topic: str, context: List[str], grade: Optional[str], curriculum: Optional[str]) -> List[Dict[str, str]]:
+    system = (
+        "Ты — тьютор EduTutor. Составь короткий понятный УРОК по теме ученика "
+        "только на основе контекста учебника. "
+        + grade_prompt(grade)
+        + (
+            f" Учебная программа: {curriculum}." if curriculum else ""
+        )
+        + (
+            " Структура: 3-5 абзацев — что это такое, главные факты, пример, "
+            "итог одним предложением. Пиши своими словами, связно, без списков-перечислений "
+            "из канцелярита, без заголовков-эмодзи. Не выдумывай факты за пределами контекста. "
+            "Верни строго JSON: {\"text\": \"полный текст урока\"}."
+        )
+    )
+    ctx = "\n---\n".join(context)[:MAX_EXPLANATION_CHARS]
+    user = f"Тема: {topic}\nКонтекст учебника:\n{ctx}"
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def generate_lesson(
+    topic: str,
+    context: List[str],
+    state: TutorState,
+    llm_call: Optional[Callable[[List[Dict[str, str]]], str]] = None,
+) -> str:
+    """Синтез урока по RAG-контексту (тьютор-модель)."""
+    from .llm_client import LLMClient
+
+    if llm_call is None:
+        client = LLMClient(role="tutor")
+        llm_call = lambda msgs: client.chat(msgs, temperature=0.4, max_tokens=700).content or ""
+
+    messages = _lesson_prompt(topic, context, state.grade, state.curriculum)
+    raw = llm_call(messages)
+    data = parse_llm_json(raw)
+    text = str(data.get("text") or raw or "").strip()
+    if len(text) < 40:
+        # Fallback: даём первый абзац контекста как урок
+        text = (context[0] if context else f"Материалы по теме «{topic}» ещё пополняются.")[:1200]
+    return text
 
 
 # ----------------------------------------------------------------------

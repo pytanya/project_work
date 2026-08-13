@@ -88,7 +88,20 @@ body {
 .card.graph { display: flex; flex-direction: column; gap: 8px; }
 .active-topic { font-size: 12.5px; color: var(--accent-strong); }
 .active-topic strong { color: var(--ink); }
-.topic-chips { display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; }
+.topic-search {
+  padding: 8px 11px; border-radius: 9px; border: 1.5px solid var(--line);
+  background: var(--card); color: var(--ink); font-family: var(--font-body); font-size: 13px; outline: none;
+}
+.topic-search:focus { border-color: var(--accent); }
+.topic-chips { display: flex; flex-direction: column; gap: 6px; max-height: 240px; overflow-y: auto; }
+.graph-svg {
+  width: 100%; height: auto; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--bg-soft, transparent); touch-action: manipulation;
+}
+.kg-node { cursor: pointer; }
+.kg-node:hover circle { stroke-width: 3; filter: brightness(1.15); }
+.kg-node.active circle { filter: drop-shadow(0 0 6px var(--accent)); }
+.kg-node text { fill: var(--ink); pointer-events: none; font-family: var(--font-body); font-weight: 600; }
 .topic-chip {
   text-align: left; padding: 8px 11px; border-radius: 9px; cursor: pointer;
   background: var(--card); border: 1.5px solid var(--line);
@@ -177,6 +190,11 @@ body {
 .check-item { font-size: 11.5px; font-weight: 600; padding: 3px 10px; border-radius: 20px; border: 1px solid var(--line); color: var(--muted); transition: all 0.2s ease; }
 .check-item.done { border-color: var(--ok); color: var(--ok); background: var(--ok-soft); }
 .check-item.pending { border-color: var(--marker); color: var(--marker); background: var(--marker-soft); }
+
+/* --- Урок (режим lesson) --- */
+.lesson { display: flex; flex-direction: column; gap: 10px; }
+.lesson-topic { font-size: 12.5px; font-weight: 700; color: var(--accent-strong); }
+.lesson p { margin: 0; line-height: 1.55; }
 
 /* --- Объяснение --- */
 .explanation-text { white-space: pre-line; }

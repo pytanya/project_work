@@ -27,7 +27,13 @@ test('полный сценарий: intake → загрузка OPK → инд�
   await expect(page.getByText(/Загружаю и индексирую/)).toBeVisible({ timeout: 30_000 })
   await expect(page.getByText(/проиндексирован/).first()).toBeVisible({ timeout: 240_000 })
 
-  // 6) приходит первый вопрос квиза
+  // 6) агент ждёт выбор темы (гейт после индексации)
+  await expect(page.getByText(/Какую тему изучаем/).first()).toBeVisible({ timeout: 60_000 })
+  await expect(page.locator('.topic-chip').first()).toBeVisible({ timeout: 30_000 })
+  await page.locator('.topic-chip').first().click()
+
+  // 6a) в панели виден выбранный урок, приходит первый вопрос квиза
+  await expect(page.getByText(/Изучаем:/).first()).toBeVisible({ timeout: 15_000 })
   await expect(page.locator('.card.quiz')).toBeVisible({ timeout: 60_000 })
 
   // 7) отвечаем на вопрос

@@ -12,6 +12,7 @@ checkpointer (AsyncSqliteSaver) — опционально (расширение
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -36,7 +37,7 @@ from .knowledge import (
     parse_document,
     process_document,
 )
-from .knowledge_graph import build_textbook_graph
+from .knowledge_graph import build_or_load_textbook_graph, build_textbook_graph
 from .states import TutorState
 
 logger = logging.getLogger("edututor.graph")
@@ -46,6 +47,8 @@ NODE_PROCESS_DOCUMENT = "process_document"
 NODE_FIND_TEXTBOOK = "find_textbook"
 NODE_SOURCE_FAILED = "source_failed"
 NODE_WAIT_FOR_UPLOAD = "wait_for_upload"
+NODE_TOPIC_GATE = "topic_gate"
+NODE_LESSON = "lesson_node"
 NODE_ASK_PAGE_RANGE = "ask_page_range"
 NODE_HANDLE_DOC_PAGES = "handle_doc_pages"
 NODE_TUTOR_NEXT = "tutor_next"
@@ -185,13 +188,156 @@ def source_entry(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
 
 def route_source(state: TutorState) -> str:
     if state.sources or state.collection_id or state.source_status == "ready":
-        return NODE_TUTOR_NEXT
+        return NODE_TOPIC_GATE
     if state.textbook_file:
         return NODE_PROCESS_DOCUMENT
     if state.has_textbook is True:
         # «да, есть учебник», но файл ещё не загружен — ждём загрузку, а не веб-поиск
         return NODE_WAIT_FOR_UPLOAD
     return NODE_FIND_TEXTBOOK
+
+
+def _match_topic(kg: Any, text: str) -> Optional[str]:
+    """Матчит ответ ученика с узлом графа: «урок N» или подстрока названия."""
+    t = (text or "").strip().lower()
+    if not t:
+        return None
+    nodes = kg.to_dict()["nodes"]
+    m = re.match(r"урок\s*(\d{1,3})", t)
+    if m:
+        num = m.group(1)
+        for n in nodes:
+            title = n.get("title", "").lower()
+            if (n.get("id", "").endswith(f":{num}")
+                    or title.startswith(f"урок {num}")
+                    or title.startswith(f"урок {num}:")):
+                return n["id"]
+    for n in nodes:
+        if t in n.get("title", "").lower():
+            return n["id"]
+    # Вырожденный граф (нет заголовков разделов): единственная тема = вся тема книги
+    others = [n for n in nodes if n.get("type") not in ("book",)]
+    if len(others) == 1:
+        return others[0]["id"]
+    return None
+
+
+def _node_title(kg: Any, node_id: str) -> str:
+    for n in kg.to_dict()["nodes"]:
+        if n.get("id") == node_id:
+            return n.get("title", node_id)
+    return node_id
+
+
+def topic_gate_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
+    """Гейт выбора темы: после индексации ждём «какую тему изучаем», а не авто-квиз."""
+    from .knowledge_graph import KnowledgeGraph
+
+    st = state.model_copy(deep=True)
+    if not st.awaiting_topic:
+        return st.model_dump()
+
+    if st.pending_answer is not None:
+        answer = (st.pending_answer or "").strip()
+        st.pending_answer = None
+        low = answer.lower()
+        if low in ("отмена", "cancel", "выйти", "не надо", "перейти к квизу", "без темы"):
+            st.active_topic = None
+            st.awaiting_topic = False
+            st.agent_question = None
+            st.agent_message = "Ок, готовим квиз по всему учебнику."
+            _emit(deps, "system", message=st.agent_message, kind="topic.all")
+            return st.model_dump()
+        if low in ("все", "весь учебник", "всё", "вся", "все темы"):
+            st.active_topic = None
+            st.awaiting_topic = False
+            st.agent_question = None
+            st.agent_message = "Готовим квиз по всему учебнику."
+            _emit(deps, "system", message=st.agent_message, kind="topic.all")
+            return st.model_dump()
+        kg = KnowledgeGraph.from_dict(st.knowledge_graph or {})
+        node_id = _match_topic(kg, answer)
+        if node_id:
+            st.active_topic = node_id
+            st.awaiting_topic = False
+            st.agent_question = None
+            title = _node_title(kg, node_id)
+            st.agent_message = f"Тема выбрана: {title}. Готовимся!"
+            _emit(deps, "system", message=st.agent_message, kind="topic.selected")
+            return st.model_dump()
+        st.agent_question = "Не нашёл такую тему. Выбери из «Темы учебника» слева или напиши «Урок N» / название."
+        return st.model_dump()
+
+    st.agent_question = (
+        "Учебник проиндексирован. Какую тему изучаем? Выбери из «Темы учебника» слева "
+        "или назови урок (например: «Урок 5») / напиши «все» для всего учебника."
+    )
+    if not st.agent_message:
+        st.agent_message = "Выберите тему для подготовки."
+    _emit(deps, "intake.question", question=st.agent_question, missing_fields=["topic"])
+    return st.model_dump()
+
+
+def route_after_topic_gate(state: TutorState) -> str:
+    """После гейта: выбрана тема → урок (если режим lesson) или квиз; иначе ждём (END)."""
+    if state.awaiting_topic:
+        return END
+    if state.mode == "lesson" and not state.lesson_confirmed:
+        return NODE_LESSON
+    return NODE_TUTOR_NEXT
+
+
+def lesson_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
+    """Режим «урок»: объясняем тему по RAG-контексту, затем спрашиваем «готов к квизу?»."""
+    st = state.model_copy(deep=True)
+    if st.lesson_confirmed:
+        return st.model_dump()
+
+    if st.pending_answer is not None:
+        low = (st.pending_answer or "").strip().lower()
+        st.pending_answer = None
+        if low in ("да", "yes", "у", "готов", "конечно", "начинаем", "квиз", "поехали", "всё"):
+            st.lesson_confirmed = True
+            st.lesson_done = True
+            st.agent_question = None
+            _emit(deps, "system", message="Отлично! Начинаем квиз.", kind="lesson.done")
+            return st.model_dump()
+        # «нет»/повтор → сбрасываем и перегенерируем урок ниже
+        st.lesson_done = False
+        st.lesson_text = None
+        st.agent_question = None
+        _emit(deps, "system", message="Повторяем урок по теме.", kind="lesson.repeat")
+
+    if st.lesson_text:
+        # урок уже показан — ждём подтверждения
+        st.lesson_done = True
+        st.agent_question = "Готов(а) перейти к квизу? (да / нет)"
+        _emit(deps, "intake.question", question=st.agent_question, missing_fields=["lesson_confirm"])
+        return st.model_dump()
+
+    # Генерируем урок по активной теме
+    topic = st.topic or st.subject or "общая тема"
+    if st.active_topic:
+        from .knowledge_graph import KnowledgeGraph
+        kg = KnowledgeGraph.from_dict(st.knowledge_graph or {})
+        title = _node_title(kg, st.active_topic)
+        if title:
+            topic = title
+    chunks = _rag_chunks(deps.store, topic, st, k=5)
+    context = [c.chunk.text for c in chunks] or ["Нет контекста по теме."]
+    st.lesson_text = tutor_mod.generate_lesson(topic, context, st, llm_call=deps.tutor_llm)
+    st.lesson_done = True
+    _emit(deps, "tutor.lesson", text=st.lesson_text, topic=topic)
+    st.agent_message = "Урок по теме готов. Можно задать вопрос или перейти к квизу."
+    _emit(deps, "system", message=st.agent_message, kind="lesson.ready")
+    return st.model_dump()
+
+
+def route_after_lesson(state: TutorState) -> str:
+    """После урока: подтверждён переход к квизу → квиз; иначе ждём (END)."""
+    if state.lesson_confirmed:
+        return NODE_TUTOR_NEXT
+    return END
 
 
 def wait_for_upload_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
@@ -215,8 +361,9 @@ def process_document_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     if not st.textbook_file:
         return {"source_status": "failed", "source_note": "no file"}
     path = Path(st.textbook_file)
+    source_name = st.textbook_name or path.name
     _emit(deps, "source.progress", stage="index", url="", status="indexing",
-          message=f"Разбор документа {path.name}…")
+          message=f"Разбор документа {source_name}…")
     text = parse_document(path)
 
     if detect_text_layer(text, min_chars=deps.settings.OCR_MIN_TEXT_CHARS):
@@ -230,13 +377,16 @@ def process_document_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         return st.model_dump()
 
     stats = process_document(
-        path, source=path.name, store=deps.store, subject=st.subject, grade=st.grade
+        path, source=source_name, store=deps.store, subject=st.subject, grade=st.grade
     )
     st.collection_id = stats["collection"]
     st.source_status = "ready"
     st.sources = [{"type": "file", "path": str(path), "num_chunks": stats["num_chunks"]}]
     st.source_note = f"Документ проиндексирован: {stats['num_chunks']} чанков"
-    st.knowledge_graph = build_textbook_graph(text, source=path.name).to_dict()
+    st.knowledge_graph = build_or_load_textbook_graph(
+        text, source=source_name, path=path, graph_dir=deps.settings.KNOWLEDGE_GRAPH_DIR
+    ).to_dict()
+    st.awaiting_topic = True
     _emit(deps, "source.progress", stage="index", url="", status="done",
           message=st.source_note)
     _emit(deps, "graph.ready", nodes=len(st.knowledge_graph.get("nodes", [])),
@@ -245,9 +395,9 @@ def process_document_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
 
 
 def route_doc_result(state: TutorState) -> str:
-    """Маршрут после process_document: скан → запрос страниц / обработка; иначе квиз."""
+    """Маршрут после process_document: скан → запрос страниц / обработка; индекс готов → гейт темы."""
     if not state.textbook_scanned:
-        return NODE_TUTOR_NEXT
+        return NODE_TOPIC_GATE
     if state.textbook_pages is None and state.pending_answer is not None:
         return NODE_HANDLE_DOC_PAGES
     return NODE_ASK_PAGE_RANGE
@@ -324,7 +474,8 @@ def handle_doc_pages_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         st.agent_message = None
         return st.model_dump()
 
-    chunks = _make_chunks(text, source=path.name, subject=st.subject, grade=st.grade)
+    source_name = st.textbook_name or path.name
+    chunks = _make_chunks(text, source=source_name, subject=st.subject, grade=st.grade)
     offset = st.page_offset or 0
     printed_start = phys_start + offset
     printed_end = phys_end + offset
@@ -337,7 +488,10 @@ def handle_doc_pages_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     st.sources = [{"type": "ocr", "path": str(path), "pages": [phys_start, phys_end],
                    "num_chunks": len(chunks), "page_offset": offset}]
     st.source_note = f"OCR страниц {phys_start}-{phys_end}: {len(chunks)} чанков"
-    st.knowledge_graph = build_textbook_graph(text, source=path.name).to_dict()
+    st.knowledge_graph = build_or_load_textbook_graph(
+        text, source=source_name, path=path, graph_dir=deps.settings.KNOWLEDGE_GRAPH_DIR
+    ).to_dict()
+    st.awaiting_topic = True
     st.textbook_pages = answer
     st.textbook_topic = req.topic
     st.agent_message = None
@@ -347,9 +501,9 @@ def handle_doc_pages_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
 
 
 def route_after_handle(state: TutorState) -> str:
-    """После обработки страниц: готово → квиз; иначе переспросить (ask_page_range)."""
+    """После обработки страниц: готово → гейт темы; иначе переспросить (ask_page_range)."""
     if state.source_status == "ready" or state.textbook_pages is not None:
-        return NODE_TUTOR_NEXT
+        return NODE_TOPIC_GATE
     return NODE_ASK_PAGE_RANGE
 
 
@@ -556,6 +710,8 @@ def build_graph(deps: Optional[GraphDeps] = None, checkpointer: Any = None) -> A
     g.add_node(NODE_FIND_TEXTBOOK, lambda s: find_textbook_node(s, deps))
     g.add_node(NODE_SOURCE_FAILED, lambda s: source_failed_node(s, deps))
     g.add_node(NODE_WAIT_FOR_UPLOAD, lambda s: wait_for_upload_node(s, deps))
+    g.add_node(NODE_TOPIC_GATE, lambda s: topic_gate_node(s, deps))
+    g.add_node(NODE_LESSON, lambda s: lesson_node(s, deps))
     g.add_node(NODE_ASK_PAGE_RANGE, lambda s: ask_page_range_node(s, deps))
     g.add_node(NODE_HANDLE_DOC_PAGES, lambda s: handle_doc_pages_node(s, deps))
     g.add_node(NODE_TUTOR_NEXT, lambda s: {})
@@ -569,18 +725,28 @@ def build_graph(deps: Optional[GraphDeps] = None, checkpointer: Any = None) -> A
         NODE_SOURCE_ENTRY,
         route_source,
         {
-            NODE_TUTOR_NEXT: NODE_TUTOR_NEXT,
+            NODE_TOPIC_GATE: NODE_TOPIC_GATE,
             NODE_PROCESS_DOCUMENT: NODE_PROCESS_DOCUMENT,
             NODE_FIND_TEXTBOOK: NODE_FIND_TEXTBOOK,
             NODE_WAIT_FOR_UPLOAD: NODE_WAIT_FOR_UPLOAD,
         },
+    )
+    g.add_conditional_edges(
+        NODE_TOPIC_GATE,
+        route_after_topic_gate,
+        {END: END, NODE_LESSON: NODE_LESSON, NODE_TUTOR_NEXT: NODE_TUTOR_NEXT},
+    )
+    g.add_conditional_edges(
+        NODE_LESSON,
+        route_after_lesson,
+        {END: END, NODE_TUTOR_NEXT: NODE_TUTOR_NEXT},
     )
     g.add_edge(NODE_WAIT_FOR_UPLOAD, END)
     g.add_conditional_edges(
         NODE_PROCESS_DOCUMENT,
         route_doc_result,
         {
-            NODE_TUTOR_NEXT: NODE_TUTOR_NEXT,
+            NODE_TOPIC_GATE: NODE_TOPIC_GATE,
             NODE_HANDLE_DOC_PAGES: NODE_HANDLE_DOC_PAGES,
             NODE_ASK_PAGE_RANGE: NODE_ASK_PAGE_RANGE,
         },
@@ -589,7 +755,7 @@ def build_graph(deps: Optional[GraphDeps] = None, checkpointer: Any = None) -> A
         NODE_HANDLE_DOC_PAGES,
         route_after_handle,
         {
-            NODE_TUTOR_NEXT: NODE_TUTOR_NEXT,
+            NODE_TOPIC_GATE: NODE_TOPIC_GATE,
             NODE_ASK_PAGE_RANGE: NODE_ASK_PAGE_RANGE,
         },
     )

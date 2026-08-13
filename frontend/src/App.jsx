@@ -65,6 +65,9 @@ function App() {
         case 'tutor.explanation':
           push('explanation', d.message, d)
           break
+        case 'tutor.lesson':
+          push('lesson', d.text, { topic: d.topic })
+          break
         case 'tutor.summary':
           setKnowledge(d.knowledge_map || {})
           setScore({ correct: d.correct || 0, total: d.total || 0 })
@@ -151,6 +154,8 @@ function App() {
           kind: 'quiz', question: q.question, options: q.options, answerType: q.answer_type,
           topic: q.topic, difficulty: q.difficulty, questionId: q.question_id,
         })
+      } else if (d.awaiting_topic && d.agent_question) {
+        setCurrent({ kind: 'intake', question: d.agent_question, missingFields: ['topic'] })
       } else if (d.intake_field && d.agent_question) {
         setCurrent({ kind: 'intake', question: d.agent_question, missingFields: d.missing_fields })
       } else {
@@ -273,7 +278,7 @@ function App() {
           (current.kind === 'quiz' ? (
             <QuizCard q={current} onSelect={onOption} />
           ) : (
-            <IntakeWizard missing={intake.missingFields} question={current.question} />
+            <IntakeWizard missing={current.missingFields ?? intake.missingFields} question={current.question} />
           ))}
         <div className="answerbar">
           <input
