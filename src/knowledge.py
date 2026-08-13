@@ -101,7 +101,7 @@ class ApiEmbedder:
         timeout: float = 60.0,
         batch_size: int = API_BATCH,
         retries: int = 3,
-        retry_backoff: float = 2.0,
+        retry_backoff: float = 1.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
