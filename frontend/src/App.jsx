@@ -154,10 +154,9 @@ function App() {
           kind: 'quiz', question: q.question, options: q.options, answerType: q.answer_type,
           topic: q.topic, difficulty: q.difficulty, questionId: q.question_id,
         })
-      } else if (d.awaiting_topic && d.agent_question) {
-        setCurrent({ kind: 'intake', question: d.agent_question, missingFields: ['topic'] })
-      } else if (d.intake_field && d.agent_question) {
-        setCurrent({ kind: 'intake', question: d.agent_question, missingFields: d.missing_fields })
+      } else if (d.agent_question) {
+        // любой вопрос агента: интейк, «загрузите учебник», гейт темы, подтверждение урока
+        setCurrent({ kind: 'intake', question: d.agent_question, missingFields: d.missing_fields || [] })
       } else {
         setCurrent(null)
       }
@@ -186,7 +185,6 @@ function App() {
       }
       const st = await api.intakeStatus(sessionId)
       setIntake({ missingFields: st.missing_fields, complete: st.complete })
-      if (st.complete) setCurrent((c) => (c?.kind === 'intake' ? null : c))
       await resync()
     } catch (e) {
       push('error', String(e.message || e))

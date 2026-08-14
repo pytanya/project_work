@@ -1,8 +1,19 @@
 // ChatStream — стриминг событий агента (раздел 9.2)
+import { useEffect, useRef } from 'react'
 import ExplanationPanel from './ExplanationPanel'
 import LessonPanel from './LessonPanel'
 
 export default function ChatStream({ feed }) {
+  const endRef = useRef(null)
+  useEffect(() => {
+    try {
+      const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
+      endRef.current?.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'end' })
+    } catch (_) {
+      /* jsdom не реализует scrollIntoView — в тестах тихо */
+    }
+  }, [feed])
+
   return (
     <div className="chatstream">
       {feed.map((m) => (
@@ -38,6 +49,7 @@ export default function ChatStream({ feed }) {
           </p>
         </div>
       )}
+      <div ref={endRef} />
     </div>
   )
 }
