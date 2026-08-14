@@ -139,6 +139,24 @@ class TestQuizFlow:
         assert res.session_status == "completed"
         assert res.summary_text and "Квиз завершён" in res.summary_text
 
+    def test_closed_wrong_answer_skips_judge_and_expert(self, deps):
+        """Закрытый вопрос, неверный выбор → детерминированно «Ошибка» без судьи/эксперта (быстро)."""
+        def gen(m):
+            return '{"question":"Вопрос?","options":["А","Б"],"answer_type":"single","topic":"Тема","correct_answers":["Б"]}'
+        judged = {"n": 0}
+        expert = {"n": 0}
+        deps.tutor_llm = gen
+        deps.judge_llm = lambda m: judged.__setitem__("n", judged["n"] + 1) or _JUDGE
+        deps.expert_llm = lambda m: expert.__setitem__("n", expert["n"] + 1) or _EXPL
+        graph = build_graph(deps)
+        state = TutorState(num_questions=1, sources=[{"type": "web", "url": "x"}], collection_id="web")
+        res = _feed(graph, state, ["студент", "география", "нет", "квиз"])
+        res = _invoke(graph, {**res.model_dump(), "pending_answer": "А"})
+        assert "Ошибка" in res.agent_message
+        assert "Б" in res.agent_message          # правильный вариант показан без LLM
+        assert judged["n"] == 0                   # судья не вызывался
+        assert expert["n"] == 0                   # эксперт не вызывался
+
     def test_wrong_answer_triggers_explanation(self, deps):
         graph = build_graph(deps)
         state = TutorState(num_questions=1, sources=[{"type": "web", "url": "x"}], collection_id="web")

@@ -142,20 +142,22 @@ class TestEvaluateAnswer:
         assert graded.model_used == "reference"
         assert graded.score == 1.0
 
-    def test_reference_no_match_uses_llm(self):
+    def test_closed_no_match_is_deterministic_wrong(self):
+        """Закрытый вопрос, выбран неверный вариант → «Ошибка» без LLM, правильный в feedback."""
         state = _state()
         fake_gen = lambda m: '{"question":"Вопрос","options":["А","Б"],"answer_type":"single","topic":"Тема","correct_answers":["Б"]}'
         card = generate_question("Тема", ["контекст"], "medium", state, llm_call=fake_gen)
         sent = {}
 
         def fake_eval(messages):
-            sent["user"] = messages[-1]["content"]
-            return '{"score": 2, "correct": false, "feedback": "Неверно.", "citation_ok": false}'
+            sent["called"] = True
+            return '{"score": 0, "correct": false, "feedback": "x", "citation_ok": false}'
 
-        graded = evaluate_answer(card.question, "В", ["контекст"], state, llm_call=fake_eval)
+        graded = evaluate_answer(card.question, "А", ["контекст"], state, llm_call=fake_eval)
         assert graded.correct is False
-        assert graded.model_used != "reference"
-        assert "Б" in sent["user"]  # эталон ответа передан в промпт экзаменатора
+        assert graded.model_used == "reference"
+        assert "Б" in graded.feedback  # правильный ответ показан без LLM
+        assert "called" not in sent     # LLM не вызывался
 
     def test_generate_lesson_json(self):
         state = _state()

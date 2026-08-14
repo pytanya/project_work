@@ -339,12 +339,19 @@ def evaluate_answer(
     is_closed = bool(q and q.answer_type in ("single", "multiple") and q.options)
 
     # Закрытый вопрос: ответ = выбранный вариант, пре-проверка длины не нужна.
-    # Сначала — детерминированная сверка с эталоном.
+    # Сверка с эталоном детерминирована (эталон LLM предгенерён) — LLM не зовём:
+    # совпало → верно, не совпало → неверно с показом правильного варианта.
     if is_closed:
-        if refs and _ref_match(answer, refs):
+        if refs:
+            if _ref_match(answer, refs):
+                return GradedAnswer(
+                    score=1.0, correct=True, feedback="Верно!", citation_ok=True,
+                    model_used="reference", precheck_passed=True,
+                )
             return GradedAnswer(
-                score=1.0, correct=True, feedback="Верно!", citation_ok=True,
-                model_used="reference", precheck_passed=True,
+                score=0.0, correct=False,
+                feedback=f"Неверно. Правильный ответ: {', '.join(refs)}.",
+                citation_ok=True, model_used="reference", precheck_passed=True,
             )
     else:
         precheck = simplicity_precheck(answer, context)

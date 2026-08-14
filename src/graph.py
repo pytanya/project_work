@@ -656,25 +656,35 @@ def evaluate_answer_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     tutor_mod.update_knowledge_map(st, card.topic, graded.score)
     new_difficulty = tutor_mod.adjust_difficulty(st, graded.correct)
 
-    # Судья: контракт «оценка ответа ученика» (К-4)
-    judge_result = judge_evaluation(
-        card.question,
-        answer,
-        {"score": graded.score, "correct": graded.correct, "feedback": graded.feedback},
-        judge_call=deps.judge_llm,
-    )
-    st.last_judge_score = judge_result.avg_score
+    # Судья: контракт «оценка ответа ученика» (К-4). Для детерминированной
+    # сверки с эталоном (закрытый вопрос, model_used="reference") судить нечего —
+    # пропускаем LLM, ответ проверяется мгновенно.
+    deterministic = graded.model_used == "reference"
+    if not deterministic:
+        judge_result = judge_evaluation(
+            card.question,
+            answer,
+            {"score": graded.score, "correct": graded.correct, "feedback": graded.feedback},
+            judge_call=deps.judge_llm,
+        )
+        st.last_judge_score = judge_result.avg_score
+    else:
+        judge_result = None
 
     message = f"{'Верно' if graded.correct else 'Ошибка'} (оценка {round(graded.score * 10, 1)}/10)."
     if graded.feedback:
         message += f" {graded.feedback}"
-    if not graded.correct:
+    # Объяснение через эксперт-LLM — только для открытых ответов (свободный текст):
+    # у закрытых правильный вариант уже показан в feedback, эксперта не зовём.
+    if not graded.correct and not deterministic:
         explanation = tutor_mod.explain_error(
             card.question, answer, context, st, llm_call=deps.expert_llm
         )
         message += f"\nОбъяснение: {explanation['text']}"
         if explanation["citation"]["paragraph"]:
             message += f"\nЦитата: {explanation['citation']['paragraph']}"
+    else:
+        explanation = None
     st.agent_message = message
     st.current_question = None
     st.pending_answer = None
@@ -687,11 +697,12 @@ def evaluate_answer_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
             "correct": graded.correct,
             "feedback": graded.feedback,
             "model_used": graded.model_used,
-            "judge_score": judge_result.avg_score,
+            "judge_score": judge_result.avg_score if judge_result else None,
         })
 
     _emit(deps, "tutor.explanation" if not graded.correct else "system",
-          message=message, citation=explanation["citation"] if not graded.correct else None)
+          message=message,
+          citation=(explanation.get("citation") if explanation else None) if not graded.correct else None)
 
     if st.answered_count >= st.num_questions:
         st.quiz_complete = True
@@ -749,6 +760,7 @@ def build_graph(deps: Optional[GraphDeps] = None, checkpointer: Any = None) -> A
         NODE_SOURCE_ENTRY,
         route_source,
         {
+            NODE_SOURCE_FAILED: NODE_SOURCE_FAILED,
             NODE_TOPIC_GATE: NODE_TOPIC_GATE,
             NODE_PROCESS_DOCUMENT: NODE_PROCESS_DOCUMENT,
             NODE_FIND_TEXTBOOK: NODE_FIND_TEXTBOOK,
