@@ -261,7 +261,10 @@ function App() {
     <div className="app">
       <aside className="sidebar">
         <div className="brand-row">
-          <h1 className="brand">EduTutor</h1>
+          <h1 className="brand">
+            EduTutor
+            <small>умный репетитор</small>
+          </h1>
           <button className="btn small" onClick={handleNewSession} title="Создать новую сессию">
             Новая сессия
           </button>

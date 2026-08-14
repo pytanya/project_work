@@ -29,7 +29,15 @@ export default function ChatStream({ feed }) {
           {m.kind === 'error' && <div className="bubble error">⚠️ {m.text}</div>}
         </div>
       ))}
-      {feed.length === 0 && <div className="muted center">Сессия создаётся…</div>}
+      {feed.length === 0 && (
+        <div className="empty-chat">
+          <div className="mark" aria-hidden="true" />
+          <h2>Сессия создаётся…</h2>
+          <p>
+            Ответьте на вопросы тьютора внизу или загрузите учебник — и начнём урок.
+          </p>
+        </div>
+      )}
     </div>
   )
 }
