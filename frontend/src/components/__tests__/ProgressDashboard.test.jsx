@@ -17,6 +17,9 @@ describe('ProgressDashboard', () => {
 
   it('показывает счёт правильных ответов', () => {
     render(<ProgressDashboard knowledge={{}} correct={3} total={5} />)
-    expect(screen.getByText(/Правильных: 3\/5/)).toBeInTheDocument()
+    // «3/5» — в отдельном <span> (для CSS-анимации bump), поэтому матчим по частям
+    expect(screen.getByText('Правильных:')).toBeInTheDocument()
+    expect(screen.getByText('3/5')).toBeInTheDocument()
+    expect(screen.getByText('(60%)')).toBeInTheDocument()
   })
 })

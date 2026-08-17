@@ -28,7 +28,7 @@ logger = logging.getLogger("edututor.tutor")
 MAX_EXPLANATION_CHARS = 2500
 
 # Ключевые термины берём из контекста вопроса для пре-оценки (В-2)
-PRE_CHECK_MIN_LENGTH = 20
+# PRE_CHECK_MIN_LENGTH — определён ниже, рядом с simplicity_precheck()
 
 
 # ----------------------------------------------------------------------

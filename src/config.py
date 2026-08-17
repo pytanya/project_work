@@ -70,6 +70,13 @@ class Settings(BaseSettings):
     EMBEDDING_API_MODEL: str = Field(default="intfloat/multilingual-e5-large")
     # Бэкенд векторного хранилища: "numpy" (портативный, без MSVC) | "chroma" (ChromaDB).
     VECTOR_STORE: str = Field(default="numpy")
+    # Гибридный retrieval: векторный поиск + BM25 (Okapi) с fusion через RRF (7.2).
+    # BM25 — чистый Python (без зависимостей); обёртка над любым VectorStore.
+    HYBRID_RAG: bool = Field(default=True)
+    # Адаптивная сложность через LinUCB contextual bandit (модель ученика).
+    # true — выбор сложности бандитом (контекст: мастерство/класс/недавний результат);
+    # false — эвристика adjust_difficulty (3 верных → ↑, 2 ошибки → ↓).
+    ADAPTIVE_BANDIT: bool = Field(default=True)
     CHEAP_MODEL: str = Field(default="google/gemma-3-4b-it")
     CHEAP_FALLBACK_MODEL: str = Field(default="qwen/qwen3.7-flash")
     CHEAP_TIMEOUT_SEC: float = Field(default=30.0, gt=0)
@@ -179,7 +186,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "CRAWL4AI_RESPECT_ROBOTS", "CRAWL4AI_PLAYWRIGHT_ENABLED",
-        "CRAWL4AI_PLAYWRIGHT_HEADLESS", "PHOENIX_ENABLED",
+        "PHOENIX_ENABLED", "HYBRID_RAG", "ADAPTIVE_BANDIT",
         mode="before",
     )
     @classmethod

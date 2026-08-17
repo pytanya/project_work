@@ -26,6 +26,6 @@ npm run preview      # превью собранного билда
 ## Тесты
 
 ```bash
-npm test             # Vitest: 21 тестов (компоненты + App, jsdom)
-npm run e2e          # Playwright: E2E против живого бэкенда (автостарт uvicorn+vite)
+npm test             # Vitest: 27 тестов (компоненты + App, jsdom)
+npm run e2e          # Playwright (chromium): 8 e2e против живого бэкенда (автостарт uvicorn+vite)
 ```

@@ -21,8 +21,10 @@ from typing import Any, Callable, Dict, List, Optional
 import httpx
 from langgraph.graph import END, START, StateGraph
 
-from . import source_finder, tutor as tutor_mod
+from . import adaptive, source_finder, tutor as tutor_mod
 from .config import settings as default_settings
+from .export import write_session_exports
+from .okf import emit_okf_bundle
 from .curriculum import grade_curriculum
 from .intake import INTAKE_QUESTIONS, CHECKLIST_ORDER, apply_answer, compute_missing, validate_intake
 from .judge import judge_evaluation
@@ -80,6 +82,10 @@ def make_graph_deps(settings: Any = None) -> GraphDeps:
     embedder = make_embedder(s)
     collection = make_collection_name(embedder)
     store = make_store(collection, embedder, persist_dir=Path(s.CHROMA_PERSIST_DIR), settings=s)
+    if getattr(s, "HYBRID_RAG", True):
+        from .knowledge import HybridVectorStore
+
+        store = HybridVectorStore(store)
     return GraphDeps(embedder=embedder, store=store, settings=s, collection_name=collection)
 
 
@@ -128,6 +134,10 @@ def _emit(deps: GraphDeps, event: str, **data: Any) -> None:
 # ----------------------------------------------------------------------
 def intake_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     st = state.model_copy(deep=True)
+
+    # Инициализация адаптивной модели ученика (LinUCB) — если включена настройкой
+    if st.bandit is None and getattr(deps.settings, "ADAPTIVE_BANDIT", True):
+        st.bandit = adaptive.make_bandit()
 
     # Применяем ответ на текущий вопрос чек-листа.
     # Если поле не задано, но intake ещё не завершён — сам определяем первое
@@ -654,7 +664,17 @@ def evaluate_answer_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         card.question, answer, context, st, llm_call=deps.eval_llm
     )
     tutor_mod.update_knowledge_map(st, card.topic, graded.score)
-    new_difficulty = tutor_mod.adjust_difficulty(st, graded.correct)
+    if st.bandit is not None:
+        # LinUCB: обновляем сыгранную руку и выбираем следующую сложность по контексту
+        features = adaptive.bandit_features(st)
+        adaptive.update_counters(st, graded.correct)
+        played = adaptive.difficulty_arm(card.difficulty)
+        st.bandit = adaptive.bandit_update(st.bandit, features, played, graded.score)
+        st.difficulty = adaptive.arm_difficulty(
+            adaptive.bandit_select(st.bandit, features, current_idx=played)
+        )
+    else:
+        tutor_mod.adjust_difficulty(st, graded.correct)
 
     # Судья: контракт «оценка ответа ученика» (К-4). Для детерминированной
     # сверки с эталоном (закрытый вопрос, model_used="reference") судить нечего —
@@ -728,6 +748,23 @@ def summary_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     st.session_status = "completed"
     _emit(deps, "tutor.summary", correct=st.correct_count, total=st.answered_count,
           knowledge_map={k: round(v, 2) for k, v in st.knowledge_map.items()})
+
+    # Автоматический экспорт результатов при завершении квиза
+    try:
+        session_id = getattr(st, 'session_id', '') or ''
+        if st.records:
+            write_session_exports(st, session_id=session_id)
+            logger.info("Auto-export: questions + summary CSV saved")
+    except Exception as exc:
+        logger.warning("Auto-export CSV failed: %s", exc)
+
+    try:
+        source_name = st.textbook_name or st.subject or 'session'
+        emit_okf_bundle(st, source_name=source_name)
+        logger.info("Auto-export: OKF bundle saved")
+    except Exception as exc:
+        logger.warning("Auto-export OKF failed: %s", exc)
+
     return st.model_dump()
 
 

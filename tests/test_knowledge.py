@@ -11,7 +11,11 @@ import pytest
 from src.config import BASE_DIR, Settings
 from src.knowledge import (
     ApiEmbedder,
+    DocChunk,
+    HybridVectorStore,
     NumpyVectorStore,
+    OkapiBM25,
+    SearchResult,
     _consistent_offset,
     _extract_printed_number,
     clean_pdf_text,
@@ -23,6 +27,7 @@ from src.knowledge import (
     parse_document,
     parse_pdf,
     process_document,
+    rrf_merge,
     validate_topic_in_text,
 )
 
@@ -472,6 +477,66 @@ class TestOcr:
         assert "текст страницы" in res["text"]
         assert res["page_numbers"] == {2: 13, 3: 14}
         assert res["offset"] == 11
+
+
+class TestHybridRag:
+    """Гибридный retrieval: BM25 (Okapi) + векторный поиск + fusion RRF (7.2)."""
+
+    def _store(self, chunks):
+        store = HybridVectorStore(NumpyVectorStore("hyb", FakeEmbedder()))
+        store.add(chunks)
+        return store
+
+    def _chunk(self, cid, text, section="12"):
+        return DocChunk(
+            id=cid, text=text, section_number=section,
+            section_title="Тема", source="book", subject="география", grade="6",
+        )
+
+    def test_bm25_scores_exact_terms(self):
+        bm25 = OkapiBM25()
+        bm25.add_docs([
+            "Атмосфера — воздушная оболочка Земли.",
+            "Гидросфера — водная оболочка Земли.",
+        ])
+        assert bm25.score("атмосфера", 0) > bm25.score("атмосфера", 1)
+        assert bm25.score("водная", 1) > bm25.score("водная", 0)
+
+    def test_rrf_merge_combines_rankings(self):
+        s1 = [SearchResult(chunk=self._chunk("a", "А"), score=0.1),
+              SearchResult(chunk=self._chunk("b", "Б"), score=0.2)]
+        s2 = [SearchResult(chunk=self._chunk("b", "Б"), score=0.05)]
+        merged = rrf_merge([s1, s2], k=2)
+        assert [r.chunk.id for r in merged] == ["b", "a"]
+
+    def test_hybrid_returns_top_chunks(self):
+        store = self._store([
+            self._chunk("c1", "Атмосфера состоит из азота и кислорода."),
+            self._chunk("c2", "Реки текут по равнинам и питают гидросферу."),
+            self._chunk("c3", "Давление воздуха называется атмосферным давлением."),
+        ])
+        res = store.search("атмосфера давление", k=2)
+        ids = [r.chunk.id for r in res]
+        # векторный ретривер находит c1 (точное «атмосфера»), BM25 — c3 (точное «давление»),
+        # RRF объединяет оба сигнала
+        assert {"c1", "c3"} <= set(ids)
+        assert len(res) <= 2
+
+    def test_hybrid_respects_filters(self):
+        chunks = [
+            self._chunk("c1", "Атмосфера — воздушная оболочка.", "12"),
+            self._chunk("c2", "Атмосферное давление изменяется с высотой.", "13"),
+        ]
+        store = self._store(chunks)
+        res = store.search("атмосфера", k=5, filters={"section_number": "13"})
+        assert [r.chunk.id for r in res] == ["c2"]
+        assert store.count() == 2
+
+    def test_hybrid_reset(self):
+        store = self._store([self._chunk("c1", "Атмосфера — воздушная оболочка.")])
+        store.reset()
+        assert store.count() == 0
+        assert store.search("атмосфера") == []
 
 
 class TestOcrIntegration:

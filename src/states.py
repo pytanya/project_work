@@ -95,6 +95,9 @@ class TutorState(IntakeState):
     quiz_complete: bool = False
     summary_text: Optional[str] = None
     last_judge_score: Optional[float] = None   # avg балл судьи по контракту «оценка» (для eval)
+    # LinUCB contextual bandit (адаптивная модель ученика, src/adaptive.py):
+    # JSON-безопасный dict {d, alpha, arms:[{A, b, n}]}. None — эвристика adjust_difficulty.
+    bandit: Optional[Dict[str, Any]] = None
 
     def update_knowledge(self, topic: str, score01: float) -> None:
         """Экспоненциальное сглаживание мастерства (Ж-6): 0.7*текущее + 0.3*результат."""

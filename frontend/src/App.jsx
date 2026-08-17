@@ -9,7 +9,21 @@ import FileUpload from './components/FileUpload'
 import KnowledgeGraphPanel from './components/KnowledgeGraphPanel'
 import './index.css'
 
-function App() {
+const STORAGE_KEY = 'edututor_settings'
+
+function loadSettings() {
+  try {
+    return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {}
+  } catch {
+    return {}
+  }
+}
+
+function saveSettings(s) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(s))
+}
+
+export default function App() {
   const [sessionId, setSessionId] = useState(null)
   const [feed, setFeed] = useState([])
   const [current, setCurrent] = useState(null)
@@ -18,14 +32,58 @@ function App() {
   const [graph, setGraph] = useState({ nodes: [], edges: [], activeTopic: null })
   const [knowledge, setKnowledge] = useState({})
   const [score, setScore] = useState({ correct: 0, total: 0 })
+  const [quizCount, setQuizCount] = useState(0)
   const [answer, setAnswer] = useState('')
-  const [busy, setBusy] = useState(false)
+  const [confirmedOption, setConfirmedOption] = useState(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [quickAnswer, setQuickAnswer] = useState(() => loadSettings().quickAnswer !== false)
+  // Разделение busy: upload для индексации чат для квиза/сообщений
+  const [uploadBusy, setUploadBusy] = useState(false)
+  const [chatBusy, setChatBusy] = useState(false)
+  // Счётчик вопросов квиза из записей
+  const [questionNum, setQuestionNum] = useState(0)
   const wsRef = useRef(null)
   const sessionIdRef = useRef(null)
+  const inputRef = useRef(null)
+  const settingsBtnRef = useRef(null)
+  // Refs: отслеживаем ожидаем ли результат ответа на текущий вопрос
+  const pendingAnswer = useRef(null)       // текст отправленного ответа
+  const currentKindAtSubmit = useRef(null) // kind экрана в момент отправки
+  const isWaitingForAnswer = useRef(false) // флаг: ждём WS событие после отправки
+
+  // Загрузка настроек из localStorage при старте
+  useEffect(() => {
+    const stored = loadSettings()
+    if (stored.quickAnswer !== undefined) {
+      setQuickAnswer(stored.quickAnswer !== false)
+    }
+  }, [])
+
+  // Сохранение настроек
+  useEffect(() => {
+    saveSettings({ quickAnswer })
+  }, [quickAnswer])
+
+  // Focus после завершения операций на чате + закрыть по клику вне settings
+  useEffect(() => {
+    if (!chatBusy && !uploadBusy) {
+      const t = setTimeout(() => inputRef.current?.focus(), 80)
+      return () => clearTimeout(t)
+    }
+  }, [chatBusy, uploadBusy])
+
+  useEffect(() => {
+    function handleClick(e) {
+      if (settingsBtnRef.current && !settingsBtnRef.current.contains(e.target)) {
+        setSettingsOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [])
 
   const push = useCallback((kind, text, data) => {
     setFeed((f) => {
-      // Дедуп: первое сообщение приходит дважды (HTTP + WS-реплей) — пропускаем
       const last = f[f.length - 1]
       if (last && last.kind === kind && last.text === text) return f
       return [...f, { id: `${Date.now()}-${Math.random()}`, kind, text, data }]
@@ -45,6 +103,20 @@ function App() {
   const handleEvent = useCallback(
     (evt) => {
       const d = evt.data || {}
+      
+      // Сбрасываем busy если мы ожидали ответ на предыдущий вопрос
+      // и получили событие от бэкенда (quiz.card, tutor.explanation, system, etc.)
+      if (isWaitingForAnswer.current) {
+        const answerResolvedEvents = [
+          'quiz.card', 'tutor.explanation', 'system', 
+          'tutor.summary', 'intake.question', 'source.progress'
+        ]
+        if (answerResolvedEvents.includes(evt.event)) {
+          setChatBusy(false)
+          isWaitingForAnswer.current = false
+        }
+      }
+      
       switch (evt.event) {
         case 'intake.question':
           setCurrent({ kind: 'intake', question: d.question, missingFields: d.missing_fields })
@@ -71,16 +143,24 @@ function App() {
         case 'tutor.summary':
           setKnowledge(d.knowledge_map || {})
           setScore({ correct: d.correct || 0, total: d.total || 0 })
+          setQuizCount(d.total || 0)
+          setQuestionNum(d.total || 0)
           push('summary', `Квиз завершён: правильных ${d.correct}/${d.total}`)
           break
         case 'source.progress':
           setSource({ status: d.status, note: d.message })
-          setCurrent(null) // поиск/OCR идёт — устаревший вопрос прячем
+          // НЕ обнуляем current если уже есть активный вопрос (quiz/intake)
+          // source.progress может прийти от предыдущей операции (поиск учебника)
+          if (!current || !current.current_question && !current.agent_question) {
+            setCurrent(null)
+          }
           push('source', d.message)
           break
         case 'source.failed':
           setSource({ status: 'failed', note: d.message })
-          setCurrent(null)
+          if (!current || !current.current_question && !current.agent_question) {
+            setCurrent(null)
+          }
           push('error', d.message)
           break
         case 'graph.ready':
@@ -130,7 +210,6 @@ function App() {
       }
     }
     init()
-    // Удаляем сессию на бэкенде при закрытии вкладки (не копим мусор)
     const unload = () => {
       if (sessionIdRef.current) api.deleteSession(sessionIdRef.current)
     }
@@ -142,24 +221,32 @@ function App() {
     }
   }, [handleEvent, push])
 
-  // resync: подтягиваем актуальное состояние сессии по HTTP (страховка, если WS
-  // отвалился во время долгой обработки — парсинг/индексация > WS-idle)
+  // resync: подтягиваем актуальное состояние сессии по HTTP
   const resync = useCallback(async () => {
     if (!sessionIdRef.current) return
     try {
       const d = await api.getSession(sessionIdRef.current)
+      
+      // НЕ обнуляем current если уже есть активный вопрос (quiz или intake)
+      // Это нужно чтобы не терять UI при резинхронизации
+      const hasActiveQuestion = d.current_question || d.agent_question
+      
       if (d.current_question) {
         const q = d.current_question
         setCurrent({
           kind: 'quiz', question: q.question, options: q.options, answerType: q.answer_type,
           topic: q.topic, difficulty: q.difficulty, questionId: q.question_id,
         })
+        // Обновляем счётчик вопросов из records
+        if (d.records && d.records.length > 0) {
+          setQuestionNum(d.records.filter(r => r.student_answer).length)
+          setQuizCount(d.num_questions || 10)
+        }
       } else if (d.agent_question) {
-        // любой вопрос агента: интейк, «загрузите учебник», гейт темы, подтверждение урока
         setCurrent({ kind: 'intake', question: d.agent_question, missingFields: d.missing_fields || [] })
-      } else {
-        setCurrent(null)
       }
+      // else: НЕ обнуляем current если уже есть активный вопрос
+      
       setKnowledge(d.knowledge_map || {})
       setScore({ correct: d.correct_count || 0, total: d.answered_count || 0 })
       if (d.source_status) setSource({ status: d.source_status, note: d.source_note })
@@ -175,31 +262,52 @@ function App() {
     const text = answer.trim()
     if (!text || !sessionId) return
     setAnswer('')
+    setConfirmedOption(null)
     push('user', text)
-    setBusy(true)
+    setChatBusy(true)
+    isWaitingForAnswer.current = true  // помечаем что ждём WS событие от бэкенда
+    
+    // Таймаут fallback: если WS событие не пришло за 15 секунд — сбрасываем busy
+    const timeout = setTimeout(() => {
+      if (isWaitingForAnswer.current) {
+        setChatBusy(false)
+        isWaitingForAnswer.current = false
+      }
+    }, 15000)
+    
     try {
       if (current?.kind === 'intake') {
         await api.postIntake(sessionId, text)
       } else {
         await api.postMessage(sessionId, text)
       }
+      // resync убран: WS события уже обновляют UI (quiz.card, tutor.explanation, system)
+      // Но оставляем intakeStatus для корректной работы intake чек-листа
       const st = await api.intakeStatus(sessionId)
       setIntake({ missingFields: st.missing_fields, complete: st.complete })
-      await resync()
     } catch (e) {
       push('error', String(e.message || e))
+      setChatBusy(false)
+      isWaitingForAnswer.current = false
     } finally {
-      setBusy(false)
+      clearTimeout(timeout)
+      // busy сбросится при получении WS события или по timeout
     }
   }
 
   const onOption = (opt) => {
     setAnswer(opt)
+    if (quickAnswer) {
+      setConfirmedOption(null)
+      submitAnswer()
+    } else {
+      setConfirmedOption(opt)
+    }
   }
 
   async function handleUpload(file) {
     if (!sessionId) return
-    setBusy(true)
+    setUploadBusy(true)
     setSource({ status: 'indexing', note: `Загружаю «${file.name}»…` })
     push('system', `Загружаю и индексирую «${file.name}», это может занять 1-2 минуты…`)
     try {
@@ -216,43 +324,72 @@ function App() {
       push('error', String(e.message || e))
       setSource({ status: 'failed', note: String(e.message || e) })
     } finally {
-      setBusy(false)
+      setUploadBusy(false)
     }
   }
 
   async function handleFind() {
     if (!sessionId) return
-    setBusy(true)
+    setUploadBusy(true)
     try {
       await api.findTextbook(sessionId)
       await resync()
     } catch (e) {
       push('error', String(e.message || e))
     } finally {
-      setBusy(false)
+      setUploadBusy(false)
     }
   }
 
   async function handleSelectTopic(node) {
     if (!sessionId) return
-    setBusy(true)
-    setCurrent(null)
-    push('system', `Готовимся по теме: ${node.title}…`)
+    setChatBusy(true)
+    // НЕ обнуляем current - показываем что готовимся по теме
+    push('system', `Готовимся по теме: ${node.title}...`)
     try {
       const r = await api.selectTopic(sessionId, node.id)
       setGraph((g) => ({ ...g, activeTopic: r.active_topic }))
-      await resync()
+      // Если бэкенд уже сгенерировал вопрос - обновляем UI
+      if (r.question) {
+        const q = r.question
+        setCurrent({
+          kind: 'quiz', question: q.question, options: q.options, answerType: q.answer_type,
+          topic: q.topic, difficulty: q.difficulty, questionId: q.question_id,
+        })
+      } else if (r.next_question) {
+        // Есть следующий вопрос (intake)
+        setCurrent({ kind: 'intake', question: r.next_question, missingFields: [] })
+      }
+      // resync не нужен - уже получили данные из selectTopic
     } catch (e) {
       push('error', String(e.message || e))
     } finally {
-      setBusy(false)
+      setChatBusy(false)
     }
   }
 
   function handleNewSession() {
-    // закрываем текущую и перезагружаем страницу (создаст свежую сессию)
     if (sessionIdRef.current) api.deleteSession(sessionIdRef.current)
+    setFeed([])
+    setConfirmedOption(null)
+    setQuestionNum(0)
+    setQuizCount(0)
     window.location.reload()
+  }
+
+  function handleConfirmOption() {
+    if (confirmedOption) {
+      submitAnswer()
+    }
+  }
+
+  function handleCancelOption() {
+    setConfirmedOption(null)
+    setAnswer('')
+  }
+
+  function toggleQuickAnswer() {
+    setQuickAnswer((v) => !v)
   }
 
   return (
@@ -263,44 +400,76 @@ function App() {
             EduTutor
             <small>умный репетитор</small>
           </h1>
-          <button className="btn small" onClick={handleNewSession} title="Создать новую сессию">
-            Новая сессия
-          </button>
+          <div className="brand-actions">
+            <button className="btn small" onClick={handleNewSession} title="Создать новую сессию">
+              Новая сессия
+            </button>
+            <div className="settings-gear" ref={settingsBtnRef}>
+              <button className="gear-btn" onClick={() => setSettingsOpen(!settingsOpen)} title="Настройки">⚙</button>
+              {settingsOpen && (
+                <div className="settings-popup">
+                  <button className="settings-close" onClick={() => setSettingsOpen(false)}>✕</button>
+                  <div className="settings-header">Настройки</div>
+                  <label className="settings-toggle">
+                    <input type="checkbox" checked={quickAnswer} onChange={toggleQuickAnswer} />
+                    <span className="toggle-track"><span className="toggle-thumb" /></span>
+                    <span className="toggle-label">
+                      Быстрый ответ
+                      <small>{quickAnswer ? 'Автоотправка вариантов' : 'Подтверждение выбора'}</small>
+                    </span>
+                  </label>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
         {sessionId && <div className="session-id">сессия: {sessionId}</div>}
         <ProgressDashboard knowledge={knowledge} correct={score.correct} total={score.total} />
-        <SourceSearchPanel status={source.status} note={source.note} onFind={handleFind} busy={busy} />
+        <SourceSearchPanel status={source.status} note={source.note} onFind={handleFind} busy={uploadBusy} />
         <KnowledgeGraphPanel
           nodes={graph.nodes}
           activeTopic={graph.activeTopic}
           onSelect={handleSelectTopic}
-          busy={busy}
+          busy={chatBusy}
         />
-        <FileUpload onUpload={handleUpload} busy={busy} />
+        <FileUpload onUpload={handleUpload} busy={uploadBusy} />
       </aside>
       <main className="chat">
-        <ChatStream feed={feed} />
+        <ChatStream feed={feed} busy={chatBusy || uploadBusy} />
         {current &&
           (current.kind === 'quiz' ? (
-            <QuizCard q={current} onSelect={onOption} />
+            <QuizCard
+              q={current}
+              onSelect={onOption}
+              questionNum={questionNum}
+              totalQuestions={quizCount}
+              selectedOption={confirmedOption}
+              quickAnswer={quickAnswer}
+            />
           ) : (
             <IntakeWizard missing={current.missingFields ?? intake.missingFields} question={current.question} />
           ))}
+        {confirmedOption && (
+          <div className="confirm-bar">
+            Вы выбрали: <strong>{confirmedOption}</strong>
+            <button className="btn-confirm" onClick={handleConfirmOption}>Подтвердить</button>
+            <button className="btn-cancel" onClick={handleCancelOption}>Отмена</button>
+          </div>
+        )}
         <div className="answerbar">
           <input
+            ref={inputRef}
             value={answer}
             onChange={(e) => setAnswer(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && submitAnswer()}
             placeholder="Ваш ответ…"
-            disabled={busy || !sessionId}
+            disabled={chatBusy || !sessionId}
           />
-          <button onClick={submitAnswer} disabled={busy || !answer.trim()}>
-            {busy ? '…' : 'Отправить'}
+          <button onClick={submitAnswer} disabled={chatBusy || !answer.trim()}>
+            {chatBusy ? '…' : 'Отправить'}
           </button>
         </div>
       </main>
     </div>
   )
 }
-
-export default App

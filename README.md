@@ -80,6 +80,11 @@ REST: сессии, intake, upload, find-textbook, message, topic, graph, cancel
 WS `/api/sessions/{id}/ws`: `intake.question`, `source.progress`, `quiz.card`,
 `tutor.explanation`, `tutor.lesson`, `tutor.summary`, `graph.ready`, `source.failed`.
 
+> **Фаза 1+2 (август 2026):** 
+> - Frontend оптимизации: settings-gear с toggle «Быстрый ответ», разделение busy/uploadBusy/chatBusy, typing indicator, счётчик «Вопрос N/M» в QuizCard
+> - Бэкенд SQLite-персистентность сессий (`src/session_store.py`) — состояние сохраняется/восстанавливается между перезапусками сервера
+> - **RAG + адаптация (Фаза 3):** hybrid retrieval (BM25 + RRF, `src/knowledge.py:HybridVectorStore`) и LinUCB contextual bandit для выбора сложности (`src/adaptive.py`)
+
 ### Граф знаний и подготовка по темам
 
 После индексации учебника строится граф тем (`data/knowledge_graphs/<hash>.json`),
@@ -96,7 +101,7 @@ WS `/api/sessions/{id}/ws`: `intake.question`, `source.progress`, `quiz.card`,
 ## Тесты и eval
 
 ```bash
-python -m pytest tests/ -v              # 321 тестов (юнит + интеграционные RouterAI)
+python -m pytest tests/ -v              # 341 тестов (юнит + интеграционные RouterAI)
 python evals/edututor_eval.py --runs 3  # EduTutorEval: intake/find_textbook/judge + intent accuracy
 python evals/edututor_eval.py --mock    # офлайн-режим
 ```
@@ -107,18 +112,24 @@ python evals/edututor_eval.py --mock    # офлайн-режим
 |--------|---------|
 | Embeddings | `EMBEDDING_PROVIDER=api` (RouterAI `intfloat/multilingual-e5-large`) — без локального torch/MSVC; `local` (sentence-transformers e5-small) — после установки VC++; ретраи с бэк-оффом на 429/5xx/таймаут |
 | Векторное хранилище | `VECTOR_STORE=numpy` (портативный, без MSVC); `chroma` (ChromaDB) — после VC++ |
+| **Hybrid RAG** (7.2) | `HYBRID_RAG=true`: векторный поиск + **BM25 (Okapi)** с fusion через **RRF** (обёртка `HybridVectorStore` над любым VectorStore, чистый Python без зависимостей) |
+| **Адаптивная сложность** | `ADAPTIVE_BANDIT=true`: **LinUCB contextual bandit** (руки = сложности, контекст = мастерство темы/класс/недавний результат, награда = score оценки); `false` — эвристика «3 верных → ↑, 2 ошибки → ↓» |
 | Судья (К-4) | Gemini на RouterAI (без VPN); OpenRouter для судьи не используется |
 | Источники (К-2) | Только легальные: локальные PDF (Plan B), Викиучебник, открытые страницы; капчу не обходим |
-| Сканы (3.2) | `detect_text_layer` → агент просит **страницы + тему** → OCR **только их** (`ocr_pages`, ru+en) с буфером `OCR_PAGE_BUFFER` и автодетекцией смещения номера; валидация темы; CPU-OCR медленный — поэтому только нужные страницы |
+| Сканы (3.2) | `detect_text_layer` → агент просит **страницы + тему** → OCR **только их** (`ocr_pages`, ru+en) с буфером `OCR_PAGE_BUFFER` и автодетекцией смещения номера; валидация темы; CPU-OCR медленный — поэтому только нужные страницы. **OCR-движок — EasyOCR** (лёгкий, без MSVC). PaddleOCR (точнее для русского, быстрее на CPU) отклонён: `paddlepaddle` ~500МБ и конфликтует с принципом портативности MVP; при необходимости замена — через абстракцию OCR-провайдера с нормализацией формата к `(bbox, text, conf)` |
 | Дешёвые роли (В-2) | `CHEAP_MODEL=google/gemma-3-4b-it` на RouterAI; при отказе — fallback TUTOR_MODEL |
+| **Quick answer toggle** (Фаза 1) | Popup settings ⚙ → quickAnswer: true = автоотправка мгновенно; false = полоса подтверждения «Вы выбрали X» |
+| **Разделение busy** (Фаза 1) | uploadBusy (индексация) / chatBusy (квиз); Banner индексации не мешает квизу |
+| **SQLite персистентность** (Фаза 2 🟡) | `SessionSQLiteStore` сохраняет состояние после каждого шага в `data/session_persist.db` |
 
 ## Структура
 
 ```
 src/           config, llm_client, guardrails, nlp, intake, curriculum (ФГОС),
-               knowledge (RAG), source_finder (crawl4ai), tutor, judge, graph, metrics
+               knowledge (RAG), adaptive (LinUCB), source_finder (crawl4ai), tutor,
+               judge, graph, metrics
 api/           Pydantic-схемы (IntakeStatusResponse, QuizCard, MessageResponse, WsEvent)
-tests/         236 тестов
+tests/         341 тест
 evals/         golden_set.json, intent_dataset.json, edututor_eval.py
 main.py        CLI-демо
 ```

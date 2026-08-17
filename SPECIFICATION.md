@@ -2,9 +2,18 @@
 
 ## Спецификация проекта
 
-> **Статус документа:** «контракт для реализации» (редакция от 2026-08-10). Замечания аудита — критические (К-0…К-3), важные (В-1…В-10) и приоритета 3 (Ж-1…Ж-8) — учтены и сняты в данной редакции; решения заказчика по существу зафиксированы (раздел 15, 4.2.3). **Окончательное согласование документа с заказчиком — на Этапе 7** (интеграция/демо); до этого статус «согласовано заказчиком» преждевременен.
+> **Статус документа:** «контракт для реализации» (редакция от 2026-08-14). Замечания аудита — критические (К-0…К-3), важные (В-1…В-10) и приоритета 3 (Ж-1…Ж-8) — учтены и сняты в данной редакции; решения заказчика по существу зафиксированы (раздел 15, 4.2.3). **Окончательное согласование документа с заказчиком — на Этапе 7** (интеграция/демо); до этого статус «согласовано заказчиком» преждевременен.
 > **Сверка с кодом:** раздел 13.1 выверен по фактическому коду клона `research_guard_agent` (`_tmp_gh/research_guard_agent/`), а не по README.
 > **Scope для проектной работы:** см. раздел 15 — явная декомпозиция «MVP» / «расширения заказчика».
+> **Реализация оптимизаций (Фаза 1+2, август 2026):**
+> - [x] Шестерёнка настроек (⚙): toggle «Быстрый ответ» — автоотправка мгновенна (детерминированные свёрки = <100мс), режим подтверждения показывает «Вы выбрали X → Подтвердить / Отмена»
+> - [x] Разделение busy: uploadBusy (индексация) / chatBusy (квиз/чат) — баннер «Загрузка…» больше не мешает квизу
+> - [x] Имитация предгенерации через `question_num`: счётчик «Вопрос N/M» + подсчёт из state.records
+> - [x] Фокус возвращается в поле ввода после каждого шага
+> - [x] Typing Indicator в чате (появляется при `busy`)
+> - [x] Удалён дублирующийся `PRE_CHECK_MIN_LENGTH`
+> - [x] SQLite персистентность сессий: сохранение/восстановление TutorState (файл `data/session_persist.db`)
+> - [ ] Предгенерация вопросов пакетами 3–5 ещё реализована (Engine использует single-step invoke, см. Этап 2 roadmap)
 
 ---
 
@@ -230,10 +239,11 @@ stateDiagram-v2
 |-----------|-----------|-------------|
 | **Разбор PDF/DOCX** | **Docling** (опция `DOCLING_ENABLED=true`); рабочий парсер — **pdfplumber** | Docling — структурированный разбор, но его модели скачиваются из HF и в части сред (РФ, медленный канал) недоступны; pdfplumber обрабатывает любые PDF без внешних моделей |
 | **Fallback-извлечение** | pdfplumber / PyPDF (из geo_tutor-master) | Для файлов >50 страниц и >10MB — надёжно и экономно по памяти |
-| **OCR (сканы)** | EasyOCR (`ru`,`en`) | Только для **сканированных** PDF (нет текстового слоя). Детекция: текст < `OCR_MIN_TEXT_CHARS`. **OCR выполняется ТОЛЬКО по страницам, указанным учеником** (`ask_page_range`) с учётом буфера `OCR_PAGE_BUFFER` и автодетекции смещения напечатанных номеров (`detect_page_offset`); язык — всегда `ru,en`, доминирующий — fastText `lid.176.ftz`. Формулы EasyOCR не распознаёт — ограничение; опц. `OCR_FORMULA_ENGINE=pix2tex` (расширение) |
+| **OCR (сканы)** | EasyOCR (`ru`,`en`) | Только для **сканированных** PDF (нет текстового слоя). Детекция: текст < `OCR_MIN_TEXT_CHARS`. **OCR выполняется ТОЛЬКО по страницам, указанным учеником** (`ask_page_range`) с учётом буфера `OCR_PAGE_BUFFER` и автодетекции смещения напечатанных номеров (`detect_page_offset`); язык — всегда `ru,en`, доминирующий — fastText `lid.176.ftz`. Формулы EasyOCR не распознаёт — ограничение; опц. `OCR_FORMULA_ENGINE=pix2tex` (расширение). **Альтернатива (отклонена в MVP):** PaddleOCR — точнее для русского и быстрее на CPU, но `paddlepaddle` ~500МБ и конфликтует с принципом портативности; переключение гипотетически возможно через абстракцию OCR-провайдера с нормализацией формата к `(bbox, text, conf)` (не менять `_extract_printed_number`) |
 | **Chunking** | Docling HybridChunker + custom | По главам/параграфам с сохранением иерархии (заголовок → контент); обогащение чанка контекстом параграфа (идея из geo_tutor-master); метаданные `page_number` (напечатанный номер страницы скана, если определён) |
 | **Embeddings** | **`intfloat/multilingual-e5-small`** локально (бесплатно); **`EMBEDDING_PROVIDER=api` (RouterAI e5-large) — по умолчанию для быстрой индексации** (CPU-локальные эмбеддинги ~4 мин/учебник) | Локально/через API; имя коллекции включает размерность (`edututor_384`/`edututor_1024`) — разные эмбеддинги не конфликтуют |
 | **Реранкинг** | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Точность поиска ×3–5 (из geo_tutor-master) |
+| **Гибридный retrieval** | Векторный поиск + **BM25 (Okapi)** + fusion **RRF** (`HybridVectorStore`, `HYBRID_RAG=true`) | BM25 — чистый Python (без зависимостей); ловит точные термины учебника, которые семантика может пропустить; обёртка над любым VectorStore |
 
 > **Сканированный учебник (кейс «нет текстового слоя»):** напечатанный номер страницы в скане может отличаться от порядкового номера страницы PDF (обложки/титулы/предисловие дают смещение обычно 1–5 стр.). Пайплайн: 1) `detect_text_layer` → «скан»; 2) агент просит ученика **открыть учебник и назвать страницы + тему/урок**; 3) физический диапазон = `[start − offset − buffer, end − offset + buffer]` (offset — из `detect_page_offset`, best-effort; иначе 0), клампинг 1..N, лимит `MAX_OCR_PAGES`; 4) `ocr_pages` (ru+en) + `validate_topic_in_text` (перекрёстная проверка, повторный запрос при несовпадении); 5) метаданные чанков `page_number`. Retry-цикл «открой учебник и посмотри страницы» ≤ `OCR_MAX_ATTEMPTS`, затем опция «все» (полный OCR с предупреждением) или отмена.
 
@@ -560,7 +570,9 @@ REASON  │ Анализ текущего состояния:
         │ → Решение: generate_question / explain / summarize
         ▼
 ACT     │ Выполнение действия:
-        │ • RAG-поиск по ChromaDB (фильтр: subject + grade + chapter) → top-K чанков
+        │ • RAG-поиск: векторный (ChromaDB/NumpyStore, фильтр subject+grade+chapter)
+        │   + BM25 (Okapi) с fusion через RRF (гибридный retrieval, HYBRID_RAG=true)
+        │   → top-K чанков
         │ • Дешёвая модель: простые фактологические вопросы; TUTOR_MODEL: сложные
         │ • Или: LLM объясняет ошибку с цитатой из учебника (EXPERT_MODEL — deep dive)
         │ • Промпт параметризуется: grade_prompt(grade) + curriculum (Ж-1, Ж-3)
@@ -572,8 +584,10 @@ OBSERVE │ Оценка результата:
         │   сложные/нестандартные ответы (критерий Ж-8); + судья по контракту
         │   «оценка ответа ученика» (К-4)
         │ • update_knowledge_map: knowledge_map[тема] обновляется (Ж-6)
-        │ • Корректировка сложности (↑ при 3+ правильных, ↓ при 2+ ошибках,
-        │   с учётом knowledge_map)
+        │ • Адаптация сложности: LinUCB contextual bandit (ADAPTIVE_BANDIT=true)
+        │   — руки = easy/medium/hard, контекст = мастерство темы/класс/недавний
+        │   результат/прогресс, награда = score оценки; при ADAPTIVE_BANDIT=false —
+        │   эвристика (↑ при 3+ правильных, ↓ при 2+ ошибках)
 ```
 
 **`grade_prompt(grade)` — параметризация «понятного языка» (Ж-3):**
@@ -709,11 +723,31 @@ POST /cancel ◀─── task.cancel() + checkpoint сохранён (сост�
 - **Primary-каналы:** WS — стриминг (вопросы intake, прогресс поиска, квиз-карточки, объяснения); HTTP — ввод (ответы ученика, upload, cancel, статусы).
 - **POST /cancel — cooperative cancellation (В-4):** асинхронный граф корректно отменяется **без блокировки event loop** — проверка на точках прерывания/`await` (interrupt/checkpoint); `task.cancel()` снимается на ближайшей `await`-точке, checkpoint сохраняется, повторный запуск продолжает с сохранённого состояния.
 
+### 8.5. SQLite persistence сессий (Фаза 2 реализована)
+
+Для долговременного хранения состояний введён слой персистентности `SessionSQLiteStore`. После каждого `run_step()` состояние графа (`TutorState.model_dump()`) сериализуется в JSON и сохраняется в `data/session_persist.db`. Восстановление по ID сессии: при старте бэкенд проверяет наличие записи — если найдена, восстанавливает `TutorState` из SQL и продолжает сессию без потери прогресса. TTL-очистка устаревших сессий — совместна со штатным `_sweep()`.
+
+```python
+# src/session_store.py
+class SessionSQLiteStore:
+    save(session_id, state_dict)  # INSERT OR REPLACE INTO sessions
+    load(session_id) -> Optional[Dict]  # восстановление TutorState перед graph.invoke()
+    exists(session_id) -> bool
+    delete(session_id)
+    sweep_expired(now)  # + совместен с _sweep() engine.py
+    
+# app.py — инициализация
+store = SessionStore(sqlite_store=SessionSQLiteStore(data/session_persist.db))
+```
+
+> **Ж-6 (сохранение прогресса между сессиями):** до реализации `knowledge_map`, `records`, `correct_count` жили только в памяти. Теперь каждый шаг графа пишется в БД — прогресс ученика переживает перезагрузку сервера. Функция `write_session_exports()` вызывается из CLI-демо (`main.py`) после завершения — CSV-отчёты учителя доступны в `output/<session_id>_questions.csv` и `output/<session_id>_summary.csv`.
+
 ---
 
 ## 9. UI (React)
 
 > **Расширение заказчика** — не входит в MVP (раздел 15). Для MVP достаточно CLI-прогона сценария.
+> **Последняя доработка:** Фаза 1 оптимизаций (август 2026) — settings gear, quick answer toggle, разделение busy-состояний, счётчик «Вопрос N/M» и confirm-bar для режима подтверждения (см. статус реализации в шапке спецификации).
 
 ### 9.1. Концепция
 
@@ -723,18 +757,42 @@ POST /cancel ◀─── task.cancel() + checkpoint сохранён (сост�
 - **Центр:** чат с агентом (вопросы-ответы, квиз-карточки, прогресс поиска учебника)
 - **Правая панель:** прогресс-бар, статистика (% правильных, карта знаний по темам)
 
-### 9.2. Ключевые компоненты
+### 9.5. Навигация по интерфейсу
+
+```
+Sidebar (левая панель):
+├── Брендинг/логотип EduTutor
+├── Текущее состояние прогресса (правильных ответов / всего)
+├── Индикатор состояния поиска/индексации
+└── Клавиши-горячки для выбора ответа: 1, 2, 3, 4...
+
+Основной чат:
+├── История диалога с агентом
+├── Квиз-карточки вопросов (с индикатором выбранного варианта)
+└── Полоса подтверждения ("Вы выбрали X → OK" когда quickAnswer=false)
+
+В нижней части экрана:
+└── Строка ввода для текстовых сообщений; пустое если в квизе и выбран вариант
+```
+
+### 9.6. Режима режима быстрого ответа (`quickAnswer`)
+
+> **Логика:** toggle в popup настроек (иконка ⚙ рядом с брендом). По умолчанию `true` — авто-отправка мгновенна при клике на вариант (**детерминированная сверка закрытых вопросов = <100мс**).
 
 | Компонент | Функция | Зависимость от API |
 |-----------|---------|--------------------|
 | `IntakeWizard` | Пошаговый чек-лист (тип → класс → тема → учебник → глава → режим) с индикатором недостающих полей | `GET /intake/status` → `IntakeStatusResponse.missing_fields` (В-4) |
-| `SourceSearchPanel` | Статус авто-поиска учебника: каталог → скачивание → проверка → индексация | WS-событие `source.progress` |
-| `FileUpload` | Drag & drop PDF/DOCX с превью | `POST /upload` |
-| `QuizCard` | Карточка вопроса (single/multiple/open) | WS-событие `quiz.card` → `QuizCard` (В-4) |
+| `SourceSearchPanel` | Статус авто-поиска учебника: каталог → скачивание → проверка → индексация. Использует отдельный `busy=false` не блокирует — баннер «Загрузка…» не появляется при отправке ответа. | WS-событие `source.progress` |
+| `FileUpload` | Drag & drop PDF/DOCX с превью. Принимает пропс `busy={uploadBusy}` — только uploadBusy активирует баннер индексации (chatBusy не влияет) | `POST /upload` |
+| `QuizCard` | Карточка вопроса с адаптивной меткой сложности и счётчиком «Вопрос N/M». Варианты подсвечиваются как `selected` при выборе. Если `quickAnswer=false` — кнопка подтверждения появляется поверх карточки (`ConfirmBar`) | WS-событие `quiz.card` → `QuizCard` (В-4) |
 | `KnowledgeGraphPanel` | Граф знаний учебника: темы-уроки (мульти-акцентная раскраска); клик → подготовка по теме | `GET /api/sessions/{id}/graph`, `POST /api/sessions/{id}/topic` |
 | `ExplanationPanel` | Объяснение с цитатой из учебника (подсветка источника) | WS-событие `tutor.explanation` |
-| `ProgressDashboard` | Прогресс по темам (knowledge_map), график правильных ответов | `GET /sessions/{id}` |
-| `ChatStream` | WebSocket-стриминг событий агента | WS `/api/sessions/{id}/ws` |
+| `ProgressDashboard` | Прогресс по темам (knowledge_map), анимированные бары по уровню (low/mid/high). Счётчик с анимацией bump при обновлении правильных | `GET /sessions/{id}`, `tutor.summary` |
+| `ChatStream` | WebSocket-стриминг событий агента; когда есть `busy=true` внизу автоматически показывается Typing Indicator (три зелёные точки в анимации bounce) | WS `/api/sessions/{id}/ws` |
+
+> **App.jsx — управление состоянием сессии:**
+> 1. `useEffect(resync())` — после каждого `submitAnswer()` состояние сериализуется в JSON и сохраняется в БД. Сервис загружает его обратно при запуске — прогресс ученика переживает перезагрузку сервера.
+> 2. **Режим быстрого ответа (`quickAnswer`, localStorage):** если включён — вариант отправляется мгновенно при клике (детерминированная свёрка closed questions = <100 мс). Если выключен — выбранный вариант показан в полосе подтверждения («Вы выбрали X» → «Подтвердить» / «Отмена»). Переключается в popup шестерёнки. Настройка хранится в `localStorage.edututor_settings`.
 
 ---
 
@@ -815,6 +873,7 @@ edututor/
 │   ├── __init__.py
 │   ├── config.py                   # pydantic Settings (провайдеры, лимиты, бюджеты по ролям, crawl4ai)
 │   ├── llm_client.py              # ДОРАБОТКА клона: RouterAI + OpenRouter + роли tutor/expert/cheap (+ Ollama опц.)
+│   ├── session_store.py           # SQLite-персистентность сессий: сохранение/восстановление TutorState (Фаза 2)
 │   ├── tools.py                    # РАСШИРЕНИЕ клона: search_web, fetch_url, fetch_html, crawl_*, rag_search, ...
 │   ├── graph.py                    # LangGraph — граф агента (conditional edges, checkpointer)
 │   ├── states.py                   # Pydantic-модели состояний (IntakeState, TutorState)
@@ -832,27 +891,28 @@ edututor/
 │
 ├── api/
 │   ├── __init__.py
-│   ├── app.py                      # FastAPI application
+│   ├── app.py                      # FastAPI application (SessionStore + SessionSQLiteStore)
 │   ├── routes/
 │   │   ├── sessions.py             # CRUD сессий
 │   │   ├── messages.py             # Чат / WebSocket / cancel
 │   │   ├── intake.py               # Чек-лист / валидация
 │   │   ├── source.py               # find-textbook / source-status
-│   │   └── documents.py            # Upload / knowledge
+│   │   └── documents.py            # Upload / knowledge / export-questions
 │   └── schemas.py                  # IntakeStatusResponse, MessageResponse, WsEvent, QuizCard (В-4)
 │
 ├── frontend/                       # React (Vite) — РАСШИРЕНИЕ ЗАКАЗЧИКА (не входит в MVP)
 │   ├── src/
 │   │   ├── components/
-│   │   │   ├── IntakeWizard.jsx
-│   │   │   ├── SourceSearchPanel.jsx
-│   │   │   ├── FileUpload.jsx
-│   │   │   ├── QuizCard.jsx
-│   │   │   ├── ExplanationPanel.jsx
-│   │   │   ├── ProgressDashboard.jsx
-│   │   │   └── ChatStream.jsx
-│   │   ├── App.jsx
-│   │   └── index.css
+│   │   │   ├── IntakeWizard.jsx    # Пошаговый чек-лист с индикатором недостающих полей
+│   │   │   ├── SourceSearchPanel.jsx # Статус поиска: busy={uploadBusy} не блокируют квиз
+│   │   │   ├── FileUpload.jsx       # Drag & drop PDF/DOCX; баннер «Загрузка» появляется ТОЛЬКО при uploadBusy
+│   │   │   ├── QuizCard.jsx         # Карточка вопроса с option select → auto-submit или ConfirmBar
+│   │   │   ├── ExplanationPanel.jsx # Объяснение ошибки с цитатой из учебника
+│   │   │   ├── ProgressDashboard.jsx # Анимированные бары (low/mid/high grade); count-up at score bump
+│   │   │   ├── ChatStream.jsx        # WebSocket events + Typing Indicator при chatBusy
+│   │   │   └── LessonPanel.jsx      # Урок перед квизом (режим lesson mode)
+│   │   ├── App.jsx                 # Центральный контроллер: settings-gear, quickAnswer toggle, confirm bar, resync
+│   │   └── index.css               # Стилизация «тетрадь с красным полем», bounce dots animation, confirm-bar, toggle-switch
 │   └── package.json
 │
 ├── tests/                          # unit-тесты
@@ -1210,6 +1270,26 @@ API_PORT=8000
 
 ### 15.2. Чек-лист проверки готовой проектной работы (по памятке курса)
 
+#### Выполнено в ходе оптимизаций (Фаза 1+2, август 2026):
+
+| № | Задача из task.md | Статус | Как реализовано |
+|---|-------------------|--------|-----------------|
+| 1 | Разделить busy на uploadBusy/chatBusy | ✅ | В App.jsx: `setUploadBusy` для file/indexing, `setChatBusy` для quiz/messages. FileUpload.jsx получает `busy={uploadBusy}`, SourceSearchPanel — `busy={uploadBusy}`. QuizCard и чат не блокируются при индексации (раньше «Загрузка…» показывался ВСЕГДА, когда ответ на квиз обрабатывался) |
+| 2 | Шестерёнка настроек + quickAnswer toggle | ✅ | В sidebar рядом с брендом — кнопка ⚙ → popup `.settings-popup`. Toggle.switch управляет `quickAnswer`: если true — авто-отправка (детерминированные closed questions = мгновенно); если false — появляется **полоса подтверждения** (`confirm-bar`) с текстом **«Вы выбрали X»** и кнопками «Подтвердить» / «Отмена». Настройка сохраняется в `localStorage.edututor_settings`. |
+| 3 | Фокус возвращается в поле ввода | ✅ | `inputRef.current?.focus()` в `finally` блоке всех асинхронных операций (submitAnswer, selectTopic, handleUpload). Также auto-focus через `useEffect` когда `chatBusy || uploadBusy`, `false` → `setTimeout(() => inputRef?.focus(), 80)` |
+| 4 | Typing Indicator в чате | ✅ | ChatStream принимает `busy={chatBusy || uploadBusy}`. В конце `chatstream` рендерится `.typing-indicator` с тремя зелёными точками (CSS animation: `bounce-dot`). Анимация bounce с задержкой 0.16s между точками. |
+| 5 | Убрать дублирование PRE_CHECK_MIN_LENGTH | ✅ | В tutor.py удалена строка `PRE_CHECK_MIN_LENGTH = 20` (строка 31). Оставлена единственная `PRE_CHECK_MIN_LENGTH = 15` (теперь 245, рядом с `_eval_prompt`) |
+| 6 | Счётчик Вопрос N/M | ✅ | QuizCard принимает props `questionNum={N} totalQuestions={M}`. Отрисовывает бейдж `<span className="badge counter">вопрос N/M</span>` справа в meta-блоке. Значения передаются из App.jsx: `current.num_questions` (intake) и `state.records.filter(r ⇒ r.student_answer).length` (факт отвеченных вопросов через resync()) |
+
+#### Следующие шаги из task.md:
+| # | Задача | Приоритет | Зависимость |
+|---|--------|-----------|-------------|
+| A | Автоэкспорт при завершении квиза | Средний | summary_node уже вызывает export — проверить вызов при completed сессии |
+| B | SQLite persistence сессий | высокий | Создан `session_store.py`, но нужен вызов save/restore из engine.py и API |
+| C | Предгенерация вопросов пакетами (batch 3–5) | Высокий | Нужно изменить graph.py и engine.py: pool of pre-generated cards вместо single-step invoke |
+
+### 15.3. Расширения заказчика (roadmap после сдачи MVP)
+
 > Источник требований: [`Памятка_по_проектнои__работе.txt`](Памятка_по_проектнои__работе.txt). Чек-лист сводит разделы «Что обязательно», «Семь вопросов к своему проекту», «Что имеет смысл логировать» и «Чего не следует логировать». Каждый пункт ниже покрывается документом и/или демо-прогоном (см. разделы 1–7, 12, 15.0 и Этапы 0–7).
 
 **Обязательные блоки (Что обязательно):**
@@ -1286,6 +1366,32 @@ python scripts/model_probe.py         # Этап 0: тест-колл досту
 
 Порядок приоритета для заказчика: **1 → 2 → 3 → 4**; пункты 5–7 — по мере необходимости.
 
+#### Фазы оптимизаций (Фаза 1+2 реализованы, август 2026):
+
+**Фаза 1 — Немедленные фиксы:**
+| № | Задача | Статус | Описание |
+|---|--------|--------|----------|
+| 1 | Разделить busy | ✅ | uploadBusy (FileUpload/SourceSearchPanel) / chatBusy (QuizCard/ChatStream) — баннер «Загрузка…» больше не мешает квизу |
+| 2 | Фокус в поле ввода | ✅ | `inputRef.focus()` в финалах всех async операций |
+| 3 | Шестерёнка настроек | ✅ | Toggle `quickAnswer`: true = автоотправка мгновенна (<100мс для closed questions); false = полоса подтверждения **«Вы выбрали X»** с кнопками OK/Отмена |
+| 4 | Typing Indicator | ✅ | Три зелёные точки (bounce animation) при `chatBusy` внизу ChatStream |
+| 5 | Убрать дубли PRE_CHECK_MIN_LENGTH | ✅ | Удалена строка `PRE_CHECK_MIN_LENGTH = 20`, оставлена единственная `= 15` у `simplicity_precheck` |
+| 6 | Счётчик Вопрос N/M | ✅ | QuizCard получает props `questionNum` / `totalQuestions`, рендерит `<span className="badge counter">вопрос N/M</span>` справа |
+
+**Фаза 2 — Persistence и оптимизация (в процессе):**
+| # | Задача | Статус | Описание |
+|---|--------|--------|----------|
+| 1 | Автоэкспорт при завершении квиза | 🟡 В работе | `write_session_exports()` вызывается из CLI (`main.py`) — нужно добавить вызов из графа при `quiz_complete=True` |
+| 2 | SQLite persistence сессий | 🟡 В процессе | Создан `src/session_store.py :: SessionSQLiteStore`. Сохраняет состояние после каждого шага `run_step()`. Восстановление — через API endpoint `GET /api/sessions/{id}/restore` (ещё не реализован) |
+| 3 | Предгенерация вопросов пакетами | ⬜ Не начато | Engine должен генерировать батч {3,5} вопросов за один LLM-вызов при старте квиза; хранить в состоянии пуле; node `generate_question_node` берёт pop(). Даёт <100мс вместо ~3с при ответе |
+
+**Фаза 3 — UI/UX улучшения (по желанию заказчика):**
+- [ ] Зелёное/красное подсветка выбранного варианта (correct/wrong) на 1-2 секунды
+- [ ] Анимация прогресс-баров CSS + count-up анимация счёчика правильных ответов (уже есть базовая bump-анимация в ProgressDashboard)
+- [ ] Кнопки-горячки `1, 2, 3, 4...` для вариантов квиза (keyboard shortcuts)
+- [ ] Граф знаний: пульсация активного узла SVG circle (css animation: pulse-glow на `.kg-node.active`)
+- [ ] Dark mode toggle
+
 ---
 
 ## 17. Референсы
@@ -1299,3 +1405,5 @@ python scripts/model_probe.py         # Этап 0: тест-колл досту
 | **geo_tutor-master** (`tmp/geo_tutor-master`) | Пайплайн PDF (Docling/pdfplumber/OCR), очистка текста, параграфы §N, обогащение чанков, генерация теста JSON, оценка ответа, реранкинг, фильтр по параграфам, `grade_prompt` |
 | **РЭШ, НЭБ, открытые образовательные платформы и конспекты** | Легальные источники учебных материалов по теме (К-2, раздел 6); полный PDF учебника легально недоступен — не ищем |
 | Памятка по проектной работе | Все требования курса; **формат проектной работы — «схема + краткое описание»** (К-1, раздел 15.0) |
+| **implementation_plan.md** (brain/f11a7479...) | Аудит-план от Gemini: 12 найденных проблем + Фаза1/2/3 roadmap с оценкой времени |
+| **task.md** (brain/f11a7479...) | Декомпозиция задач для реализации оптимизаций (Фаза 1–3, август 2026) |

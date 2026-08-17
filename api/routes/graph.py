@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+
+logger = logging.getLogger("edututor.api.routes.graph")
 
 from src.config import settings as default_settings
 from src.knowledge_graph import KnowledgeGraph
@@ -48,32 +51,57 @@ def related_nodes(session_id: str, node_id: str, store: SessionStore = Depends(g
 @router.post("/topic")
 async def select_topic(session_id: str, body: TopicBody, store: SessionStore = Depends(get_store)):
     """Подготовка по теме: активируем узел графа, генерируем вопрос по этому разделу."""
-    session = get_session(store, session_id)
-    kg = KnowledgeGraph.from_dict(session.state.knowledge_graph)
-    title = ""
-    for n in kg.to_dict()["nodes"]:
-        if n.get("id") == body.topic_id:
-            title = n.get("title", "")
-            break
-    if not title:
-        raise HTTPException(status_code=404, detail="Тема не найдена в графе знаний")
-
-    session.state = session.state.model_copy(
-        update={
-            "active_topic": body.topic_id,
-            "topic": title or session.state.topic,
-            "awaiting_topic": False,
+    try:
+        session = get_session(store, session_id)
+        logger.info("select_topic: session=%s, topic_id=%s", session_id, body.topic_id)
+        
+        # Получаем title для сообщения
+        title = ""
+        kg = session.state.knowledge_graph or {}
+        nodes = kg.get("nodes", []) if kg else []
+        logger.info("select_topic: knowledge_graph has %d nodes", len(nodes))
+        
+        for n in nodes:
+            if n.get("id") == body.topic_id:
+                title = n.get("title", "")
+                break
+        if not title:
+            raise HTTPException(status_code=404, detail="Тема не найдена в графе знаний")
+        
+        # Эмитим событие что тема выбрана (для WebSocket)
+        from api.schemas import WsEvent
+        try:
+            if session.queue:
+                session.queue.put(WsEvent(event="system", data={"message": f"Готовимся по теме: {title}..."}))
+                logger.info("Emitted system event for topic selection")
+            else:
+                logger.warning("session.queue is None, skipping event emission")
+        except Exception as e:
+            logger.warning("Failed to emit event: %s", e)
+        
+        session.state = session.state.model_copy(
+            update={
+                "active_topic": body.topic_id,
+                "topic": title or session.state.topic,
+                "awaiting_topic": False,
+            }
+        )
+        session.history.append({"role": "system", "text": f"Подготовка по теме: {title}"})
+        
+        logger.info("Running step after topic selection")
+        await run_step(session)
+        logger.info("Step completed, returning response")
+        
+        return {
+            "ok": True,
+            "active_topic": session.state.active_topic,
+            "title": title,
+            "question": session.state.current_question.model_dump() if session.state.current_question else None,
+            "next_question": session.state.agent_question or "",
         }
-    )
-    session.history.append({"role": "system", "text": f"Подготовка по теме: {title or body.topic_id}"})
-    await run_step(session)
-    return {
-        "ok": True,
-        "active_topic": session.state.active_topic,
-        "title": title,
-        "question": session.state.current_question.model_dump() if session.state.current_question else None,
-        "next_question": session.state.agent_question or "",
-    }
+    except Exception as e:
+        logger.exception("select_topic error: %s", e)
+        raise
 
 
 @router.get("/knowledge-package")

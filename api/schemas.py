@@ -56,6 +56,7 @@ class WsEvent(BaseModel):
         "tutor.explanation",
         "tutor.summary",
         "graph.ready",
+        "system",
         "session.error",
     ]
     data: Dict[str, Any] = Field(default_factory=dict)

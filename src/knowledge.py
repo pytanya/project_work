@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -520,7 +521,7 @@ class NumpyVectorStore:
         # Фильтр по метаданным
         idx = list(range(len(self._chunks)))
         if filters:
-            idx = [i for i in idx if self._chunk_matches(self._chunks[i], filters)]
+            idx = [i for i in idx if chunk_matches(self._chunks[i], filters)]
 
         if not idx:
             return []
@@ -533,24 +534,196 @@ class NumpyVectorStore:
             results.append(SearchResult(chunk=self._chunks[i], score=float(1.0 - sims[int(rank)])))
         return results
 
-    @staticmethod
-    def _chunk_matches(chunk: DocChunk, filters: Dict[str, Any]) -> bool:
-        meta = chunk.metadata()
-        for key, expected in filters.items():
-            if isinstance(expected, dict):
-                if meta.get(key) != expected.get("$eq"):
-                    return False
-            else:
-                if meta.get(key) != expected:
-                    return False
-        return True
-
     def count(self) -> int:
         return len(self._chunks)
 
     def reset(self) -> None:
         self._matrix = self._np.zeros((0, 0), dtype=self._np.float32)
         self._chunks = []
+
+
+def chunk_matches(chunk: DocChunk, filters: Optional[Dict[str, Any]]) -> bool:
+    """Фильтр чанка по метаданным (subject/grade/section_number/source).
+
+    Поддерживает два синтаксиса: прямое равенство (`{"section_number": "12"}`)
+    и ChromaDB-форму `{"$eq": ...}` для отдельного ключа.
+    """
+    if not filters:
+        return True
+    meta = chunk.metadata()
+    for key, expected in filters.items():
+        if isinstance(expected, dict):
+            if meta.get(key) != expected.get("$eq"):
+                return False
+        else:
+            if meta.get(key) != expected:
+                return False
+    return True
+
+
+# ----------------------------------------------------------------------
+# Hybrid RAG: BM25 (Okapi) + векторный поиск + fusion через RRF
+# (референс: Digiler AI — гибридный retrieval с ранжированием RRF)
+# ----------------------------------------------------------------------
+def _bm25_tokenize(text: str) -> List[str]:
+    """Токенизация для BM25: слова (кириллица/латиница) в нижнем регистре."""
+    return re.findall(r"[а-яёa-z]{2,}", (text or "").lower())
+
+
+class OkapiBM25:
+    """Лёгкий BM25 (Okapi k1=1.2, b=0.75) на чистом Python/numpy — без новых зависимостей.
+
+    Индекс перестраивается целиком при каждом add_docs (учебник ≈ тысячи чанков,
+    построение занимает миллисекунды). Хранит только частоты терминов.
+    """
+
+    def __init__(self, k1: float = 1.2, b: float = 0.75) -> None:
+        self.k1 = k1
+        self.b = b
+        self._ffs: List[Dict[str, int]] = []
+        self._lens: List[int] = []
+        self._idf: Dict[str, float] = {}
+        self._avgdl: float = 0.0
+
+    def add_docs(self, docs: List[str]) -> None:
+        n = len(docs)
+        ffs: List[Dict[str, int]] = []
+        lens: List[int] = []
+        df: Dict[str, int] = {}
+        for doc in docs:
+            toks = _bm25_tokenize(doc)
+            lens.append(len(toks))
+            ff: Dict[str, int] = {}
+            seen: set = set()
+            for t in toks:
+                ff[t] = ff.get(t, 0) + 1
+                if t not in seen:
+                    seen.add(t)
+                    df[t] = df.get(t, 0) + 1
+            ffs.append(ff)
+        self._ffs = ffs
+        self._lens = lens
+        self._avgdl = (sum(lens) / n) if n else 0.0
+        self._idf = {
+            t: math.log(1.0 + (n - df[t] + 0.5) / (df[t] + 0.5)) for t in df
+        }
+
+    def score(self, query: str, idx: int) -> float:
+        if idx >= len(self._ffs) or self._avgdl <= 0:
+            return 0.0
+        ff = self._ffs[idx]
+        dl = self._lens[idx]
+        s = 0.0
+        for t in set(_bm25_tokenize(query)):
+            idf = self._idf.get(t)
+            if not idf:
+                continue
+            f = ff.get(t, 0)
+            if not f:
+                continue
+            denom = f + self.k1 * (1.0 - self.b + self.b * dl / self._avgdl)
+            s += idf * (f * (self.k1 + 1.0)) / denom
+        return s
+
+
+def rrf_merge(
+    result_sets: List[List[SearchResult]],
+    k: int = 5,
+    rrf_k: float = 60.0,
+    weights: Optional[List[float]] = None,
+) -> List[SearchResult]:
+    """Reciprocal Rank Fusion нескольких списков SearchResult.
+
+    score(chunk) = Σ w_i / (rrf_k + rank_i). Скоринг в SearchResult — расстояние
+    (меньше = ближе), поэтому здесь НЕ транслируем его — для потребителя важна
+    только упорядоченность, а score оставляем RRF-баллом.
+    """
+    acc: Dict[str, float] = {}
+    by_id: Dict[str, SearchResult] = {}
+    for i, results in enumerate(result_sets):
+        w = weights[i] if weights else 1.0
+        for rank, r in enumerate(results, start=1):
+            kid = r.chunk.id
+            acc[kid] = acc.get(kid, 0.0) + w / (rrf_k + rank)
+            by_id.setdefault(kid, r)
+    ordered = sorted(acc.items(), key=lambda kv: kv[1], reverse=True)
+    return [SearchResult(chunk=by_id[kid].chunk, score=score) for kid, score in ordered[:k]]
+
+
+class HybridVectorStore:
+    """Векторный поиск + BM25 с fusion через RRF (реализует протокол VectorStore).
+
+    Обёртка над любым VectorStore: `add` делегирует внутреннему стора и ведёт
+    собственный список чанков для BM25-индекса (индекс перестраивается лениво
+    при изменении). Фильтры по метаданным применяются к ОБОИМ ретриверам.
+    Включается настройкой HYBRID_RAG=true в make_graph_deps.
+    """
+
+    def __init__(
+        self,
+        inner: VectorStore,
+        k1: float = 1.2,
+        b: float = 0.75,
+        rrf_k: float = 60.0,
+    ) -> None:
+        self.inner = inner
+        self.k1 = k1
+        self.b = b
+        self.rrf_k = rrf_k
+        self._chunks: List[DocChunk] = []
+        self._bm25 = OkapiBM25(k1=k1, b=b)
+        self._dirty = True
+
+    @property
+    def collection_name(self) -> str:
+        return getattr(self.inner, "collection_name", "hybrid")
+
+    def _rebuild(self) -> None:
+        if not self._dirty:
+            return
+        self._bm25.add_docs([c.text for c in self._chunks])
+        self._dirty = False
+
+    def add(self, chunks: List[DocChunk]) -> None:
+        if not chunks:
+            return
+        self.inner.add(chunks)
+        self._chunks.extend(chunks)
+        self._dirty = True
+
+    def search(
+        self,
+        query: str,
+        k: int = 5,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> List[SearchResult]:
+        self._rebuild()
+        vec = self.inner.search(query, k=k, filters=filters)
+
+        ids = {r.chunk.id for r in vec}
+        bm25: List[SearchResult] = []
+        for i, chunk in enumerate(self._chunks):
+            if chunk.id in ids:
+                continue  # уже в топе векторного — не дублируем на верхние позиции
+            if not chunk_matches(chunk, filters):
+                continue
+            s = self._bm25.score(query, i)
+            if s > 0:
+                bm25.append(SearchResult(chunk=chunk, score=s))
+        bm25.sort(key=lambda r: r.score, reverse=True)
+
+        merged = rrf_merge([vec, bm25[: max(k, 10)]], k=k, rrf_k=self.rrf_k)
+        # Кандидатов из BM25 всегда достаточно: если векторный нашёл мало, а BM25 нет —
+        # добираем из векторного результата.
+        return merged or vec[:k]
+
+    def count(self) -> int:
+        return len(self._chunks)
+
+    def reset(self) -> None:
+        self.inner.reset()
+        self._chunks = []
+        self._dirty = True
 
 
 class ChromaStore:
@@ -667,11 +840,26 @@ def make_collection_name(embedder: Embedder, prefix: str = "edututor") -> str:
 
     ChromaDB фиксирует размерность при создании коллекции — разные эмбеддинги
     должны жить в разных коллекциях, иначе конфликт «expected 384, got 1024».
+
+    ВАЖНО: размерность определяется БЕЗ сетевого вызова encode() — для API
+    эмбеддера это дорого (~3с на каждый вызов). Используем статическую карту
+    моделей; если модель неизвестна — fallback на encode (только один раз).
     """
-    try:
-        dim = len(embedder.encode(["dim probe"])[0])
-    except Exception:
-        dim = "unknown"
+    model = getattr(embedder, "model", "") or ""
+    dim_by_model = {
+        "intfloat/multilingual-e5-large": "1024",
+        "intfloat/multilingual-e5-small": "384",
+        "multilingual-e5-large": "1024",
+        "multilingual-e5-small": "384",
+    }
+    dim = dim_by_model.get(model)
+    if dim is None:
+        # Неизвестная модель: единственный сетевой вызов (результат не кэшируем —
+        # функция вызывается редко, только при старте/создании стора)
+        try:
+            dim = str(len(embedder.encode(["dim probe"])[0]))
+        except Exception:
+            dim = "unknown"
     return f"{prefix}_{dim}"
 
 

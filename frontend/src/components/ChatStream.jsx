@@ -3,7 +3,7 @@ import { useEffect, useRef } from 'react'
 import ExplanationPanel from './ExplanationPanel'
 import LessonPanel from './LessonPanel'
 
-export default function ChatStream({ feed }) {
+export default function ChatStream({ feed, busy = false }) {
   const endRef = useRef(null)
   useEffect(() => {
     try {
@@ -12,7 +12,7 @@ export default function ChatStream({ feed }) {
     } catch (_) {
       /* jsdom не реализует scrollIntoView — в тестах тихо */
     }
-  }, [feed])
+  }, [feed, busy])
 
   return (
     <div className="chatstream">
@@ -40,7 +40,14 @@ export default function ChatStream({ feed }) {
           {m.kind === 'error' && <div className="bubble error">⚠️ {m.text}</div>}
         </div>
       ))}
-      {feed.length === 0 && (
+      {busy && (
+        <div className="msg typing-indicator">
+          <div className="bubble agent typing">
+            <span className="dot" /><span className="dot" /><span className="dot" />
+          </div>
+        </div>
+      )}
+      {feed.length === 0 && !busy && (
         <div className="empty-chat">
           <div className="mark" aria-hidden="true" />
           <h2>Сессия создаётся…</h2>
@@ -53,3 +60,4 @@ export default function ChatStream({ feed }) {
     </div>
   )
 }
+
