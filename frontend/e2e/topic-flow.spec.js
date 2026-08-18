@@ -5,7 +5,7 @@ test.describe('Topic Selection Flow', () => {
     await page.goto('/')
     
     // 1) Fill intake quickly (mock scenario)
-    const answers = ['ученик 4 класса', '4', 'основы православной культуры', 'да', 'квиз']
+    const answers = ['ученик 4 класса', '4', 'основы православной культуры', 'Культура и религия', 'да', 'квиз']
     for (const a of answers) {
       await page.getByPlaceholder('Ваш ответ…').fill(a)
       await page.getByRole('button', { name: 'Отправить' }).click()
@@ -51,7 +51,7 @@ test.describe('Topic Selection Flow', () => {
     await page.goto('/')
     
     // Fill intake
-    const answers = ['ученик 4 класса', '4', 'тест', 'да', 'квиз']
+    const answers = ['ученик 4 класса', '4', 'тест', 'Атмосфера', 'да', 'квиз']
     for (const a of answers) {
       await page.getByPlaceholder('Ваш ответ…').fill(a)
       await page.getByRole('button', { name: 'Отправить' }).click()

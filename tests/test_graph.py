@@ -104,7 +104,7 @@ class TestIntakeFlow:
     def test_full_intake_to_quiz(self, deps):
         graph = build_graph(deps)
         state = TutorState(num_questions=3, sources=[{"type": "web", "url": "x"}], collection_id="web")
-        res = _feed(graph, state, ["ученик 6 класса", "6", "география", "нет", "квиз"])
+        res = _feed(graph, state, ["ученик 6 класса", "6", "география", "Атмосфера", "нет", "квиз"])
         # intake завершён, источник готов (pre-seeded), задан вопрос квиза
         assert res.agent_question
         assert res.current_question is not None
@@ -125,7 +125,7 @@ class TestQuizFlow:
         graph = build_graph(deps)
         state = TutorState(num_questions=3, sources=[{"type": "web", "url": "x"}], collection_id="web")
         # intake
-        res = _feed(graph, state, ["студент", "география", "нет", "квиз"])
+        res = _feed(graph, state, ["студент", "география", "Атмосфера", "нет", "квиз"])
         # q1 (оценка ОК)
         res = _invoke(graph, {**res.model_dump(), "pending_answer": "Атмосфера — это воздушная оболочка."})
         assert res.knowledge_map.get("Атмосфера") is not None
@@ -150,7 +150,7 @@ class TestQuizFlow:
         deps.expert_llm = lambda m: expert.__setitem__("n", expert["n"] + 1) or _EXPL
         graph = build_graph(deps)
         state = TutorState(num_questions=1, sources=[{"type": "web", "url": "x"}], collection_id="web")
-        res = _feed(graph, state, ["студент", "география", "нет", "квиз"])
+        res = _feed(graph, state, ["студент", "география", "Атмосфера", "нет", "квиз"])
         res = _invoke(graph, {**res.model_dump(), "pending_answer": "А"})
         assert "Ошибка" in res.agent_message
         assert "Б" in res.agent_message          # правильный вариант показан без LLM
@@ -160,7 +160,7 @@ class TestQuizFlow:
     def test_wrong_answer_triggers_explanation(self, deps):
         graph = build_graph(deps)
         state = TutorState(num_questions=1, sources=[{"type": "web", "url": "x"}], collection_id="web")
-        res = _feed(graph, state, ["студент", "география", "нет", "квиз"])
+        res = _feed(graph, state, ["студент", "география", "Атмосфера", "нет", "квиз"])
         deps.eval_llm = lambda m: _EVAL_WRONG
         res = _invoke(graph, {**res.model_dump(), "pending_answer": "Неправильный ответ тут"})
         assert "Объяснение:" in res.agent_message
@@ -169,7 +169,7 @@ class TestQuizFlow:
     def test_records_filled_for_export(self, deps):
         graph = build_graph(deps)
         state = TutorState(num_questions=1, sources=[{"type": "web", "url": "x"}], collection_id="web")
-        res = _feed(graph, state, ["студент", "география", "нет", "квиз"])
+        res = _feed(graph, state, ["студент", "география", "Атмосфера", "нет", "квиз"])
         # вопрос сгенерирован → в records появилась запись
         assert len(res.records) == 1
         assert res.records[0]["question_id"] == "q1"
@@ -194,7 +194,7 @@ class TestQuizFlow:
         deps.tutor_llm = llm
         graph = build_graph(deps)
         state = TutorState(num_questions=1, sources=[{"type": "web", "url": "x"}], collection_id="web")
-        res = _feed(graph, state, ["студент", "география", "нет", "урок"])
+        res = _feed(graph, state, ["студент", "география", "Атмосфера", "нет", "урок"])
         assert res.mode == "lesson"
         assert res.lesson_done is True
         assert res.lesson_text and "газовая оболочка" in res.lesson_text
@@ -224,7 +224,7 @@ class TestSourceFlow:
         )
         graph = build_graph(deps)
         state = TutorState(num_questions=1)
-        res = _feed(graph, state, ["студент", "физика", "нет", "квиз"])
+        res = _feed(graph, state, ["студент", "физика", "Атомы", "нет", "квиз"])
         assert res.session_status == "failed"
         assert res.source_status == "failed"
         assert res.agent_message
@@ -237,7 +237,7 @@ class TestSourceFlow:
         )
         graph = build_graph(deps)
         state = TutorState(num_questions=1, textbook_file=str(doc))
-        res = _feed(graph, state, ["студент", "география", "да", "квиз"])
+        res = _feed(graph, state, ["студент", "география", "Атмосфера", "да", "квиз"])
         # после upload файл индексируется, строит граф и ЖДЁТ выбор темы
         assert res.source_status == "ready"
         assert res.awaiting_topic is True
@@ -279,7 +279,7 @@ class TestSourceFlow:
         deps.store.embedder = BoomEmbedder()
         graph = build_graph(deps)
         state = TutorState(num_questions=1, textbook_file=str(doc))
-        res = _feed(graph, state, ["студент", "география", "да", "квиз"])
+        res = _feed(graph, state, ["студент", "география", "Атмосфера", "да", "квиз"])
         assert res.source_status == "failed"
         assert res.session_status == "failed"
         assert "source.failed" in events

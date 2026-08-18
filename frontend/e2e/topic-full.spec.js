@@ -20,7 +20,7 @@ test.describe('Full Flow - Topic Selection (500 error fix)', () => {
     await expect(page.getByText('Кто ты?').first()).toBeVisible({ timeout: 30000 })
 
     // 2) Intake
-    const answers = ['ученик 4 класса', '4', 'основы православной культуры', 'да', 'квиз']
+    const answers = ['ученик 4 класса', '4', 'основы православной культуры', 'Культура и религия', 'да', 'квиз']
     for (const a of answers) {
       await page.getByPlaceholder('Ваш ответ…').fill(a)
       await page.getByRole('button', { name: 'Отправить' }).click()

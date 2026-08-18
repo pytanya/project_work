@@ -17,7 +17,7 @@ print("Create session:", r.status_code, r.text[:100])
 sid = r.json()["session_id"]
 
 # 2) Проходим intake
-answers = ["ученик 4 класса", "4", "основы православной культуры", "да", "квиз"]
+answers = ["ученик 4 класса", "4", "основы православной культуры", "Культура и религия", "да", "квиз"]
 for a in answers:
     r = requests.post(f"{BASE}/api/sessions/{sid}/intake", json={"answer": a})
     print(f"Intake '{a}':", r.status_code)

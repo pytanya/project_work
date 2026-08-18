@@ -114,7 +114,7 @@ class TestIntake:
         assert "learner_type" in r.json()["missing_fields"]
         assert not r.json()["complete"]
 
-        for answer in ["студент", "физика", "нет", "квиз"]:
+        for answer in ["студент", "физика", "Атомы", "нет", "квиз"]:
             r = client.post(f"/api/sessions/{sid}/intake", json={"answer": answer})
             assert r.status_code == 200
         status = client.get(f"/api/sessions/{sid}/intake/status").json()
@@ -125,7 +125,7 @@ class TestIntake:
 class TestMessage:
     def test_quiz_card_after_intake(self, client):
         sid = _new_session(client, num_questions=2, sources=[{"type": "web", "url": "x"}], collection_id="web")
-        for answer in ["студент", "физика", "нет", "квиз"]:
+        for answer in ["студент", "физика", "Атомы", "нет", "квиз"]:
             client.post(f"/api/sessions/{sid}/intake", json={"answer": answer})
 
         r = client.post(f"/api/sessions/{sid}/message", json={"text": "Атмосфера — это воздушная оболочка Земли."})
@@ -145,7 +145,7 @@ class TestUpload:
     def test_upload_txt(self, client, tmp_path):
         sid = _new_session(client, num_questions=1)
         # завершаем intake (upload обрабатывается после чек-листа)
-        for answer in ["студент", "физика", "да", "квиз"]:
+        for answer in ["студент", "физика", "Атомы", "да", "квиз"]:
             client.post(f"/api/sessions/{sid}/intake", json={"answer": answer})
         files = {"file": ("doc.txt", "Параграф 12: Атмосфера\nСтроение атмосферы.\n\nПараграф 13: Погода\nПогода меняется.".encode("utf-8"), "text/plain")}
         r = client.post(f"/api/sessions/{sid}/upload", files=files)
@@ -161,7 +161,7 @@ class TestUpload:
 
     def test_upload_scanned_detected(self, client):
         sid = _new_session(client, num_questions=1)
-        for answer in ["студент", "физика", "да", "квиз"]:
+        for answer in ["студент", "физика", "Атомы", "да", "квиз"]:
             client.post(f"/api/sessions/{sid}/intake", json={"answer": answer})
         # очень короткий текст (< OCR_MIN_TEXT_CHARS) → «скан»
         files = {"file": ("scan.txt", b"abcd", "text/plain")}
@@ -194,7 +194,7 @@ class TestCancel:
 class TestExport:
     def test_export_csv(self, client):
         sid = _new_session(client, num_questions=1, sources=[{"type": "web", "url": "x"}], collection_id="web")
-        for answer in ["студент", "физика", "нет", "квиз"]:
+        for answer in ["студент", "физика", "Атомы", "нет", "квиз"]:
             client.post(f"/api/sessions/{sid}/intake", json={"answer": answer})
         client.post(f"/api/sessions/{sid}/message", json={"text": "Атмосфера — воздушная оболочка Земли."})
 
@@ -217,7 +217,7 @@ class TestExport:
 class TestGraph:
     def _session_with_graph(self, client):
         sid = _new_session(client, num_questions=1)
-        for answer in ["студент", "физика", "да", "квиз"]:
+        for answer in ["студент", "физика", "Атомы", "да", "квиз"]:
             client.post(f"/api/sessions/{sid}/intake", json={"answer": answer})
         files = {"file": ("doc.txt", "Параграф 12: Атмосфера\nСтроение атмосферы.\n\nПараграф 13: Погода\nПогода меняется.".encode("utf-8"), "text/plain")}
         client.post(f"/api/sessions/{sid}/upload", files=files)
@@ -281,7 +281,7 @@ class TestWebSocket:
     def test_ws_streams_quiz_card(self, client):
         sid = _new_session(client, num_questions=1, sources=[{"type": "web", "url": "x"}], collection_id="web")
         with client.websocket_connect(f"/api/sessions/{sid}/ws") as ws:
-            for answer in ["студент", "физика", "нет", "квиз"]:
+            for answer in ["студент", "физика", "Атомы", "нет", "квиз"]:
                 client.post(f"/api/sessions/{sid}/intake", json={"answer": answer})
             client.post(f"/api/sessions/{sid}/message", json={"text": "Атмосфера — воздушная оболочка Земли."})
             # ждём хотя бы одно событие

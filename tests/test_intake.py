@@ -33,6 +33,18 @@ class TestNormalizeAnswer:
         assert normalize_answer("mode", "объяснение") == "explain"
         assert normalize_answer("mode", "глубокий разбор") == "deep_dive"
 
+    def test_topic(self):
+        assert normalize_answer("topic", "Атмосфера") == "Атмосфера"
+        # ответ-режим не должен попасть в тему (поиск по теме, не по «квиз»)
+        assert normalize_answer("topic", "квиз") is None
+        assert normalize_answer("topic", "урок") is None
+        assert normalize_answer("topic", "объяснение") is None
+        # yes/no — не тема
+        assert normalize_answer("topic", "нет") is None
+        # «все» = весь учебник
+        assert normalize_answer("topic", "все") == "all"
+        assert normalize_answer("topic", "весь учебник") == "all"
+
     def test_unknown_is_none(self):
         assert normalize_answer("mode", "хз") is None
         assert normalize_answer("grade", "не знаю") is None
@@ -57,6 +69,13 @@ class TestComputeMissing:
     def test_topic_counts_as_subject_alt(self):
         s = IntakeState(learner_type="student", topic="Атмосфера", has_textbook=False, mode="quiz")
         assert "subject" not in compute_missing(s)
+
+    def test_topic_required_when_subject_set(self):
+        """Тема обязательна, если задан предмет (поиск по теме, не по предмету)."""
+        s = IntakeState(learner_type="student", subject="география", has_textbook=False, mode="quiz")
+        assert "topic" in compute_missing(s)
+        s.topic = "Атмосфера"
+        assert "topic" not in compute_missing(s)
 
 
 class TestApplyAnswer:
@@ -85,6 +104,7 @@ class TestValidateIntake:
             ("learner_type", "ученик 6 класса"),
             ("grade", "6"),
             ("subject", "география"),
+            ("topic", "Атмосфера"),
             ("has_textbook", "нет"),
             ("mode", "квиз"),
         ]:

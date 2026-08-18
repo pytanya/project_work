@@ -10,7 +10,7 @@ test('полный сценарий: intake → загрузка OPK → инд�
   await expect(page.getByText('Кто ты?').first()).toBeVisible({ timeout: 30_000 })
 
   // 2) интейк
-  for (const a of ['ученик 4 класса', '4', 'основы православной культуры', 'да', 'квиз']) {
+  for (const a of ['ученик 4 класса', '4', 'основы православной культуры', 'Культура и религия', 'да', 'квиз']) {
     await page.getByPlaceholder('Ваш ответ…').fill(a)
     await page.getByRole('button', { name: 'Отправить' }).click()
     // ждём, что текст появился в ленте

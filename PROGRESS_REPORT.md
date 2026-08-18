@@ -2,6 +2,24 @@
 
 ## ✅ Выполнено за сессию
 
+### Фаза 4 — Тема обязательна в intake + доводка (100%)
+
+**Причина:** поиск материалов шёл по предмету вместо темы. Решение (из списка фиксов): тема обязательна при заданном предмете.
+
+| Задача | Статус | Детали |
+|--------|--------|--------|
+| Тема обязательна в intake | ✅ | `compute_missing`: если `subject` задан, `topic` — обязательное поле; «все/весь учебник» → `"all"` |
+| Не проглатывать режим темой | ✅ | `normalize_answer("topic", ...)`: ответы-режимы («квиз»/«урок»/«объяснение»/«глубокий разбор») → None (переспрос), yes/no → None |
+| topic="all" → поиск по предмету | ✅ | `find_textbook_node`: `search_topic=""` при `topic=="all"` |
+| Веб-источники → граф + гейт темы | ✅ | `find_textbook_node` строит `knowledge_graph` из собранного текста, `awaiting_topic=True`; `route_textbook_result` → topic gate |
+| Контракт 5.2 в SPEC | ✅ | Таблица `validate_intake` обновлена (тема обязательна при subject) |
+| Обновлены intake-сценарии | ✅ | `test_graph.py` (9), `test_api.py` (7), `evals/golden_set.json` (4), `frontend e2e` (topic-flow ×2, topic-full, full-flow), `scripts/reproduce_topic_500.py` |
+| Юнит-тесты | ✅ | `test_intake.py`: `normalize_answer("topic","квиз") is None`, `("topic","все")=="all"`, `compute_missing` требует topic |
+
+**Результат тестов:** pytest **339 passed / 1 skipped** (3 deselected — сетевые интеграционные: `TestRealRouterAI`, `test_find_textbook_mock`), vitest **27 passed**, Playwright chromium **8 passed** (вкл. полный flow с новой темой в intake).
+
+## ✅ Выполнено за сессию
+
 ### Фаза 1 — UI/UX оптимизации (100%)
 
 | Задача | Статус | Детали |

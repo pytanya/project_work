@@ -548,9 +548,11 @@ def find_textbook_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
 
     _emit(deps, "source.progress", stage="catalog", url="", status="searching",
           message=f"Поиск материалов по теме «{st.topic or st.subject or ''}»…")
+    # topic="all" («весь учебник») не передаём в поиск — ищем по предмету
+    search_topic = "" if (st.topic or "") == "all" else (st.topic or "")
     col = (deps.source_collector or source_finder.collect_source_materials)(
         subject=st.subject or "",
-        topic=st.topic or "",
+        topic=search_topic,
         grade=st.grade or "",
         author=st.textbook_author or "",
         settings=deps.settings,
@@ -581,6 +583,22 @@ def find_textbook_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         st.source_note = f"Собрано материалов: {len(col.sources)} источников"
         _emit(deps, "source.progress", stage="index", url="", status="done",
               message=st.source_note)
+
+        # Строим граф знаний из собранного веб-контента (для карты знаний и выбора темы)
+        try:
+            combined_text = "\n\n".join(col.texts) if col.texts else ""
+            if combined_text:
+                kg = build_textbook_graph(
+                    combined_text, source=st.topic or st.subject or "web"
+                )
+                st.knowledge_graph = kg.to_dict()
+                st.awaiting_topic = True
+                _emit(deps, "graph.ready",
+                      nodes=len(st.knowledge_graph.get("nodes", [])),
+                      edges=len(st.knowledge_graph.get("edges", [])))
+        except Exception as exc:
+            logger.warning("Граф из веб-источников не построен: %s", exc)
+
         return st.model_dump()
 
     st.source_status = "failed"
@@ -595,6 +613,9 @@ def route_textbook_result(state: TutorState) -> str:
         return NODE_SOURCE_FAILED
     if state.textbook_file:
         return NODE_PROCESS_DOCUMENT
+    # Если построен граф знаний — направляем на выбор темы
+    if state.awaiting_topic:
+        return NODE_TOPIC_GATE
     return NODE_TUTOR_NEXT
 
 
@@ -840,6 +861,7 @@ def build_graph(deps: Optional[GraphDeps] = None, checkpointer: Any = None) -> A
         {
             NODE_SOURCE_FAILED: NODE_SOURCE_FAILED,
             NODE_PROCESS_DOCUMENT: NODE_PROCESS_DOCUMENT,
+            NODE_TOPIC_GATE: NODE_TOPIC_GATE,
             NODE_TUTOR_NEXT: NODE_TUTOR_NEXT,
         },
     )

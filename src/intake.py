@@ -63,6 +63,9 @@ def compute_missing(state: IntakeState) -> List[str]:
         missing.append("grade")
     if not state.subject and not state.topic:
         missing.append("subject")
+    # Если предмет/дисциплина указаны, но тема не конкретизирована — запрашиваем тему
+    if state.subject and not state.topic:
+        missing.append("topic")
     if state.has_textbook is None:
         missing.append("has_textbook")
     if state.mode is None:
@@ -101,10 +104,12 @@ def normalize_answer(field: str, value: str) -> Any:
         return m.group(1) if m else None
 
     if field == "subject" or field == "topic" or field == "chapter":
-        if field == "chapter" and text in ("все", "вся", "all", "весь", "всё"):
+        if field in ("chapter", "topic") and text in ("все", "вся", "all", "весь", "всё", "весь учебник"):
             return "all"
         if text in _YES or text in _NO:
             return None  # ответ не по теме вопроса
+        if field == "topic" and text in _MODE_MAP:
+            return None  # ответ-режим (квиз/урок/объяснение/...) — не тема, переспрашиваем
         return str(value).strip()
 
     if field == "has_textbook":
