@@ -39,7 +39,7 @@ from .knowledge import (
     parse_document,
     process_document,
 )
-from .knowledge_graph import build_or_load_textbook_graph, build_textbook_graph
+from .knowledge_graph import PART_OF, build_or_load_textbook_graph, build_textbook_graph
 from .states import TutorState
 
 logger = logging.getLogger("edututor.graph")
@@ -57,6 +57,35 @@ NODE_TUTOR_NEXT = "tutor_next"
 NODE_GENERATE_QUESTION = "generate_question"
 NODE_EVALUATE_ANSWER = "evaluate_answer"
 NODE_SUMMARY = "summary"
+NODE_ASK_PAGE_RANGE = "ask_page_range"
+
+
+
+def _topic_count(nodes):
+    """Count only non-book topics (matches frontend KnowledgeGraphPanel filtering)."""
+    return sum(1 for n in (nodes or []) if n.get("type") != "book")
+
+def _readable_title(url: str) -> str:
+    """Извлекает читаемое название из URL или возвращает домен.
+
+    Примеры:
+        https://eduamti.ru/pluginfile.php/3109/mod_resource/content/1/... → "eduamti.ru"
+        https://infourok.ru/magazin-materialov/konspekt-lekcii-... → "infourok.ru"
+        "" → "Источник"
+    """
+    if not url:
+        return "Источник"
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        if not host:
+            return "Источник"
+        # Отрезаем www.
+        host = host.lstrip("www.")
+        return host
+    except Exception:
+        return "Источник"
 
 
 @dataclass
@@ -330,9 +359,9 @@ def lesson_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     # Генерируем урок по активной теме
     topic = st.topic or st.subject or "общая тема"
     if st.active_topic:
-        from .knowledge_graph import KnowledgeGraph
+        from .knowledge_graph import KnowledgeGraph, _node_title as _kg_node_title
         kg = KnowledgeGraph.from_dict(st.knowledge_graph or {})
-        title = _node_title(kg, st.active_topic)
+        title = _kg_node_title(kg, st.active_topic)
         if title:
             topic = title
     chunks = _rag_chunks(deps.store, topic, st, k=5)
@@ -340,6 +369,7 @@ def lesson_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     st.lesson_text = tutor_mod.generate_lesson(topic, context, st, llm_call=deps.tutor_llm)
     st.lesson_done = True
     _emit(deps, "tutor.lesson", text=st.lesson_text, topic=topic)
+    # agent_message устанавливаем один раз, _emit тоже один раз — без дублирования
     st.agent_message = "Урок по теме готов. Можно задать вопрос или перейти к квизу."
     _emit(deps, "system", message=st.agent_message, kind="lesson.ready")
     return st.model_dump()
@@ -419,7 +449,7 @@ def process_document_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     st.awaiting_topic = True
     _emit(deps, "source.progress", stage="index", url="", status="done",
           message=st.source_note)
-    _emit(deps, "graph.ready", nodes=len(st.knowledge_graph.get("nodes", [])),
+    _emit(deps, "graph.ready", nodes=_topic_count(st.knowledge_graph.get("nodes", [])),
           edges=len(st.knowledge_graph.get("edges", [])))
     return st.model_dump()
 
@@ -584,18 +614,49 @@ def find_textbook_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         _emit(deps, "source.progress", stage="index", url="", status="done",
               message=st.source_note)
 
-        # Строим граф знаний из собранного веб-контента (для карты знаний и выбора темы)
+        # Строим граф знаний из собранного веб-контента (для карты знаний и выбора темы).
+        # По каждому источнику отдельно → объединение: у каждой страницы свои подтемы,
+        # не перемешанные в «лепнину» из заголовков всех страниц разом.
         try:
-            combined_text = "\n\n".join(col.texts) if col.texts else ""
-            if combined_text:
-                kg = build_textbook_graph(
-                    combined_text, source=st.topic or st.subject or "web"
-                )
-                st.knowledge_graph = kg.to_dict()
-                st.awaiting_topic = True
-                _emit(deps, "graph.ready",
-                      nodes=len(st.knowledge_graph.get("nodes", [])),
-                      edges=len(st.knowledge_graph.get("edges", [])))
+            from .knowledge_graph import KnowledgeGraph
+
+            root_source = st.topic or st.subject or "web"
+            kg = KnowledgeGraph()
+            root_id = f"book:{root_source}"
+            kg.add_topic(root_id, f"Учебник «{root_source}»", node_type="book")
+            for i, (s, t) in enumerate(zip(col.sources, col.texts)):
+                if not (t and t.strip()):
+                    continue
+                sub = build_textbook_graph(t, source=f"{root_source}:{i}")
+                # узел-источник (страница): читаемое название из title или домен URL
+                page_id = f"page:{root_source}:{i}"
+                page_title = _readable_title(s.get("url", "")) if s.get("url") else f"Источник {i + 1}"
+                # подтемы страницы (реальные заголовки, без generic «Тема «source»»)
+                sub_topics = [
+                    (n, d) for n, d in sub.graph.nodes(data=True)
+                    if d.get("type") != "book"
+                    and not d.get("title", "").startswith(f"Тема «{root_source}:{i}")
+                ]
+                if sub_topics:
+                    kg.add_topic(page_id, page_title, node_type="topic")
+                    kg.add_edge(root_id, page_id, PART_OF)
+                    for n, d in sub_topics:
+                        kg.add_topic(n, d.get("title", n), node_type="topic",
+                                     section_number=d.get("section_number"))
+                        kg.add_edge(page_id, n, PART_OF)
+                else:
+                    # страница без структуры — сама становится темой
+                    kg.add_topic(page_id, page_title, node_type="topic")
+                    kg.add_edge(root_id, page_id, PART_OF)
+            if kg.graph.number_of_nodes() <= 1:
+                # пусто — хотя бы один узел, чтобы панель тем не была пустой
+                kg.add_topic(f"topic:{root_source}", f"Тема «{root_source}»", node_type="topic")
+                kg.add_edge(root_id, f"topic:{root_source}", PART_OF)
+            st.knowledge_graph = kg.to_dict()
+            st.awaiting_topic = True
+            _emit(deps, "graph.ready",
+                  nodes=_topic_count(st.knowledge_graph.get("nodes", [])),
+                  edges=len(st.knowledge_graph.get("edges", [])))
         except Exception as exc:
             logger.warning("Граф из веб-источников не построен: %s", exc)
 
@@ -745,6 +806,23 @@ def evaluate_answer_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
           message=message,
           citation=(explanation.get("citation") if explanation else None) if not graded.correct else None)
 
+    # Knowledge Wiki (roadmap #2): применяем результат текущего ответа к статье темы.
+    # Идемпотентно: только этот ответ (attempts+=1), НЕ пересчёт всех records.
+    try:
+        from .wiki import KnowledgeWiki
+
+        wiki = KnowledgeWiki(deps.settings.KNOWLEDGE_WIKI_DIR)
+        if st.records and st.records[-1].get("question_id") == card.question_id:
+            wiki.apply_record(st, st.records[-1])
+            # Wiki-LLM: обогащаем статью фактами из RAG-контекста (только пока тело пустое —
+            # не тратим LLM-вызов на каждый ответ)
+            if card and card.topic:
+                art = wiki.get(getattr(st, "subject", None) or "общая тема", card.topic)
+                if art is None or not (art.body or "").strip():
+                    wiki.enrich_body(st, card.topic, context, llm_call=deps.tutor_llm)
+    except Exception as exc:
+        logger.warning("Knowledge Wiki per-answer update failed: %s", exc)
+
     if st.answered_count >= st.num_questions:
         st.quiz_complete = True
         st.session_status = "completed"
@@ -780,11 +858,28 @@ def summary_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         logger.warning("Auto-export CSV failed: %s", exc)
 
     try:
+        from .okf import emit_okf_bundle
+
         source_name = st.textbook_name or st.subject or 'session'
-        emit_okf_bundle(st, source_name=source_name)
+        session_id = getattr(st, 'session_id', '') or ''
+        okf_dir = Path(deps.settings.KNOWLEDGE_GRAPH_DIR).parent / "okf" / session_id
+        emit_okf_bundle(st, out_dir=okf_dir, source_name=source_name)
         logger.info("Auto-export: OKF bundle saved")
     except Exception as exc:
         logger.warning("Auto-export OKF failed: %s", exc)
+
+    # Knowledge Wiki (roadmap #2): синхронизация mastery (идемпотентно, без attempts++)
+    try:
+        from .wiki import KnowledgeWiki
+
+        wiki = KnowledgeWiki(deps.settings.KNOWLEDGE_WIKI_DIR)
+        updated = wiki.sync_mastery(st)
+        if updated:
+            logger.info("Knowledge Wiki: синхронизировано %d статей", len(updated))
+            _emit(deps, "wiki.updated", subjects=[getattr(st, "subject", None) or "общая тема"],
+                  count=len(updated))
+    except Exception as exc:
+        logger.warning("Knowledge Wiki update failed: %s", exc)
 
     return st.model_dump()
 

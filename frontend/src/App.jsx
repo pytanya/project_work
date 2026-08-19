@@ -7,6 +7,7 @@ import ProgressDashboard from './components/ProgressDashboard'
 import SourceSearchPanel from './components/SourceSearchPanel'
 import FileUpload from './components/FileUpload'
 import KnowledgeGraphPanel from './components/KnowledgeGraphPanel'
+import KnowledgeWikiPanel from './components/KnowledgeWikiPanel'
 import './index.css'
 
 const STORAGE_KEY = 'edututor_settings'
@@ -28,9 +29,10 @@ export default function App() {
   const [feed, setFeed] = useState([])
   const [current, setCurrent] = useState(null)
   const [intake, setIntake] = useState({ missingFields: [], complete: false })
-  const [source, setSource] = useState({ status: null, note: null })
+  const [source, setSource] = useState({ status: null, note: null, sources: [], author: null, textbookUrl: '' })
   const [graph, setGraph] = useState({ nodes: [], edges: [], activeTopic: null })
   const [knowledge, setKnowledge] = useState({})
+  const [wikiReloadKey, setWikiReloadKey] = useState(0)
   const [score, setScore] = useState({ correct: 0, total: 0 })
   const [quizCount, setQuizCount] = useState(0)
   const [answer, setAnswer] = useState('')
@@ -135,12 +137,16 @@ export default function App() {
           push('quiz', d.question)
           break
         case 'tutor.explanation':
+          setCurrent(null)
+          // Логирование для отладки LaTeX
+          console.log('tutor.explanation message:', JSON.stringify(d.message?.substring(0, 200)))
           push('explanation', d.message, d)
           break
         case 'tutor.lesson':
           push('lesson', d.text, { topic: d.topic })
           break
         case 'tutor.summary':
+          setCurrent(null)
           setKnowledge(d.knowledge_map || {})
           setScore({ correct: d.correct || 0, total: d.total || 0 })
           setQuizCount(d.total || 0)
@@ -149,16 +155,18 @@ export default function App() {
           break
         case 'source.progress':
           setSource({ status: d.status, note: d.message })
-          // НЕ обнуляем current если уже есть активный вопрос (quiz/intake)
-          // source.progress может прийти от предыдущей операции (поиск учебника)
-          if (!current || !current.current_question && !current.agent_question) {
+          // Исправление #1: правильная проверка active question
+          // Проверяем что current имеет valid kind ('quiz' или 'intake')
+          // Вместо некорректной проверки несуществующих полей current.current_question / current.agent_question
+          if (!current || (current.kind !== 'quiz' && current.kind !== 'intake')) {
             setCurrent(null)
           }
           push('source', d.message)
           break
         case 'source.failed':
           setSource({ status: 'failed', note: d.message })
-          if (!current || !current.current_question && !current.agent_question) {
+          // Исправление #1 (duplicate): та же корректная проверка для source.failed
+          if (!current || (current.kind !== 'quiz' && current.kind !== 'intake')) {
             setCurrent(null)
           }
           push('error', d.message)
@@ -167,8 +175,17 @@ export default function App() {
           refreshGraph()
           push('system', `Построен граф знаний: ${d.nodes} тем`)
           break
+        case 'wiki.updated':
+          setWikiReloadKey((k) => k + 1)
+          break
         case 'system':
+          setCurrent(null)
           push('system', d.message)
+          break
+        case 'intake.completed':
+          // Исправление #3: обработка завершения intake процесса
+          // После сбора всей информации начинаем квиз
+          push('system', 'Информация собрана, начинаем квив...')
           break
         case 'session.error':
           push('error', d.message)
@@ -186,19 +203,49 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false
+    let reconnectAttempts = 0
+    let reconnectTimer = null
+
+    const connectWs = (sid) => {
+      const ws = new WebSocket(wsUrl(sid))
+      ws.onmessage = (e) => {
+        try {
+          handleEvent(JSON.parse(e.data))
+        } catch (_) {}
+      }
+      // auto-reconnect: бэкенд мог перезапуститься (WS закрылся) — переподключаемся
+      ws.onclose = () => {
+        if (cancelled || !sessionIdRef.current) return
+        if (reconnectAttempts < 6) {
+          reconnectAttempts += 1
+          reconnectTimer = setTimeout(() => {
+            wsRef.current = connectWs(sessionIdRef.current)
+          }, 3000 * reconnectAttempts)
+        }
+      }
+      wsRef.current = ws
+      return ws
+    }
+
     async function init() {
       try {
-        const { session_id } = await api.createSession()
-        if (cancelled) return
-        setSessionId(session_id)
-        const ws = new WebSocket(wsUrl(session_id))
-        ws.onmessage = (e) => {
+        // retry: бэкенд может быть ещё на старте (Qdrant/embedder ~15с) — переживаем
+        let sessionId = null
+        for (let attempt = 1; attempt <= 5; attempt++) {
           try {
-            handleEvent(JSON.parse(e.data))
-          } catch (_) {}
+            const r = await api.createSession()
+            sessionId = r.session_id
+            break
+          } catch (e) {
+            if (cancelled) return
+            if (attempt === 5) throw e
+            await new Promise((resolve) => setTimeout(resolve, 2000 * attempt))
+          }
         }
-        wsRef.current = ws
-        const st = await api.intakeStatus(session_id)
+        if (cancelled || !sessionId) return
+        setSessionId(sessionId)
+        connectWs(sessionId)
+        const st = await api.intakeStatus(sessionId)
         setIntake({ missingFields: st.missing_fields, complete: st.complete })
         if (!st.complete && st.next_question) {
           setCurrent({ kind: 'intake', question: st.next_question, missingFields: st.missing_fields })
@@ -206,7 +253,7 @@ export default function App() {
         }
         refreshGraph()
       } catch (e) {
-        push('error', `Не удалось создать сессию: ${e.message}`)
+        push('error', `Не удалось создать сессию: ${e.message}. Проверьте, что бэкенд запущен (uvicorn api.app:app --port 8000).`)
       }
     }
     init()
@@ -217,6 +264,7 @@ export default function App() {
     return () => {
       cancelled = true
       window.removeEventListener('beforeunload', unload)
+      if (reconnectTimer) clearTimeout(reconnectTimer)
       if (wsRef.current) wsRef.current.close()
     }
   }, [handleEvent, push])
@@ -227,11 +275,13 @@ export default function App() {
     try {
       const d = await api.getSession(sessionIdRef.current)
       
-      // НЕ обнуляем current если уже есть активный вопрос (quiz или intake)
-      // Это нужно чтобы не терять UI при резинхронизации
-      const hasActiveQuestion = d.current_question || d.agent_question
+      // Исправление #2: защита resync от перезаписи current
+      // Если фронтенд уже показывает активный вопрос (quiz/intake), не перезаписываем current
+      const hasFrontendActiveQuestion = current && (current.kind === 'quiz' || current.kind === 'intake')
       
-      if (d.current_question) {
+      // Восстанавливаем current только если бэкенд имеет неотображённый вопрос
+      // И фронтенд в данный момент ничего не показывает (чтобы не потерять UI)
+      if (d.current_question && !hasFrontendActiveQuestion) {
         const q = d.current_question
         setCurrent({
           kind: 'quiz', question: q.question, options: q.options, answerType: q.answer_type,
@@ -242,14 +292,26 @@ export default function App() {
           setQuestionNum(d.records.filter(r => r.student_answer).length)
           setQuizCount(d.num_questions || 10)
         }
-      } else if (d.agent_question) {
+      } else if (d.agent_question && !hasFrontendActiveQuestion) {
         setCurrent({ kind: 'intake', question: d.agent_question, missingFields: d.missing_fields || [] })
       }
-      // else: НЕ обнуляем current если уже есть активный вопрос
+      // else: оставляем текущий current без изменений если фронтенд уже показывает вопрос
       
       setKnowledge(d.knowledge_map || {})
       setScore({ correct: d.correct_count || 0, total: d.answered_count || 0 })
-      if (d.source_status) setSource({ status: d.source_status, note: d.source_note })
+      if (d.source_status) {
+        // Извлекаем URL из sources (sources[0].url или sources[0].path)
+        const sourceUrl = (d.sources && d.sources.length > 0)
+          ? (d.sources[0].url || d.sources[0].path)
+          : ''
+        setSource({
+          status: d.source_status,
+          note: d.source_note,
+          sources: d.sources || [],
+          author: d.textbook_author || null,
+          textbookUrl: d.textbook_url || d.textbook_file || sourceUrl,
+        })
+      }
       if (d.knowledge_graph && d.knowledge_graph.nodes) {
         setGraph({ nodes: d.knowledge_graph.nodes, edges: d.knowledge_graph.edges || [], activeTopic: d.active_topic || null })
       }
@@ -332,7 +394,8 @@ export default function App() {
     if (!sessionId) return
     setUploadBusy(true)
     try {
-      await api.findTextbook(sessionId)
+      const r = await api.findTextbook(sessionId)
+      if (r.sources) setSource((s) => ({ ...s, sources: r.sources, status: r.status, note: r.note }))
       await resync()
     } catch (e) {
       push('error', String(e.message || e))
@@ -345,7 +408,11 @@ export default function App() {
     if (!sessionId) return
     setChatBusy(true)
     // НЕ обнуляем current - показываем что готовимся по теме
-    push('system', `Готовимся по теме: ${node.title}...`)
+    // node.title может быть URL — используем readable version
+    const displayTitle = node.title && node.title.startsWith('http')
+      ? (node.title.match(/https?:\/\/[^\/\s]+/)?.[0]?.replace('https://', '').replace('http://', '') || 'Источник')
+      : (node.title || 'тема')
+    push('system', `Готовимся по теме: ${displayTitle}...`)
     try {
       const r = await api.selectTopic(sessionId, node.id)
       setGraph((g) => ({ ...g, activeTopic: r.active_topic }))
@@ -370,10 +437,22 @@ export default function App() {
 
   function handleNewSession() {
     if (sessionIdRef.current) api.deleteSession(sessionIdRef.current)
+    // Сброс всех UI-статусов и зависимых состояний перед новой сессией
     setFeed([])
-    setConfirmedOption(null)
-    setQuestionNum(0)
+    setCurrent(null)
+    setSource({ status: null, note: null, sources: [], author: null, textbookUrl: '' })
+    setGraph({ nodes: [], edges: [], activeTopic: null })
+    setKnowledge({})
+    setScore({ correct: 0, total: 0 })
     setQuizCount(0)
+    setQuestionNum(0)
+    setConfirmedOption(null)
+    setAnswer('')
+    setChatBusy(false)
+    setUploadBusy(false)
+    isWaitingForAnswer.current = false
+    pendingAnswer.current = null
+    currentKindAtSubmit.current = null
     window.location.reload()
   }
 
@@ -425,13 +504,15 @@ export default function App() {
         </div>
         {sessionId && <div className="session-id">сессия: {sessionId}</div>}
         <ProgressDashboard knowledge={knowledge} correct={score.correct} total={score.total} />
-        <SourceSearchPanel status={source.status} note={source.note} onFind={handleFind} busy={uploadBusy} />
+        <SourceSearchPanel status={source.status} note={source.note} sources={source.sources} author={source.author} onFind={handleFind} busy={uploadBusy} />
         <KnowledgeGraphPanel
           nodes={graph.nodes}
+          edges={graph.edges}
           activeTopic={graph.activeTopic}
           onSelect={handleSelectTopic}
           busy={chatBusy}
         />
+        <KnowledgeWikiPanel key={wikiReloadKey} />
         <FileUpload onUpload={handleUpload} busy={uploadBusy} />
       </aside>
       <main className="chat">

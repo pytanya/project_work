@@ -10,6 +10,7 @@ EduTutor — граф знаний учебника (подготовка по �
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import re
 from pathlib import Path
@@ -53,6 +54,9 @@ def _lesson_titles(text: str) -> Dict[str, str]:
     titles: Dict[str, str] = {}
     for num, title in _LESSON_TOC_RE.findall(region):
         title = re.split(r"\s*[.·…]{3,}", title.strip())[0].strip()
+        # Фильтрация UI-элементов
+        if _is_ui_element(title) or _is_paragraph_number(title):
+            continue
         titles[num] = title
     return titles
 
@@ -62,6 +66,147 @@ def _normalize_lesson_label(word: str) -> str:
     if w in ("óðîê", "óðîê"):
         return "урок"
     return w
+
+
+# Regex для обнаружения URL-адресов в строке (фильтрация шумовых узлов)
+_URL_PATTERN = re.compile(
+    r"https?://|"                           # http:// или https://
+    r"www\.\S+|"                            # www.domain...
+    r"\b[A-Z]{2,}\.(?:ru|com|org|net|edu|"  # домены верхнего уровня
+    r"io|gov|info|co\.ru)\b",               # распространённые домены
+    re.IGNORECASE,
+)
+
+_WEB_H1_RE = re.compile(r"^#{1,3}\s+(.+)$")
+_WEB_NUM_RE = re.compile(r"^\s*\d{1,2}[.)]\s+(.{2,90})$")
+
+
+def clean_title(text: str) -> str:
+    """Очистка заголовка узла: HTML-entities → символы, суррогаты → удалить.
+
+    Веб-страницы приходят с entity-кодами (&#8470;) и mojibake-суррогатами
+    (CP1251-шрифты без ToUnicode) — они ломают отображение и матчинг с wiki.
+    """
+    if not text:
+        return ""
+    text = html.unescape(text)
+    text = re.sub(r"[\ud800-\udfff]", "", text)
+    text = re.sub(r"[ \t\u00a0]+", " ", text).strip(" *#-–—")
+    return text
+
+# Шумовые секции веб-страниц, которые НЕ являются темами урока (навигация/служебное)
+_WEB_NOISE = {
+    "содержание", "оглавление", "примечания", "источники", "литература",
+    "см. также", "смотри также", "внешние ссылки", "ссылки", "навигация",
+    "reference", "references", "see also", "external links", "notes",
+    "navigation", "menu", "about", "о проекте", "категории", "categories",
+    "статья в википедии", "связанные статьи", "другие статьи", "читайте также",
+    # Навигация и UI элементы веб-страниц
+    "библиотека", "library", "download", "скачать", "preview",
+    "предварительный просмотр", "поделиться", "share", "печатать", "print",
+    "редактировать", "edit", "комментарии", "comments", "обсуждение",
+    "обсудить", "отзывы", "reviews", "рейтинг", "rating", "голосовать",
+    "vote", "подписаться", "subscribe", "рассылка", "newsletter",
+    "реклама", "ads", "рекламный блок", "advert", "баннер", "banner",
+}
+
+
+def _is_url_like(title: str) -> bool:
+    """Проверяет, выглядит ли строка как URL-адрес или доменное имя."""
+    if not title:
+        return False
+    # Если вся строка или основная часть — URL
+    if _URL_PATTERN.search(title):
+        return True
+    # Отсекаем строки, которые полностью совпадают с доменом
+    stripped = re.sub(r'^https?://', '', title).strip()
+    if re.match(r'^[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?(?:\.[a-z]{2,})+(?:/[^\s]*)?$', stripped, re.IGNORECASE):
+        return True
+    return False
+
+
+
+
+def _is_ui_element(title: str) -> bool:
+    """Проверяет, является ли строка UI-элементом (кнопка, ссылка действия)."""
+    if not title:
+        return False
+    # Строки, заканчивающиеся на : (кнопки действий)
+    if title.endswith(":") or title.endswith(": "):
+        return True
+    # Короткие строки (1-2 слова) которые часто являются UI-элементами
+    words = title.split()
+    if len(words) <= 2 and len(title) < 25:
+        # Проверяем что это не содержательная тема
+        short_ui_keywords = {
+            "скачать", "download", "поделиться", "share", "печатать", "print",
+            "редактировать", "edit", "комментарии", "comments", "обсудить",
+            "отзывы", "reviews", "рейтинг", "rating", "голосовать", "vote",
+            "подписаться", "subscribe", "рассылка", "newsletter", "реклама",
+            "ads", "баннер", "banner", "библиотека", "library", "предпросмотр",
+            "preview", "поиск", "search", "фильтр", "filter", "сортировка",
+            "sort", "параметры", "settings", "настройки", "контакты", "contacts",
+        }
+        if any(w.lower() in short_ui_keywords for w in words):
+            return True
+    return False
+
+
+def _is_paragraph_number(title: str) -> bool:
+    """Проверяет, является ли строка номером параграфа/раздела (§ N)."""
+    # Паттерны: § 58, §58, 58., 58)
+    if re.match(r"^§\s*\d+$", title.strip()):
+        return True
+    if re.match(r"^\d+[.)]\s*$", title.strip()):
+        return True
+    return False
+
+def _web_headings(kg: "KnowledgeGraph", root_id: str, text: str, source: str) -> List[str]:
+    """Извлечение подтем из веб-конспекта: markdown-заголовки и нумерованные темы.
+
+    Для страниц-конспектов без «Урока N» (wiki-статьи, лекции) — создаём узлы по
+    заголовкам (## Тема), чтобы панель «Темы учебника» не показывала один generic-узел.
+    Отсекаем шум (навигация/служебные секции), URL-адреса и лимитируем число узлов (≤30).
+    """
+    ids: List[str] = []
+    seen: set = set()
+    for line in text.splitlines():
+        line = line.strip()
+        m = _WEB_H1_RE.match(line)
+        title = None
+        if m:
+            title = m.group(1).strip()
+        else:
+            mn = _WEB_NUM_RE.match(line)
+            if mn:
+                title = mn.group(1).strip()
+        if not title or len(title) < 3:
+            continue
+        # Фильтрация URL-адресов и доменных имён
+        if _is_url_like(title):
+            continue
+        # убираем маркдаун-акценты, HTML-entities, суррогаты и цифровые префиксы
+        title_clean = clean_title(re.sub(r"^[\d.]+\s*", "", title))
+        if not title_clean or title_clean.lower() in _WEB_NOISE:
+            continue
+        if _is_url_like(title_clean):
+            continue
+        # Фильтрация UI-элементов и номеров параграфов
+        if _is_ui_element(title_clean):
+            continue
+        if _is_paragraph_number(title_clean):
+            continue
+        key = title_clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        nid = f"sec:{source}:web:{len(ids)}"
+        kg.add_topic(nid, title_clean, node_type="topic")
+        kg.add_edge(root_id, nid, PART_OF)
+        ids.append(nid)
+        if len(ids) >= 30:  # лимит узлов — не даём «лепнине» завалить граф
+            break
+    return ids
 
 
 class KnowledgeGraph:
@@ -77,12 +222,19 @@ class KnowledgeGraph:
         title: str,
         node_type: str = "topic",
         section_number: Optional[str] = None,
+        parent_id: Optional[str] = None,
         **attrs: Any,
     ) -> None:
+        """Add topic with hierarchy support (parent_id) and URL filtering."""
+        # Validation: topic must not be a URL
+        if _is_url_like(title):
+            return
         data = dict(attrs)
         data.update(
             {"id": node_id, "title": title, "type": node_type, "color": NODE_COLORS.get(node_type, NODE_COLORS["default"])}
         )
+        if parent_id:
+            data["parent_id"] = parent_id
         if section_number:
             data["section_number"] = section_number
         self.graph.add_node(node_id, **data)
@@ -152,7 +304,7 @@ class KnowledgeGraph:
     # --- сериализация ---
     def to_dict(self) -> Dict[str, Any]:
         nodes = [
-            {k: v for k, v in dict(d).items() if k in ("id", "title", "type", "color", "section_number")}
+            {k: v for k, v in dict(d).items() if k in ("id", "title", "type", "color", "section_number", "parent_id")}
             for n, d in self.graph.nodes(data=True)
         ]
         edges = [
@@ -168,6 +320,7 @@ class KnowledgeGraph:
             kg.add_topic(
                 n.get("id", ""), n.get("title", ""), n.get("type", "topic"),
                 section_number=n.get("section_number"),
+                parent_id=n.get("parent_id"),
             )
         for e in (data or {}).get("edges", []):
             kg.add_edge(e.get("source", ""), e.get("target", ""), e.get("relation", RELATED))
@@ -180,7 +333,8 @@ class KnowledgeGraph:
 # ----------------------------------------------------------------------
 # Персистентный кэш графа (per-textbook, переживает сессии)
 # ----------------------------------------------------------------------
-GRAPH_SCHEMA_VERSION = 2  # bump при изменении структуры графа → пересборка кэша
+GRAPH_SCHEMA_VERSION = 4  # bump при изменении структуры графа → пересборка кэша
+# v4: parent_id field for hierarchy support
 
 
 def graph_cache_key(source_name: str, path: Optional[Any] = None) -> str:
@@ -266,7 +420,7 @@ def build_textbook_graph(
     section_ids: List[str] = []
     for label, num, title, _content in sections:
         nid = f"sec:{source}:{num}"
-        kg.add_topic(nid, f"{label.capitalize()} {num}" + (f": {title}" if title else ""),
+        kg.add_topic(nid, f"{label.capitalize()} {num}" + (f": {clean_title(title)}" if title else ""),
                      node_type="section", section_number=num)
         kg.add_edge(root_id, nid, PART_OF)
         section_ids.append(nid)
@@ -283,13 +437,19 @@ def build_textbook_graph(
             if key not in found:
                 found.append(key)
                 nid = f"sec:{source}:{num}"
-                lesson_title = titles.get(num)
+                lesson_title = clean_title(titles.get(num, ""))
                 node_title = f"{label.capitalize()} {num}"
                 if lesson_title:
                     node_title += f": {lesson_title}"
-                kg.add_topic(nid, node_title, node_type="topic")
+                # Уроки и параграфы — тип "lesson", а не "topic" (для корректной типизации в UI)
+                lesson_type = "lesson" if label.lower() in ("урок", "урок.", "урок:", "lesson", "module", "unit") else "topic"
+                kg.add_topic(nid, node_title, node_type=lesson_type)
                 kg.add_edge(root_id, nid, PART_OF)
                 section_ids.append(nid)
+
+    if not section_ids:
+        # Веб-конспекты: markdown-заголовки (#, ##, ###) и нумерованные темы («1. Название»)
+        section_ids.extend(_web_headings(kg, root_id, text, source))
 
     if not section_ids:
         # нет структуры — один узел-«тема» от источника
