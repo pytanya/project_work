@@ -26,7 +26,7 @@ from .config import settings as default_settings
 from .export import write_session_exports
 from .okf import emit_okf_bundle
 from .curriculum import grade_curriculum
-from .intake import INTAKE_QUESTIONS, CHECKLIST_ORDER, apply_answer, compute_missing, validate_intake
+from .intake import INTAKE_QUESTIONS, CHECKLIST_ORDER, apply_answer, compute_missing, extract_intake_fields, validate_intake
 from .judge import judge_evaluation
 from .knowledge import (
     Embedder,
@@ -50,10 +50,11 @@ NODE_FIND_TEXTBOOK = "find_textbook"
 NODE_SOURCE_FAILED = "source_failed"
 NODE_WAIT_FOR_UPLOAD = "wait_for_upload"
 NODE_TOPIC_GATE = "topic_gate"
-NODE_LESSON = "lesson_node"
+NODE_CONTENT = "content_node"
 NODE_ASK_PAGE_RANGE = "ask_page_range"
 NODE_HANDLE_DOC_PAGES = "handle_doc_pages"
 NODE_TUTOR_NEXT = "tutor_next"
+NODE_AGENT_TUTOR = "agent_tutor_node"
 NODE_GENERATE_QUESTION = "generate_question"
 NODE_EVALUATE_ANSWER = "evaluate_answer"
 NODE_SUMMARY = "summary"
@@ -64,6 +65,50 @@ NODE_ASK_PAGE_RANGE = "ask_page_range"
 def _topic_count(nodes):
     """Count only non-book topics (matches frontend KnowledgeGraphPanel filtering)."""
     return sum(1 for n in (nodes or []) if n.get("type") != "book")
+
+# Тема «весь учебник»/не задана → нужен выбор темы из графа (topic gate).
+# Конкретная тема (напр. «Атмосфера») → гейт пропускается (Уровень 1).
+_ALL_TOPIC_MARKERS = {"all", "все", "всё", "вся", "весь", "весь учебник", "все темы"}
+
+
+def _needs_topic_gate(st: TutorState) -> bool:
+    topic = (st.topic or "").strip().lower()
+    return (not topic) or topic in _ALL_TOPIC_MARKERS
+
+
+def _auto_select_topic(st: TutorState) -> None:
+    """Сопоставляет конкретную тему с узлом графа знаний; при совпадении — active_topic.
+
+    Позволяет сразу готовить материал/квиз по теме, которую пользователь назвал
+    при знакомстве, не переспрашивая «какую тему изучаем».
+    """
+    if not st.topic or not st.knowledge_graph:
+        return
+    from .knowledge_graph import KnowledgeGraph
+
+    kg = KnowledgeGraph.from_dict(st.knowledge_graph or {})
+    node_id = _match_topic(kg, st.topic)
+    if node_id:
+        st.active_topic = node_id
+
+
+def _finalize_source(st: TutorState, *, web_sources: bool) -> None:
+    """Уровень 1: после индексации решает, нужен ли выбор темы из графа.
+
+    - Конкретная тема + веб-материалы (собраны по теме) → гейт не нужен, идём сразу.
+    - Конкретная тема + загруженный учебник: если тема нашлась среди уроков графа →
+      активная тема выбрана автоматически, гейт не нужен; если не нашлась → предлагаем
+      выбрать урок из учебника (иначе RAG не найдёт релевантных фрагментов).
+    - Тема «все»/не задана → гейт выбора темы.
+    """
+    if not _needs_topic_gate(st):
+        if web_sources:
+            st.awaiting_topic = False
+            return
+        _auto_select_topic(st)
+        st.awaiting_topic = st.active_topic is None
+    else:
+        st.awaiting_topic = True
 
 def _readable_title(url: str) -> str:
     """Извлекает читаемое название из URL или возвращает домен.
@@ -98,6 +143,8 @@ class GraphDeps:
     eval_llm: Optional[Callable[[List[Dict[str, str]]], str]] = None
     expert_llm: Optional[Callable[[List[Dict[str, str]]], str]] = None
     judge_llm: Optional[Callable[[List[Dict[str, str]]], str]] = None
+    agent_llm: Optional[Callable[[List[Dict[str, str]], Optional[List[Dict[str, Any]]]], Any]] = None  # agent_loop (function calling)
+    on_token: Optional[Callable[[str], None]] = None  # реальный стриминг токенов в браузер
     http: Optional[httpx.Client] = None
     settings: Any = None
     collection_name: str = "edututor"
@@ -158,6 +205,19 @@ def _emit(deps: GraphDeps, event: str, **data: Any) -> None:
             logger.warning("on_event(%s) упал", event)
 
 
+_MODE_LABELS = {"lesson": "урок", "quiz": "квиз", "explain": "объяснение", "deep_dive": "глубокий разбор"}
+
+
+def _intent_message(st: TutorState) -> str:
+    """Уровень 3: короткое подтверждение намерения перед долгой операцией (поиск/индексация).
+
+    Пользователь сразу видит, что его поняли, и может остановить, если тема неверна.
+    """
+    mode = _MODE_LABELS.get(st.mode or "", "занятие")
+    topic = st.topic if st.topic and st.topic != "all" else (st.subject or "тему")
+    return f"Готовлю {mode} по теме «{topic}»…"
+
+
 # ----------------------------------------------------------------------
 # Узлы
 # ----------------------------------------------------------------------
@@ -169,18 +229,34 @@ def intake_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         st.bandit = adaptive.make_bandit()
 
     # Применяем ответ на текущий вопрос чек-листа.
-    # Если поле не задано, но intake ещё не завершён — сам определяем первое
-    # недостающее поле (удобно для API: первый ответ без привязки к полю).
-    if st.pending_answer is not None:
-        if st.intake_field is None and compute_missing(st):
-            for field_name in CHECKLIST_ORDER:
-                if field_name in compute_missing(st):
-                    st.intake_field = field_name
-                    break
-        if st.intake_field:
-            st = apply_answer(st, st.intake_field, st.pending_answer)
-            st.intake_field = None
-            st.pending_answer = None
+    # Уровень 2 (5.4): свободный ответ может заполнить СРАЗУ несколько полей
+    # («я в 7 классе, география, атмосфера, учебника нет, хочу квиз» →
+    # extract_intake_fields → learner_type+grade+subject+topic+has_textbook+mode).
+    # ВАЖНО: если intake уже завершён (missing пусто) — ответ НЕ трогаем: он
+    # принадлежит нижестоящему узлу (подтверждение урока, ответ на вопрос квиза и т.п.).
+    if st.pending_answer is not None and (st.intake_field is not None or compute_missing(st)):
+        answer_text = st.pending_answer
+        extracted = extract_intake_fields(answer_text)
+        applied_any = False
+        for field_name, value in extracted.items():
+            if value is not None and field_name in compute_missing(st):
+                st = apply_answer(st, field_name, value)
+                # applied_any — только если поле реально закрылось (значение принято)
+                if field_name not in compute_missing(st):
+                    applied_any = True
+        if not applied_any and compute_missing(st):
+            if st.intake_field is None:
+                for field_name in CHECKLIST_ORDER:
+                    if field_name in compute_missing(st):
+                        st.intake_field = field_name
+                        break
+            if st.intake_field:
+                st = apply_answer(st, st.intake_field, answer_text)
+                st.intake_field = None
+        st.pending_answer = None
+        # Ответ обработан: поле сбрасываем, иначе after_intake примет его за незавершённый
+        # intake и остановит граф на чек-листе (validate_intake переустановит поле при «ask»)
+        st.intake_field = None
 
     decision = validate_intake(st, max_iterations=deps.settings.MAX_INTAKE_ITERATIONS)
     if decision.decision == "ask":
@@ -209,6 +285,100 @@ def intake_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
                 st.agent_message = cur.warning
 
     return st.model_dump()
+
+
+def agent_intake_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
+    """Уровень 4 (спека 2.3, 5.4): intake ведёт агент через function calling.
+
+    Модель сама выбирает действие (инструменты интервью), получает результат и решает,
+    продолжать интервью или завершить. При недоступности агентной LLM (например, в тестах
+    задан только Callable tutor_llm) — детерминированный intake_node (фолбэк).
+    """
+    from .agent_loop import agent_available, run_intake_agent
+
+    if not agent_available(deps):
+        return intake_node(state, deps)
+
+    st = state.model_copy(deep=True)
+    st_new, proceed = run_intake_agent(st, deps)
+    if proceed:
+        # grade_curriculum: сверка темы с ФГОС (В-8) — как в детерминированном intake_node
+        if st_new.subject and st_new.topic and not st_new.curriculum:
+            cur = grade_curriculum(st_new.subject, st_new.grade, st_new.topic,
+                                   ref_dir=deps.settings.FGOS_REFERENCE_DIR)
+            if cur.fgos_code:
+                st_new.curriculum = cur.fgos_code
+            else:
+                st_new.curriculum = "unverified"
+                if not st_new.agent_message:
+                    st_new.agent_message = cur.warning
+        return st_new.model_dump()
+    # Агент задал вопрос — публикуем как в детерминированном intake_node
+    _emit(deps, "intake.question", question=st_new.agent_question,
+          missing_fields=st_new.missing_fields or compute_missing(st_new))
+    return st_new.model_dump()
+
+
+def route_after_agent_intake(state: TutorState) -> str:
+    """После агентного intake: задан вопрос → ждём ответ; иначе — на источник."""
+    if compute_missing(state) and not getattr(state, "session_status", None) == "failed":
+        return END
+    return NODE_SOURCE_ENTRY
+
+
+def deterministic_tutor_step(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
+    """Детерминированный цикл квиза (фолбэк agent_tutor_node при недоступности агента).
+
+    Воспроизводит поведение route_tutor: первый вопрос / оценка+следующий. Сводка —
+    отдельным узлом NODE_SUMMARY через route_after_agent_tutor.
+    """
+    st = state.model_copy(deep=True)
+    if st.quiz_complete or st.session_status in ("completed", "failed"):
+        return st.model_dump()
+    if st.current_question is None:
+        return generate_question_node(st, deps)
+    if st.pending_answer is not None:
+        st = TutorState.model_validate(evaluate_answer_node(st, deps))
+        if st.quiz_complete or st.session_status == "completed":
+            return st.model_dump()
+        return generate_question_node(st, deps)
+    return generate_question_node(st, deps)
+
+
+def agent_tutor_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
+    """Уровень 5 (спека 7.3.1): квиз ведёт агент — модель сама выбирает следующее действие
+    через function calling (evaluate_answer / generate_quiz / explain_error / deep_dive /
+    finish_session). При недоступности агентной LLM — детерминированный цикл квиза.
+    """
+    from .agent_loop import agent_available, run_tutor_agent
+
+    if not agent_available(deps):
+        return deterministic_tutor_step(state, deps)
+
+    st = state.model_copy(deep=True)
+    prev_qid = st.current_question.question_id if st.current_question else None
+    prev_lesson = st.lesson_text
+    st, final_text = run_tutor_agent(st, deps)
+
+    # Публикуем события для фронтенда по изменениям состояния
+    if st.current_question and st.current_question.question_id != prev_qid:
+        card = st.current_question
+        _emit(deps, "quiz.card", question_id=card.question_id, question=card.question,
+              options=card.options, answer_type=card.answer_type, difficulty=card.difficulty,
+              topic=card.topic)
+    if st.lesson_text and st.lesson_text != prev_lesson:
+        _emit(deps, "tutor.lesson", text=st.lesson_text,
+              topic=st.active_topic or st.topic or "тема")
+    if final_text and not st.current_question and not st.quiz_complete:
+        _emit(deps, "system", message=final_text, kind="agent.message")
+    return st.model_dump()
+
+
+def route_after_agent_tutor(state: TutorState) -> str:
+    """После агентного хода квиза: завершён → сводка; иначе ждём ответ (END)."""
+    if state.quiz_complete or state.session_status == "completed":
+        return NODE_SUMMARY
+    return END
 
 
 def after_intake(state: TutorState) -> str:
@@ -320,43 +490,48 @@ def topic_gate_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
 
 
 def route_after_topic_gate(state: TutorState) -> str:
-    """После гейта: выбрана тема → урок (если режим lesson) или квиз; иначе ждём (END)."""
+    """После гейта: выбрана тема → контент по режиму (урок/объяснение/разбор) или квиз; иначе ждём (END)."""
     if state.awaiting_topic:
         return END
-    if state.mode == "lesson" and not state.lesson_confirmed:
-        return NODE_LESSON
+    if state.mode in ("lesson", "explain", "deep_dive") and not state.lesson_confirmed:
+        return NODE_CONTENT
     return NODE_TUTOR_NEXT
 
 
-def lesson_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
-    """Режим «урок»: объясняем тему по RAG-контексту, затем спрашиваем «готов к квизу?»."""
+def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
+    """Режимы «урок» / «объяснение» / «глубокий разбор» (7.3.4).
+
+    Один узел: генерирует контент по режиму (lesson/explain/deep_dive), показывает его
+    (tutor.lesson), затем спрашивает «готов(а) перейти к квизу?».
+    """
     st = state.model_copy(deep=True)
+    mode = st.mode or "lesson"
     if st.lesson_confirmed:
         return st.model_dump()
 
     if st.pending_answer is not None:
         low = (st.pending_answer or "").strip().lower()
         st.pending_answer = None
-        if low in ("да", "yes", "у", "готов", "конечно", "начинаем", "квиз", "поехали", "всё"):
+        if low in ("да", "yes", "у", "готов", "конечно", "начинаем", "квиз", "поехали", "всё", "понятно"):
             st.lesson_confirmed = True
             st.lesson_done = True
             st.agent_question = None
             _emit(deps, "system", message="Отлично! Начинаем квиз.", kind="lesson.done")
             return st.model_dump()
-        # «нет»/повтор → сбрасываем и перегенерируем урок ниже
+        # «нет»/повтор → сбрасываем и перегенерируем материал ниже
         st.lesson_done = False
         st.lesson_text = None
         st.agent_question = None
-        _emit(deps, "system", message="Повторяем урок по теме.", kind="lesson.repeat")
+        _emit(deps, "system", message="Повторяем материал по теме.", kind="lesson.repeat")
 
     if st.lesson_text:
-        # урок уже показан — ждём подтверждения
+        # материал уже показан — ждём подтверждения
         st.lesson_done = True
         st.agent_question = "Готов(а) перейти к квизу? (да / нет)"
         _emit(deps, "intake.question", question=st.agent_question, missing_fields=["lesson_confirm"])
         return st.model_dump()
 
-    # Генерируем урок по активной теме
+    # Генерируем материал по активной теме и режиму
     topic = st.topic or st.subject or "общая тема"
     if st.active_topic:
         from .knowledge_graph import KnowledgeGraph, _node_title as _kg_node_title
@@ -364,19 +539,31 @@ def lesson_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         title = _kg_node_title(kg, st.active_topic)
         if title:
             topic = title
-    chunks = _rag_chunks(deps.store, topic, st, k=5)
+    # deep_dive берёт больше контекста (несколько разделов, 7.3.4); lesson/explain — k=5
+    k = 8 if mode == "deep_dive" else 5
+    chunks = _rag_chunks(deps.store, topic, st, k=k)
     context = [c.chunk.text for c in chunks] or ["Нет контекста по теме."]
-    st.lesson_text = tutor_mod.generate_lesson(topic, context, st, llm_call=deps.tutor_llm)
+    on_token = deps.on_token  # реальный стриминг токенов в браузер (stream=True)
+    if mode == "deep_dive":
+        st.lesson_text = tutor_mod.generate_deep_dive(topic, context, st, llm_call=deps.expert_llm, on_token=on_token)
+        st.agent_message = "Глубокий разбор по теме готов. Можно задать вопрос или перейти к квизу."
+    elif mode == "explain":
+        st.lesson_text = tutor_mod.generate_explanation(topic, context, st, llm_call=deps.tutor_llm, on_token=on_token)
+        st.agent_message = "Объяснение по теме готово. Можно задать вопрос или перейти к квизу."
+    else:
+        st.lesson_text = tutor_mod.generate_lesson(topic, context, st, llm_call=deps.tutor_llm, on_token=on_token)
+        st.agent_message = "Урок по теме готов. Можно задать вопрос или перейти к квизу."
     st.lesson_done = True
     _emit(deps, "tutor.lesson", text=st.lesson_text, topic=topic)
-    # agent_message устанавливаем один раз, _emit тоже один раз — без дублирования
-    st.agent_message = "Урок по теме готов. Можно задать вопрос или перейти к квизу."
     _emit(deps, "system", message=st.agent_message, kind="lesson.ready")
+    # 7.3.3: в том же шаге задаём подтверждение перехода к квизу — без «зависшего» хода
+    st.agent_question = "Готов(а) перейти к квизу? (да / нет)"
+    _emit(deps, "intake.question", question=st.agent_question, missing_fields=["lesson_confirm"])
     return st.model_dump()
 
 
-def route_after_lesson(state: TutorState) -> str:
-    """После урока: подтверждён переход к квизу → квиз; иначе ждём (END)."""
+def route_after_content(state: TutorState) -> str:
+    """После материала (урок/объяснение/разбор): подтверждён переход к квизу → квиз; иначе END."""
     if state.lesson_confirmed:
         return NODE_TUTOR_NEXT
     return END
@@ -416,6 +603,8 @@ def process_document_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         return {"source_status": "failed", "source_note": "no file"}
     path = Path(st.textbook_file)
     source_name = st.textbook_name or path.name
+    # Уровень 3: подтверждение намерения перед разбором/индексацией
+    _emit(deps, "system", message=_intent_message(st), kind="intent")
     _emit(deps, "source.progress", stage="index", url="", status="indexing",
           message=f"Разбор документа {source_name}…")
     try:
@@ -446,7 +635,8 @@ def process_document_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         ).to_dict()
     except Exception as e:
         return _index_failure(st, deps, e).model_dump()
-    st.awaiting_topic = True
+    # Уровень 1: конкретная тема → гейт пропускается, сразу к уроку/квизу по ней
+    _finalize_source(st, web_sources=False)
     _emit(deps, "source.progress", stage="index", url="", status="done",
           message=st.source_note)
     _emit(deps, "graph.ready", nodes=_topic_count(st.knowledge_graph.get("nodes", [])),
@@ -555,7 +745,8 @@ def handle_doc_pages_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         ).to_dict()
     except Exception as e:
         return _index_failure(st, deps, e).model_dump()
-    st.awaiting_topic = True
+    # Уровень 1: конкретная тема → гейт пропускается
+    _finalize_source(st, web_sources=False)
     st.textbook_pages = answer
     st.textbook_topic = req.topic
     st.agent_message = None
@@ -576,6 +767,8 @@ def find_textbook_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     if st.sources:
         return st.model_dump()
 
+    # Уровень 3: подтверждение намерения перед поиском материалов
+    _emit(deps, "system", message=_intent_message(st), kind="intent")
     _emit(deps, "source.progress", stage="catalog", url="", status="searching",
           message=f"Поиск материалов по теме «{st.topic or st.subject or ''}»…")
     # topic="all" («весь учебник») не передаём в поиск — ищем по предмету
@@ -628,7 +821,8 @@ def find_textbook_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
                 if not (t and t.strip()):
                     continue
                 sub = build_textbook_graph(t, source=f"{root_source}:{i}")
-                # узел-источник (страница): читаемое название из title или домен URL
+                # узел-источник (страница): читаемое название из title или домен URL.
+                # allow_url=True — намеренный узел, а не мусорный заголовок из контента.
                 page_id = f"page:{root_source}:{i}"
                 page_title = _readable_title(s.get("url", "")) if s.get("url") else f"Источник {i + 1}"
                 # подтемы страницы (реальные заголовки, без generic «Тема «source»»)
@@ -638,7 +832,7 @@ def find_textbook_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
                     and not d.get("title", "").startswith(f"Тема «{root_source}:{i}")
                 ]
                 if sub_topics:
-                    kg.add_topic(page_id, page_title, node_type="topic")
+                    kg.add_topic(page_id, page_title, node_type="topic", allow_url=True)
                     kg.add_edge(root_id, page_id, PART_OF)
                     for n, d in sub_topics:
                         kg.add_topic(n, d.get("title", n), node_type="topic",
@@ -646,14 +840,15 @@ def find_textbook_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
                         kg.add_edge(page_id, n, PART_OF)
                 else:
                     # страница без структуры — сама становится темой
-                    kg.add_topic(page_id, page_title, node_type="topic")
+                    kg.add_topic(page_id, page_title, node_type="topic", allow_url=True)
                     kg.add_edge(root_id, page_id, PART_OF)
             if kg.graph.number_of_nodes() <= 1:
                 # пусто — хотя бы один узел, чтобы панель тем не была пустой
                 kg.add_topic(f"topic:{root_source}", f"Тема «{root_source}»", node_type="topic")
                 kg.add_edge(root_id, f"topic:{root_source}", PART_OF)
             st.knowledge_graph = kg.to_dict()
-            st.awaiting_topic = True
+            # Уровень 1: материалы собраны по теме → гейт пропускается, сразу к уроку/квизу
+            _finalize_source(st, web_sources=True)
             _emit(deps, "graph.ready",
                   nodes=_topic_count(st.knowledge_graph.get("nodes", [])),
                   edges=len(st.knowledge_graph.get("edges", [])))
@@ -674,8 +869,9 @@ def route_textbook_result(state: TutorState) -> str:
         return NODE_SOURCE_FAILED
     if state.textbook_file:
         return NODE_PROCESS_DOCUMENT
-    # Если построен граф знаний — направляем на выбор темы
-    if state.awaiting_topic:
+    # Граф построен → через гейт темы. При конкретной теме гейт пропускается,
+    # а route_after_topic_gate отправляет в урок/объяснение/квиз по ней (Уровень 1).
+    if state.knowledge_graph or state.awaiting_topic:
         return NODE_TOPIC_GATE
     return NODE_TUTOR_NEXT
 
@@ -697,6 +893,13 @@ def route_tutor(state: TutorState) -> str:
     return NODE_GENERATE_QUESTION
 
 
+def route_tutor_agent(state: TutorState) -> str:
+    """Роутер агентного квиза (7.3.1): все ходы идут через agent_tutor_node."""
+    if state.quiz_complete or state.session_status in ("completed", "failed"):
+        return NODE_SUMMARY
+    return NODE_AGENT_TUTOR
+
+
 def generate_question_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     st = state.model_copy(deep=True)
     topic = st.topic or st.subject or "общая тема"
@@ -704,9 +907,21 @@ def generate_question_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]
     context = [c.chunk.text for c in chunks]
     if not context:
         context = ["Нет контекста по теме."]
-    card = tutor_mod.generate_question(
-        topic, context, st.difficulty, st, llm_call=deps.tutor_llm
-    )
+    # Антидубликат (7.3.2): тексты уже заданных вопросов → в промпт; при семантическом
+    # совпадении с заданным регенерируем (≤ QUESTION_DEDUPE_RETRIES раз), затем принимаем.
+    prev_asked = list(st.asked_questions)
+    retries = getattr(deps.settings, "QUESTION_DEDUPE_RETRIES", 2)
+    threshold = getattr(deps.settings, "QUESTION_DEDUPE_THRESHOLD", 0.85)
+    card = None
+    for attempt in range(retries + 1):
+        card = tutor_mod.generate_question(
+            topic, context, st.difficulty, st, llm_call=deps.tutor_llm
+        )
+        if not prev_asked or not tutor_mod.is_duplicate_question(
+            deps.embedder, card.question, prev_asked, threshold
+        ):
+            break
+        st.asked_questions.pop()  # откатываем дубль перед регенерацией
     st.current_question = card
     st.current_section = chunks[0].chunk.section_number if chunks else None
     st.agent_question = card.question
@@ -735,98 +950,14 @@ def generate_question_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]
 
 
 def evaluate_answer_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
+    from .evaluation import evaluate_and_record
+
     st = state.model_copy(deep=True)
     card = st.current_question
     answer = st.pending_answer or ""
-    context = _rag_context(deps.store, card.topic if card else "", st, k=3)
-    if not context:
-        context = ["Нет контекста по теме."]
-
-    graded = tutor_mod.evaluate_answer(
-        card.question, answer, context, st, llm_call=deps.eval_llm
+    st, message, _judge, _expl = evaluate_and_record(
+        st, deps, card, answer, emit=lambda ev, **kw: _emit(deps, ev, **kw)
     )
-    tutor_mod.update_knowledge_map(st, card.topic, graded.score)
-    if st.bandit is not None:
-        # LinUCB: обновляем сыгранную руку и выбираем следующую сложность по контексту
-        features = adaptive.bandit_features(st)
-        adaptive.update_counters(st, graded.correct)
-        played = adaptive.difficulty_arm(card.difficulty)
-        st.bandit = adaptive.bandit_update(st.bandit, features, played, graded.score)
-        st.difficulty = adaptive.arm_difficulty(
-            adaptive.bandit_select(st.bandit, features, current_idx=played)
-        )
-    else:
-        tutor_mod.adjust_difficulty(st, graded.correct)
-
-    # Судья: контракт «оценка ответа ученика» (К-4). Для детерминированной
-    # сверки с эталоном (закрытый вопрос, model_used="reference") судить нечего —
-    # пропускаем LLM, ответ проверяется мгновенно.
-    deterministic = graded.model_used == "reference"
-    if not deterministic:
-        judge_result = judge_evaluation(
-            card.question,
-            answer,
-            {"score": graded.score, "correct": graded.correct, "feedback": graded.feedback},
-            judge_call=deps.judge_llm,
-        )
-        st.last_judge_score = judge_result.avg_score
-    else:
-        judge_result = None
-
-    message = f"{'Верно' if graded.correct else 'Ошибка'} (оценка {round(graded.score * 10, 1)}/10)."
-    if graded.feedback:
-        message += f" {graded.feedback}"
-    # Объяснение через эксперт-LLM — только для открытых ответов (свободный текст):
-    # у закрытых правильный вариант уже показан в feedback, эксперта не зовём.
-    if not graded.correct and not deterministic:
-        explanation = tutor_mod.explain_error(
-            card.question, answer, context, st, llm_call=deps.expert_llm
-        )
-        message += f"\nОбъяснение: {explanation['text']}"
-        if explanation["citation"]["paragraph"]:
-            message += f"\nЦитата: {explanation['citation']['paragraph']}"
-    else:
-        explanation = None
-    st.agent_message = message
-    st.current_question = None
-    st.pending_answer = None
-
-    # Экспорт учителю: заполняем запись вопроса оценкой/судьёй
-    if st.records and st.records[-1].get("question_id") == card.question_id:
-        st.records[-1].update({
-            "student_answer": answer,
-            "score01": round(graded.score, 4),
-            "correct": graded.correct,
-            "feedback": graded.feedback,
-            "model_used": graded.model_used,
-            "judge_score": judge_result.avg_score if judge_result else None,
-        })
-
-    _emit(deps, "tutor.explanation" if not graded.correct else "system",
-          message=message,
-          citation=(explanation.get("citation") if explanation else None) if not graded.correct else None)
-
-    # Knowledge Wiki (roadmap #2): применяем результат текущего ответа к статье темы.
-    # Идемпотентно: только этот ответ (attempts+=1), НЕ пересчёт всех records.
-    try:
-        from .wiki import KnowledgeWiki
-
-        wiki = KnowledgeWiki(deps.settings.KNOWLEDGE_WIKI_DIR)
-        if st.records and st.records[-1].get("question_id") == card.question_id:
-            wiki.apply_record(st, st.records[-1])
-            # Wiki-LLM: обогащаем статью фактами из RAG-контекста (только пока тело пустое —
-            # не тратим LLM-вызов на каждый ответ)
-            if card and card.topic:
-                art = wiki.get(getattr(st, "subject", None) or "общая тема", card.topic)
-                if art is None or not (art.body or "").strip():
-                    wiki.enrich_body(st, card.topic, context, llm_call=deps.tutor_llm)
-    except Exception as exc:
-        logger.warning("Knowledge Wiki per-answer update failed: %s", exc)
-
-    if st.answered_count >= st.num_questions:
-        st.quiz_complete = True
-        st.session_status = "completed"
-
     return st.model_dump()
 
 
@@ -893,22 +1024,33 @@ def build_graph(deps: Optional[GraphDeps] = None, checkpointer: Any = None) -> A
     g = StateGraph(TutorState)
 
     g.add_node("intake_node", lambda s: intake_node(s, deps))
+    g.add_node("agent_intake_node", lambda s: agent_intake_node(s, deps))
     g.add_node(NODE_SOURCE_ENTRY, lambda s: source_entry(s, deps))
     g.add_node(NODE_PROCESS_DOCUMENT, lambda s: process_document_node(s, deps))
     g.add_node(NODE_FIND_TEXTBOOK, lambda s: find_textbook_node(s, deps))
     g.add_node(NODE_SOURCE_FAILED, lambda s: source_failed_node(s, deps))
     g.add_node(NODE_WAIT_FOR_UPLOAD, lambda s: wait_for_upload_node(s, deps))
     g.add_node(NODE_TOPIC_GATE, lambda s: topic_gate_node(s, deps))
-    g.add_node(NODE_LESSON, lambda s: lesson_node(s, deps))
+    g.add_node(NODE_CONTENT, lambda s: content_node(s, deps))
     g.add_node(NODE_ASK_PAGE_RANGE, lambda s: ask_page_range_node(s, deps))
     g.add_node(NODE_HANDLE_DOC_PAGES, lambda s: handle_doc_pages_node(s, deps))
     g.add_node(NODE_TUTOR_NEXT, lambda s: {})
+    g.add_node(NODE_AGENT_TUTOR, lambda s: agent_tutor_node(s, deps))
     g.add_node(NODE_GENERATE_QUESTION, lambda s: generate_question_node(s, deps))
     g.add_node(NODE_EVALUATE_ANSWER, lambda s: evaluate_answer_node(s, deps))
     g.add_node(NODE_SUMMARY, lambda s: summary_node(s, deps))
 
-    g.add_edge(START, "intake_node")
-    g.add_conditional_edges("intake_node", after_intake, {END: END, NODE_SOURCE_ENTRY: NODE_SOURCE_ENTRY})
+    use_agent_intake = getattr(deps.settings, "USE_AGENT_INTAKE", True)
+    if use_agent_intake:
+        g.add_edge(START, "agent_intake_node")
+        g.add_conditional_edges(
+            "agent_intake_node",
+            route_after_agent_intake,
+            {END: END, NODE_SOURCE_ENTRY: NODE_SOURCE_ENTRY},
+        )
+    else:
+        g.add_edge(START, "intake_node")
+        g.add_conditional_edges("intake_node", after_intake, {END: END, NODE_SOURCE_ENTRY: NODE_SOURCE_ENTRY})
     g.add_conditional_edges(
         NODE_SOURCE_ENTRY,
         route_source,
@@ -923,11 +1065,11 @@ def build_graph(deps: Optional[GraphDeps] = None, checkpointer: Any = None) -> A
     g.add_conditional_edges(
         NODE_TOPIC_GATE,
         route_after_topic_gate,
-        {END: END, NODE_LESSON: NODE_LESSON, NODE_TUTOR_NEXT: NODE_TUTOR_NEXT},
+        {END: END, NODE_CONTENT: NODE_CONTENT, NODE_TUTOR_NEXT: NODE_TUTOR_NEXT},
     )
     g.add_conditional_edges(
-        NODE_LESSON,
-        route_after_lesson,
+        NODE_CONTENT,
+        route_after_content,
         {END: END, NODE_TUTOR_NEXT: NODE_TUTOR_NEXT},
     )
     g.add_edge(NODE_WAIT_FOR_UPLOAD, END)
@@ -961,17 +1103,31 @@ def build_graph(deps: Optional[GraphDeps] = None, checkpointer: Any = None) -> A
         },
     )
     g.add_edge(NODE_SOURCE_FAILED, END)
-    g.add_conditional_edges(
-        NODE_TUTOR_NEXT,
-        route_tutor,
-        {
-            NODE_GENERATE_QUESTION: NODE_GENERATE_QUESTION,
-            NODE_EVALUATE_ANSWER: NODE_EVALUATE_ANSWER,
-            NODE_SUMMARY: NODE_SUMMARY,
-        },
-    )
-    g.add_edge(NODE_GENERATE_QUESTION, END)
-    g.add_edge(NODE_EVALUATE_ANSWER, NODE_TUTOR_NEXT)
+    use_agent_tutor = getattr(deps.settings, "USE_AGENT_TUTOR", True)
+    if use_agent_tutor:
+        # Агент в квизе (7.3.1): все ходы тьюторинга идут через agent_tutor_node
+        g.add_conditional_edges(
+            NODE_TUTOR_NEXT,
+            route_tutor_agent,
+            {NODE_AGENT_TUTOR: NODE_AGENT_TUTOR, NODE_SUMMARY: NODE_SUMMARY},
+        )
+        g.add_conditional_edges(
+            NODE_AGENT_TUTOR,
+            route_after_agent_tutor,
+            {END: END, NODE_SUMMARY: NODE_SUMMARY},
+        )
+    else:
+        g.add_conditional_edges(
+            NODE_TUTOR_NEXT,
+            route_tutor,
+            {
+                NODE_GENERATE_QUESTION: NODE_GENERATE_QUESTION,
+                NODE_EVALUATE_ANSWER: NODE_EVALUATE_ANSWER,
+                NODE_SUMMARY: NODE_SUMMARY,
+            },
+        )
+        g.add_edge(NODE_GENERATE_QUESTION, END)
+        g.add_edge(NODE_EVALUATE_ANSWER, NODE_TUTOR_NEXT)
     g.add_edge(NODE_SUMMARY, END)
 
     return g.compile(checkpointer=checkpointer)

@@ -32,7 +32,7 @@ class TestDefaults:
         assert s.TUTOR_MODEL == "qwen/qwen3.7-flash"
         assert s.EXPERT_MODEL == "deepseek/deepseek-v4-flash"
         assert s.JUDGE_MODEL == "google/gemini-3.5-flash-lite"
-        assert s.CHEAP_MODEL == "google/gemma-3-4b-it"
+        assert s.CHEAP_MODEL == "google/gemma-3-12b-it"
         assert s.EMBEDDING_MODEL == "intfloat/multilingual-e5-small"
 
     def test_limit_defaults(self, make_settings):
@@ -51,7 +51,7 @@ class TestDefaults:
         assert s.CRAWL4AI_RESPECT_ROBOTS is True
         assert s.MAX_CRAWL_PAGES == 20
         assert s.MAX_TEXTBOOK_SEARCH_SEC == 300.0
-        assert s.textbook_catalog_list == ["ru.wikibooks.org", "resh.edu.ru", "rusneb.ru"]
+        assert s.textbook_catalog_list == ["lesson.edu.ru", "ru.wikibooks.org", "resh.edu.ru", "rusneb.ru"]
 
     def test_relative_paths_absolutized(self, make_settings):
         s = make_settings(TEXTBOOKS_DOWNLOADS_DIR="./downloads")

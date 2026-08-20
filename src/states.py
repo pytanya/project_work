@@ -70,6 +70,8 @@ class TutorState(IntakeState):
 
     # --- Тьюторинг (Ж-6) ---
     knowledge_map: Dict[str, float] = Field(default_factory=dict)
+    # Тексты заданных вопросов (антидубликат 7.3.2): идут в промпт генерации и
+    # сравниваются с новым вопросом по cosine-близости эмбеддингов
     asked_questions: List[str] = Field(default_factory=list)
     current_question: Optional[QuizCard] = None
     current_answers: List[str] = Field(default_factory=list)  # эталонные ответы LLM (не в UI)

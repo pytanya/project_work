@@ -8,6 +8,7 @@ from src.intake import (
     apply_answer,
     compute_missing,
     emergency_min_set_met,
+    extract_intake_fields,
     normalize_answer,
     validate_intake,
 )
@@ -48,6 +49,54 @@ class TestNormalizeAnswer:
     def test_unknown_is_none(self):
         assert normalize_answer("mode", "хз") is None
         assert normalize_answer("grade", "не знаю") is None
+
+
+class TestExtractIntakeFields:
+    """Много-полевое извлечение из свободного ответа (5.4 / инструмент set_intake)."""
+
+    def test_full_compound_answer(self):
+        fields = extract_intake_fields("я в 7 классе, география, атмосфера, учебника нет, хочу квиз")
+        assert fields["learner_type"] == "schoolchild"
+        assert fields["grade"] == "7"
+        assert fields["subject"] == "география"
+        assert fields["has_textbook"] is False
+        assert fields["mode"] == "quiz"
+
+    def test_student_with_marker_topic(self):
+        fields = extract_intake_fields("студент, тема Атмосфера, квиз")
+        assert fields["learner_type"] == "student"
+        assert fields["topic"] == "Атмосфера"
+        assert fields["mode"] == "quiz"
+
+    def test_has_textbook_yes(self):
+        assert extract_intake_fields("да")["has_textbook"] is True
+        assert extract_intake_fields("есть учебник")["has_textbook"] is True
+
+    def test_unknown_returns_empty(self):
+        assert extract_intake_fields("не знаю") == {}
+        assert extract_intake_fields("") == {}
+
+    def test_topic_not_extracted_without_marker(self):
+        # «Атмосфера» без маркера — тема не распознаётся (остаётся на уточняющий вопрос)
+        assert "topic" not in extract_intake_fields("Атмосфера")
+
+    def test_mode_not_extracted_from_topic(self):
+        # ответ «квиз» на вопрос о теме не должен стать и темой и режимом в одном поле
+        fields = extract_intake_fields("хочу квиз")
+        assert fields.get("mode") == "quiz"
+        assert "topic" not in fields
+
+    def test_all_topic_segment(self):
+        # «все» сегментом в составном ответе → topic="all"
+        fields = extract_intake_fields("студент, философия, все, нет, квиз")
+        assert fields.get("topic") == "all"
+        assert extract_intake_fields("все")["topic"] == "all"
+        assert extract_intake_fields("весь учебник")["topic"] == "all"
+
+    def test_no_segment_has_textbook(self):
+        # «нет» сегментом в составном ответе → has_textbook=False
+        fields = extract_intake_fields("студент, философия, все, нет, квиз")
+        assert fields.get("has_textbook") is False
 
 
 class TestComputeMissing:

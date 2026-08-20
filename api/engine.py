@@ -33,6 +33,22 @@ logger = logging.getLogger("edututor.api")
 WS_IDLE_TIMEOUT_SEC = 300
 
 
+def _fallback_deps() -> GraphDeps:
+    """Портативный fallback при недоступности стандартного хранилища.
+
+    Qdrant embedded-режим — однопоточный (одна сессия на каталог): если сервер
+    уже держит data/qdrant, вторая сессия (тесты/другой сервер) падает.
+    Fallback — NumpyVectorStore в памяти (без блокировок).
+    """
+    from src.config import settings as cfg
+    from src.knowledge import NumpyVectorStore, make_collection_name, make_embedder
+
+    embedder = make_embedder(cfg)
+    store = NumpyVectorStore(make_collection_name(embedder), embedder)
+    return GraphDeps(embedder=embedder, store=store, settings=cfg,
+                     collection_name=store.collection_name)
+
+
 @dataclass
 class SessionData:
     id: str
@@ -43,6 +59,7 @@ class SessionData:
     history: list = field(default_factory=list)
     created_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
     cancel_event: threading.Event = field(default_factory=threading.Event)
+    step_active: bool = False  # выполняется ли сейчас шаг графа (WS не закрываем по idle во время шага)
     last_activity: float = field(default_factory=time.monotonic)
     store: Optional["SessionStore"] = None  # reference to parent store for persistence
 
@@ -59,8 +76,16 @@ class SessionStore:
     def __init__(self, deps: Optional[GraphDeps] = None,
                  sqlite_store: Any = None, ttl: float = 1800.0):
         from src.session_store import SessionSQLiteStore
-        
-        self._base_deps = deps or make_graph_deps()
+
+        if deps is None:
+            try:
+                deps = make_graph_deps()
+            except Exception as e:
+                # Qdrant embedded залочен другой сессией / сервер недоступен —
+                # не роняем бэкенд, используем портативный numpy-стор.
+                logger.warning("Стандартные deps недоступны (%s) — fallback на numpy store", e)
+                deps = _fallback_deps()
+        self._base_deps = deps or _fallback_deps()
         self._sessions: Dict[str, SessionData] = {}
         self._lock = threading.Lock()
         self._ttl = ttl
@@ -91,7 +116,7 @@ class SessionStore:
         self._sweep()
         sid = uuid.uuid4().hex[:12]
         queue: "std_queue.Queue[WsEvent]" = std_queue.Queue()
-        deps = replace(self._base_deps, on_event=self._make_publisher(queue))
+        deps = replace(self._base_deps, on_event=self._make_publisher(queue), on_token=self._make_token_publisher(queue))
         graph = build_graph(deps)
         state = TutorState(**(initial or {}))
         session = SessionData(id=sid, state=state, deps=deps, graph=graph, queue=queue, store=self)
@@ -116,6 +141,13 @@ class SessionStore:
         def publish(event: str, data: Dict[str, Any]) -> None:
             queue.put(WsEvent(event=event, data=data))
         return publish
+
+    @staticmethod
+    def _make_token_publisher(queue):
+        """Реальный стриминг токенов (stream=True) → WS-событие `token`."""
+        def publish_token(text: str) -> None:
+            queue.put(WsEvent(event="token", data={"text": text}))
+        return publish_token
 
     def get(self, session_id: str) -> Optional[SessionData]:
         with self._lock:
@@ -148,7 +180,7 @@ class SessionStore:
                     if saved_state.get("source_status") == "ready" or saved_state.get("collection_id"):
                         # Восстанавливаем существующую активную сессию
                         queue: "std_queue.Queue[WsEvent]" = std_queue.Queue()
-                        deps = replace(self._base_deps, on_event=self._make_publisher(queue))
+                        deps = replace(self._base_deps, on_event=self._make_publisher(queue), on_token=self._make_token_publisher(queue))
                         graph = build_graph(deps)  # rebuild для персистентности
                         state = TutorState.model_validate(saved_state)
                         session = SessionData(
@@ -167,7 +199,7 @@ class SessionStore:
         # Нет сохранённой сессии — создаём новую
         sid = uuid.uuid4().hex[:12]
         queue: "std_queue.Queue[WsEvent]" = std_queue.Queue()
-        deps = replace(self._base_deps, on_event=self._make_publisher(queue))
+        deps = replace(self._base_deps, on_event=self._make_publisher(queue), on_token=self._make_token_publisher(queue))
         graph = build_graph(deps)
         state = TutorState(**(initial or {}))
         session = SessionData(id=sid, state=state, deps=deps, graph=graph, queue=queue, store=self)
@@ -202,6 +234,7 @@ async def run_step(session: SessionData, answer: Optional[str] = None) -> TutorS
             return st
 
     timeout = float(getattr(cfg_settings, "RUN_STEP_TIMEOUT_SEC", 300.0))
+    session.step_active = True
     try:
         session.state = await asyncio.wait_for(asyncio.to_thread(_invoke), timeout=timeout)
     except asyncio.TimeoutError:
@@ -213,6 +246,8 @@ async def run_step(session: SessionData, answer: Optional[str] = None) -> TutorS
         )
         st.session_status = "failed"
         session.state = st
+    finally:
+        session.step_active = False
     
     # Сохраняем состояние после каждого шага (персистентность)
     if session.store and session.store._sqlite:
@@ -253,6 +288,12 @@ def message_response(state: TutorState) -> MessageResponse:
         )
     if state.current_question is not None:
         return MessageResponse(type="quiz_card", payload=state.current_question.model_dump())
+    if state.lesson_text is not None and not state.lesson_confirmed:
+        # 7.3.3: урок/разбор не теряется при HTTP-пути и resync
+        return MessageResponse(
+            type="lesson",
+            payload={"text": state.lesson_text, "topic": state.active_topic or state.topic or ""},
+        )
     if state.session_status == "failed":
         return MessageResponse(type="error", payload={"message": state.agent_message or ""})
     if state.agent_message:

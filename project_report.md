@@ -90,6 +90,11 @@
    установки Microsoft VC++ Redistributable.
 4. **Векторное хранилище**: по умолчанию `VECTOR_STORE=numpy` (портативный);
    ChromaDB (спецификация) — после установки VC++ (rust-binding).
+   **2026-08-18 (roadmap #1): добавлен Qdrant** (`VECTOR_STORE=qdrant`,
+   `src/qdrant_store.py`) — server-режим (`QDRANT_URL`, docker-compose.yml) и
+   embedded-режим (`QDRANT_PATH` — локальный персистентный каталог через
+   `qdrant-client`, без Docker). Payload-поля для metadata-фильтрации.
+   Протестирован в embedded-режиме (`tests/test_qdrant_store.py`).
 5. **Источники (К-2)**: полный PDF учебника легально недоступен — агент собирает
    материалы по теме из Plan A; Plan B — локальные PDF из Downloads (приёмка).
 6. **crawl4ai**: версия 0.9.2 (PyPI); капчу/аутентификацию/ToS не обходим (К-2).

@@ -21,6 +21,7 @@ from .knowledge import (
     validate_topic_in_text,
 )
 from .nlp import classify_intent, extract_entities, parse_doc_request
+from .intake import extract_intake_fields
 from .source_finder import (
     crawl_page_js,
     download_file,
@@ -75,6 +76,8 @@ TOOL_FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "classify_intent": classify_intent,
     "extract_entities": extract_entities,
     "save_progress": save_progress,
+    # Intake-инструменты (5.4, function calling): свободный ответ → поля чек-листа
+    "extract_intake_fields": extract_intake_fields,
     # Сканированные учебники (3.2)
     "detect_text_layer": detect_text_layer,
     "parse_doc_request": parse_doc_request,

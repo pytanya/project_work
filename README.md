@@ -8,7 +8,7 @@
 ## Сценарий (одна строка)
 
 ```
-Python 3.11+ → Docling/pdfplumber (PDF) → Chunks → ChromaDB/NumpyStore (embeddings
+Python 3.11+ → Docling/pdfplumber (PDF) → Chunks → Qdrant/NumpyStore (embeddings
 RouterAI или sentence-transformers) → LangGraph (intake → источник → квиз → оценка
 → судья) → CLI-вывод
 ```
@@ -27,8 +27,9 @@ RouterAI или sentence-transformers) → LangGraph (intake → источни�
 
 `torch` (sentence-transformers) и `chromadb` (rust-binding) требуют системного
 рантайма/компилятора. Без него работают альтернативные бэкенды по умолчанию
-(`EMBEDDING_PROVIDER=api`, `VECTOR_STORE=numpy`) — устанавливать НЕ обязательно,
-но нужно для локальных embeddings и ChromaDB.
+(`EMBEDDING_PROVIDER=api`, `VECTOR_STORE=qdrant`/`numpy`) — устанавливать НЕ обязательно.
+Qdrant — основной векторный бэкенд (`VECTOR_STORE=qdrant`): server (`QDRANT_URL`,
+docker-compose.yml) или embedded (`QDRANT_PATH`, без Docker). ChromaDB — опционально.
 
 | ОС | Что установить | Команда |
 |----|----------------|---------|
@@ -80,10 +81,52 @@ REST: сессии, intake, upload, find-textbook, message, topic, graph, cancel
 WS `/api/sessions/{id}/ws`: `intake.question`, `source.progress`, `quiz.card`,
 `tutor.explanation`, `tutor.lesson`, `tutor.summary`, `graph.ready`, `source.failed`.
 
+## Qdrant векторное хранилище (roadmap #1)
+
+Два режима — server и embedded:
+
+```bash
+# Режим 1: Qdrant-сервер в Docker (docker compose up -d qdrant)
+docker compose up -d qdrant
+#   .env: VECTOR_STORE=qdrant, QDRANT_URL=http://localhost:6333
+
+# Режим 2: embedded (локальная персистентная БД, БЕЗ Docker)
+#   .env: VECTOR_STORE=qdrant, QDRANT_PATH=./data/qdrant
+
+# Режим 3: текущий портативный бэкенд (без Qdrant)
+#   .env: VECTOR_STORE=numpy
+```
+
+Активный бэкенд виден в `GET /api/health` (`vector_store` + `collection`).
+
+## База знаний (Knowledge Wiki, roadmap #2)
+
+Между сессиями накапливаются wiki-статьи по темам (`data/knowledge_wiki/<subject>/<topic>.md`,
+OKF v0.2): мастерство, попытки, правильные ответы, заметки об ошибках.
+
+```bash
+# API
+curl http://127.0.0.1:8000/api/wiki                       # сводка: предмет → темы
+curl http://127.0.0.1:8000/api/wiki/философия             # статьи предмета
+curl http://127.0.0.1:8000/api/wiki/философия/Кант        # статья темы
+```
+
+В UI — панель «База знаний» (donut-диаграмма тем + tooltip: мастерство, точность,
+заметки). Обновляется при каждом ответе (`apply_record`) и завершении квиза
+(`sync_mastery`). Тело статьи генерируется Wiki-LLM из RAG-контекста (`enrich_body`).
+
+### Граф знаний (roadmap #3)
+
+- **Mastery overlay** — цвет узла = уровень усвоения (зелёный/жёлтый/красный) из wiki
+- **Типы рёбер** — `part_of`/`prerequisite`/`related` разными цветами + легенда
+- **Zoom/pan/drag** на SVG (колесо — масштаб, drag — сдвиг)
+- **Drill-down** — клик по узлу → wiki-статья (mastery, заметки, тело)
+
 > **Фаза 1+2 (август 2026):** 
 > - Frontend оптимизации: settings-gear с toggle «Быстрый ответ», разделение busy/uploadBusy/chatBusy, typing indicator, счётчик «Вопрос N/M» в QuizCard
 > - Бэкенд SQLite-персистентность сессий (`src/session_store.py`) — состояние сохраняется/восстанавливается между перезапусками сервера
 > - **RAG + адаптация (Фаза 3):** hybrid retrieval (BM25 + RRF, `src/knowledge.py:HybridVectorStore`) и LinUCB contextual bandit для выбора сложности (`src/adaptive.py`)
+> - **Knowledge Wiki (roadmap #2):** идемпотентное накопление знаний между сессиями; граф веб-источников — по страницам (book → page → subtopics), шум отсечён; источники+автор видны в панели «Источник»
 
 ### Граф знаний и подготовка по темам
 
@@ -111,7 +154,7 @@ python evals/edututor_eval.py --mock    # офлайн-режим
 | Вопрос | Решение |
 |--------|---------|
 | Embeddings | `EMBEDDING_PROVIDER=api` (RouterAI `intfloat/multilingual-e5-large`) — без локального torch/MSVC; `local` (sentence-transformers e5-small) — после установки VC++; ретраи с бэк-оффом на 429/5xx/таймаут |
-| Векторное хранилище | `VECTOR_STORE=numpy` (портативный, без MSVC); `chroma` (ChromaDB) — после VC++ |
+| Векторное хранилище | `VECTOR_STORE=numpy` (портативный, без MSVC); `chroma` (ChromaDB); `qdrant` (roadmap #1) — server (`QDRANT_URL`, docker-compose.yml) или embedded (`QDRANT_PATH`, без Docker) |
 | **Hybrid RAG** (7.2) | `HYBRID_RAG=true`: векторный поиск + **BM25 (Okapi)** с fusion через **RRF** (обёртка `HybridVectorStore` над любым VectorStore, чистый Python без зависимостей) |
 | **Адаптивная сложность** | `ADAPTIVE_BANDIT=true`: **LinUCB contextual bandit** (руки = сложности, контекст = мастерство темы/класс/недавний результат, награда = score оценки); `false` — эвристика «3 верных → ↑, 2 ошибки → ↓» |
 | Судья (К-4) | Gemini на RouterAI (без VPN); OpenRouter для судьи не используется |
@@ -126,10 +169,11 @@ python evals/edututor_eval.py --mock    # офлайн-режим
 
 ```
 src/           config, llm_client, guardrails, nlp, intake, curriculum (ФГОС),
-               knowledge (RAG), adaptive (LinUCB), source_finder (crawl4ai), tutor,
-               judge, graph, metrics
+               knowledge (RAG), qdrant_store (Qdrant backend), adaptive (LinUCB),
+               source_finder (crawl4ai), tutor, judge, graph, metrics
 api/           Pydantic-схемы (IntakeStatusResponse, QuizCard, MessageResponse, WsEvent)
-tests/         341 тест
+tests/         350+ тест
 evals/         golden_set.json, intent_dataset.json, edututor_eval.py
 main.py        CLI-демо
+docker-compose.yml  Qdrant + backend + frontend (roadmap #1)
 ```

@@ -253,6 +253,8 @@ def clean_pdf_text(text: str) -> str:
     text = re.sub(r"\u00ad", "", text)
     # CID-артефакты (шрифты без ToUnicode)
     text = re.sub(r"\(cid:\d+\)", "", text)
+    # одиночные суррогаты (CP1251-шрифты без ToUnicode → мусорные символы)
+    text = re.sub(r"[\ud800-\udfff]", "", text)
     # склеиваем строки внутри абзацев, заголовки секций — отдельной строкой
     paragraphs = re.split(r"\n\s*\n", text)
     out: List[str] = []
@@ -825,14 +827,60 @@ def make_store(
     backend: Optional[str] = None,
     settings: Any = None,
 ) -> VectorStore:
-    """Фабрика векторного хранилища (numpy — по умолчанию, chroma — опционально)."""
+    """Фабрика векторного хранилища (numpy — по умолчанию, chroma/qdrant — опционально)."""
     s = settings or default_settings
     backend = backend or (s.VECTOR_STORE or "numpy").strip().lower()
     if backend == "chroma":
         return ChromaStore(collection_name, embedder, persist_dir=persist_dir)
     if backend == "numpy":
         return NumpyVectorStore(collection_name, embedder)
-    raise ValueError(f"Неизвестный VECTOR_STORE: {backend!r} (numpy|chroma)")
+    if backend == "qdrant":
+        return make_qdrant_store(collection_name, embedder, settings=s)
+    raise ValueError(f"Неизвестный VECTOR_STORE: {backend!r} (numpy|chroma|qdrant)")
+
+
+def make_qdrant_store(
+    collection_name: str,
+    embedder: Embedder,
+    settings: Any = None,
+) -> "VectorStore":
+    """QdrantStore по настройкам: server (QDRANT_URL) или embedded (QDRANT_PATH).
+
+    В embedded-режиме QDRANT_PATH — персистентный каталог локальной БД
+    (не нужен Docker). Размерность берём из статической карты моделей
+    (без сетевого вызова encode).
+    """
+    s = settings or default_settings
+    from .qdrant_store import QdrantStore
+
+    path = getattr(s, "QDRANT_PATH", None)
+    vector_size = _model_dimension(getattr(embedder, "model", "") or "")
+    if vector_size is None:
+        # Неизвестная модель — единственный сетевой вызов для определения размерности
+        try:
+            vector_size = len(embedder.encode(["dim probe"])[0])
+        except Exception:
+            vector_size = None
+    if path:
+        return QdrantStore(collection_name, embedder, path=str(path), vector_size=vector_size)
+    return QdrantStore(
+        collection_name,
+        embedder,
+        url=getattr(s, "QDRANT_URL", "http://localhost:6333"),
+        api_key=getattr(s, "QDRANT_API_KEY", "") or None,
+        vector_size=vector_size,
+    )
+
+
+def _model_dimension(model: str) -> Optional[int]:
+    """Статическая карта размерности известных embedding-моделей (без encode)."""
+    dim_by_model = {
+        "intfloat/multilingual-e5-large": 1024,
+        "intfloat/multilingual-e5-small": 384,
+        "multilingual-e5-large": 1024,
+        "multilingual-e5-small": 384,
+    }
+    return dim_by_model.get(model)
 
 
 def make_collection_name(embedder: Embedder, prefix: str = "edututor") -> str:
@@ -846,18 +894,12 @@ def make_collection_name(embedder: Embedder, prefix: str = "edututor") -> str:
     моделей; если модель неизвестна — fallback на encode (только один раз).
     """
     model = getattr(embedder, "model", "") or ""
-    dim_by_model = {
-        "intfloat/multilingual-e5-large": "1024",
-        "intfloat/multilingual-e5-small": "384",
-        "multilingual-e5-large": "1024",
-        "multilingual-e5-small": "384",
-    }
-    dim = dim_by_model.get(model)
+    dim = _model_dimension(model)
     if dim is None:
         # Неизвестная модель: единственный сетевой вызов (результат не кэшируем —
         # функция вызывается редко, только при старте/создании стора)
         try:
-            dim = str(len(embedder.encode(["dim probe"])[0]))
+            dim = len(embedder.encode(["dim probe"])[0])
         except Exception:
             dim = "unknown"
     return f"{prefix}_{dim}"

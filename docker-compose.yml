@@ -1,0 +1,54 @@
+# ==============================================================================
+# EduTutor — docker-compose (roadmap #1: Qdrant; раздел 3.3 SPECIFICATION.md)
+#
+# Сервисы:
+#   qdrant   — векторное хранилище (порт 6333 HTTP, 6334 gRPC)
+#   backend  — FastAPI (опционально)
+#   frontend — Vite dev-сервер (опционально)
+#
+# Запуск Qdrant без остального стека:
+#   docker compose up -d qdrant
+#   (в .env: VECTOR_STORE=qdrant, QDRANT_URL=http://localhost:6333)
+# ==============================================================================
+
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: edututor-qdrant
+    ports:
+      - "6333:6333"   # REST API
+      - "6334:6334"   # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+
+  backend:
+    image: python:3.12-slim
+    container_name: edututor-backend
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: sh -c "pip install -r requirements.txt && uvicorn api.app:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    depends_on:
+      - qdrant
+    restart: unless-stopped
+
+  frontend:
+    image: node:20-alpine
+    container_name: edututor-frontend
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  qdrant_data:

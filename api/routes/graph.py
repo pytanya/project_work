@@ -29,9 +29,33 @@ class TopicBody(BaseModel):
 def get_graph(session_id: str, store: SessionStore = Depends(get_store)):
     session = get_session(store, session_id)
     kg = KnowledgeGraph.from_dict(session.state.knowledge_graph)
+    nodes = kg.to_dict()["nodes"]
+    edges = kg.to_dict()["edges"]
+
+    # Mastery overlay (roadmap #3): цвет узла = уровень усвоения из Knowledge Wiki.
+    # Матчим по названию темы/раздела (case-insensitive), subject сессии — фильтр.
+    try:
+        from src.wiki import KnowledgeWiki
+
+        wiki = KnowledgeWiki(default_settings.KNOWLEDGE_WIKI_DIR)
+        subject = session.state.subject
+        for n in nodes:
+            title = n.get("title", "")
+            art = wiki.get(subject, title) if subject and title else None
+            if art is None and title:
+                for a in wiki.list_articles():
+                    if a.title.lower() == title.lower():
+                        art = a
+                        break
+            if art is not None:
+                n["mastery"] = art.mastery
+                n["attempts"] = art.attempts
+    except Exception:
+        pass  # wiki недоступен — граф без mastery
+
     return {
-        "nodes": kg.to_dict()["nodes"],
-        "edges": kg.to_dict()["edges"],
+        "nodes": nodes,
+        "edges": edges,
         "active_topic": session.state.active_topic,
         "stats": kg.stats(),
     }
@@ -46,6 +70,32 @@ def related_nodes(session_id: str, node_id: str, store: SessionStore = Depends(g
         "node": node,
         "related": kg.neighbors(node_id, max_depth=2),
     }
+
+
+@router.get("/graph/{node_id}/wiki")
+def node_wiki(session_id: str, node_id: str, store: SessionStore = Depends(get_store)):
+    """Drill-down (roadmap #3): wiki-статья узла графа (mastery, заметки, тело)."""
+    session = get_session(store, session_id)
+    kg = KnowledgeGraph.from_dict(session.state.knowledge_graph)
+    node = next((n for n in kg.to_dict()["nodes"] if n.get("id") == node_id), None)
+    if node is None:
+        raise HTTPException(status_code=404, detail="Узел не найден")
+    title = node.get("title", "")
+    try:
+        from src.wiki import KnowledgeWiki
+
+        wiki = KnowledgeWiki(default_settings.KNOWLEDGE_WIKI_DIR)
+        art = wiki.get(session.state.subject, title) if session.state.subject and title else None
+        if art is None and title:
+            for a in wiki.list_articles():
+                if a.title.lower() == title.lower():
+                    art = a
+                    break
+        if art is not None:
+            return {"node": node, "wiki": art.to_dict()}
+    except Exception:
+        pass
+    return {"node": node, "wiki": None}
 
 
 @router.post("/topic")
@@ -98,6 +148,9 @@ async def select_topic(session_id: str, body: TopicBody, store: SessionStore = D
             "title": title,
             "question": session.state.current_question.model_dump() if session.state.current_question else None,
             "next_question": session.state.agent_question or "",
+            # 7.3.3: урок/разбор в ответе — не теряется при HTTP-пути и resync
+            "lesson": session.state.lesson_text or None,
+            "explanation": session.state.agent_message or None,
         }
     except Exception as e:
         logger.exception("select_topic error: %s", e)

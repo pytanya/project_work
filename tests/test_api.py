@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import queue as std_queue
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from api.app import create_app
 from api.engine import SessionStore
+from api.schemas import WsEvent
 from src.config import BASE_DIR, Settings
 from src.graph import GraphDeps
 from src.knowledge import DocChunk, NumpyVectorStore
@@ -55,6 +57,7 @@ def client(make_settings, tmp_path):
     s = make_settings(
         FGOS_REFERENCE_DIR=str(BASE_DIR / "data" / "fgos_reference"),
         TEXTBOOKS_DOWNLOADS_DIR=str(tmp_path / "downloads"),
+        KNOWLEDGE_WIKI_DIR=str(tmp_path / "wiki"),
         MAX_INTAKE_ITERATIONS=8,
         OCR_MIN_TEXT_CHARS=20,
     )
@@ -85,6 +88,24 @@ def _new_session(client, **initial) -> str:
     return r.json()["session_id"]
 
 
+class TestStreaming:
+    def test_token_event_schema(self):
+        ev = WsEvent(event="token", data={"text": "Привет"})
+        assert ev.model_dump()["data"]["text"] == "Привет"
+
+    def test_token_publisher_puts_event(self):
+        from api.engine import SessionStore
+
+        q = std_queue.Queue()
+        pub = SessionStore._make_token_publisher(q)
+        pub("часть1")
+        pub("часть2")
+        assert q.qsize() == 2
+        ev = q.get()
+        assert ev.event == "token"
+        assert ev.data["text"] == "часть1"
+
+
 class TestSessions:
     def test_create_get_delete(self, client):
         sid = _new_session(client)
@@ -98,7 +119,11 @@ class TestSessions:
 
 class TestHealthMetrics:
     def test_health(self, client):
-        assert client.get("/api/health").json() == {"status": "ok"}
+        r = client.get("/api/health").json()
+        assert r["status"] == "ok"
+        # С 2026-08: health сообщает активный векторный бэкенд (numpy/chroma/qdrant)
+        assert r["vector_store"]
+        assert "collection" in r
 
     def test_metrics(self, client):
         r = client.get("/api/metrics")
@@ -276,6 +301,40 @@ class TestGraph:
         assert any("index.md" in f for f in body["files"])
         assert any(f.startswith("topics/") for f in body["files"])
 
+    def test_graph_has_mastery_overlay(self, client, monkeypatch, tmp_path):
+        """Mastery overlay (roadmap #3): /graph возвращает mastery/attempts для узлов."""
+        from src.wiki import KnowledgeWiki, WikiArticle
+
+        sid = self._session_with_graph(client)
+        # сессия создана с subject «физика»? В _session_with_graph intake «физика» —
+        # проверяем обе ветки матчинга wiki
+        wiki = KnowledgeWiki(tmp_path)
+        wiki.upsert(WikiArticle(subject="физика", topic="Параграф 12: Атмосфера", mastery=0.9, attempts=5))
+        monkeypatch.setattr("api.routes.graph.default_settings.KNOWLEDGE_WIKI_DIR", tmp_path)
+
+        g = client.get(f"/api/sessions/{sid}/graph").json()
+        mastered = [n for n in g["nodes"] if n.get("mastery") is not None]
+        assert mastered  # хотя бы один узел с mastery
+        assert mastered[0]["attempts"] == 5
+
+    def test_node_wiki_drilldown(self, client, monkeypatch, tmp_path):
+        """Drill-down (roadmap #3): GET /graph/{node}/wiki возвращает статью."""
+        from src.wiki import KnowledgeWiki, WikiArticle
+
+        sid = self._session_with_graph(client)
+        wiki = KnowledgeWiki(tmp_path)
+        wiki.upsert(WikiArticle(subject="физика", topic="Параграф 12: Атмосфера", mastery=0.8, attempts=3))
+        monkeypatch.setattr("api.routes.graph.default_settings.KNOWLEDGE_WIKI_DIR", tmp_path)
+
+        g = client.get(f"/api/sessions/{sid}/graph").json()
+        node = next(n for n in g["nodes"] if n.get("type") == "section")
+        r = client.get(f"/api/sessions/{sid}/graph/{node['id']}/wiki")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["node"]["id"] == node["id"]
+        # wiki может быть None (если заголовок не совпал) — не падаем
+        assert "wiki" in body
+
 
 class TestWebSocket:
     def test_ws_streams_quiz_card(self, client):
@@ -293,3 +352,53 @@ class TestWebSocket:
         with client.websocket_connect("/api/sessions/nope/ws") as ws:
             event = ws.receive_json()
             assert event["event"] == "session.error"
+
+
+class TestWiki:
+    """Knowledge Wiki (roadmap #2): GET /api/wiki — накопленные статьи между сессиями."""
+
+    def _seed(self, tmp_path):
+        from src.wiki import KnowledgeWiki, WikiArticle
+
+        wiki = KnowledgeWiki(tmp_path)
+        wiki.upsert(WikiArticle(subject="Философия", topic="Кант", mastery=0.85, attempts=3, correct=2))
+        wiki.upsert(WikiArticle(subject="Философия", topic="Гегель", mastery=0.2))
+        return wiki
+
+    def test_summary_empty(self, client, monkeypatch, tmp_path):
+        monkeypatch.setattr("api.routes.wiki.default_settings.KNOWLEDGE_WIKI_DIR", tmp_path)
+        r = client.get("/api/wiki")
+        assert r.status_code == 200
+        assert r.json()["subjects"] == []
+
+    def test_summary_returns_subjects(self, client, monkeypatch, tmp_path):
+        self._seed(tmp_path)
+        monkeypatch.setattr("api.routes.wiki.default_settings.KNOWLEDGE_WIKI_DIR", tmp_path)
+        r = client.get("/api/wiki")
+        body = r.json()
+        assert len(body["subjects"]) == 1
+        s = body["subjects"][0]
+        assert s["subject"] == "философия"
+        topics = {a["topic"] for a in s["articles"]}
+        assert {"Кант", "Гегель"} <= topics
+
+    def test_subject_articles(self, client, monkeypatch, tmp_path):
+        self._seed(tmp_path)
+        monkeypatch.setattr("api.routes.wiki.default_settings.KNOWLEDGE_WIKI_DIR", tmp_path)
+        r = client.get("/api/wiki/Философия")
+        assert r.status_code == 200
+        arts = {a["topic"]: a for a in r.json()["articles"]}
+        assert arts["Кант"]["mastery"] == 0.85
+        assert arts["Кант"]["attempts"] == 3
+
+    def test_article_detail(self, client, monkeypatch, tmp_path):
+        self._seed(tmp_path)
+        monkeypatch.setattr("api.routes.wiki.default_settings.KNOWLEDGE_WIKI_DIR", tmp_path)
+        r = client.get("/api/wiki/Философия/Кант")
+        assert r.status_code == 200
+        assert r.json()["mastery"] == 0.85
+
+    def test_article_missing_404(self, client, monkeypatch, tmp_path):
+        monkeypatch.setattr("api.routes.wiki.default_settings.KNOWLEDGE_WIKI_DIR", tmp_path)
+        assert client.get("/api/wiki/Нет/Нет").status_code == 404
+        assert client.get("/api/wiki/Нет").status_code == 404

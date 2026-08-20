@@ -14,6 +14,12 @@
 > - [x] Удалён дублирующийся `PRE_CHECK_MIN_LENGTH`
 > - [x] SQLite персистентность сессий: сохранение/восстановление TutorState (файл `data/session_persist.db`)
 > - [ ] Предгенерация вопросов пакетами 3–5 ещё реализована (Engine использует single-step invoke, см. Этап 2 roadmap)
+>
+> **Roadmap #1 (2026-08-18): Qdrant векторное хранилище.** Адаптер `src/qdrant_store.py` (server + embedded режимы), переключение `VECTOR_STORE=qdrant`, `docker-compose.yml`. См. раздел 3.3, roadmap.md.
+>
+> **Roadmap #2 (2026-08-18): Knowledge Wiki + поток «студент без учебника».** Персистентные wiki-статьи по темам между сессиями (`src/wiki.py`, `data/knowledge_wiki/`), идемпотентное накопление mastery/attempts; Wiki-LLM (`enrich_body`) — тело статьи из RAG-контекста при изучении темы; граф из веб-источников — по страницам (book → page → subtopics), шум отсечён; источники+автор в UI; `/api/wiki`. См. раздел 3.3, roadmap.md.
+>
+> **Roadmap #3 (2026-08-18): визуализация графа знаний.** SVG zoom/pan/drag, типы рёбер (`part_of`/`prerequisite`/`related`) разными цветами, mastery overlay (цвет узла = усвоение из wiki, `/graph` возвращает mastery/attempts), drill-down клик по узлу → wiki-статья (`/graph/{node}/wiki`). Без внешней библиотеки — стабильнее. См. roadmap.md.
 
 ---
 
@@ -23,7 +29,7 @@
 
 **⚙️ Почему нужен агент:**
 - Автоматический разбор учебника → структурированная база знаний
-- **Авто-поиск учебного материала** по классу/предмету/автору **в реалистичных легальных источниках** (РЭШ, НЭБ, открытые образовательные ресурсы, учебные платформы, конспекты/лекции), если файл не предоставлен
+- **Авто-поиск учебного материала** по классу/предмету/автору **в реалистичных легальных источниках** (lesson.edu.ru — открытая библиотека Минпросвещения, РЭШ, НЭБ, открытые образовательные ресурсы, учебные платформы, конспекты/лекции), если файл не предоставлен
 - Адаптивная генерация квизов по конкретным главам/темам с учётом класса обучаемого
 - Объяснение ошибок с привязкой к источнику
 - Поиск дополнительной информации, если учебника недостаточно
@@ -73,7 +79,7 @@ flowchart TD
         FIND["find_textbook<br/>crawl4ai по легальным источникам"] -->|"скачан PDF"| DOC
         SEARCH["search_web<br/>Yandex → DDGS"] --> FETCH["fetch_url / crawl_page_js<br/>загрузка страниц"]
         SEARCH -->|"нет учебника"| MAT["Материалы по теме<br/>подграф web_search"]
-        CHUNK --> VDB["ChromaDB<br/>векторное хранилище"]
+        CHUNK --> VDB["Qdrant<br/>векторное хранилище"]
         FETCH --> MAT --> VDB
         EMB["Embeddings<br/>sentence-transformers (обяз.)<br/>Ollama nomic-embed-text (опц.)"] -.-> VDB
     end
@@ -188,7 +194,7 @@ stateDiagram-v2
         full_ocr --> ocr_and_index
     }
     ask_page_range --> chunk_and_index: ocr_pages (ru+en) → validate_topic → чанки
-    chunk_and_index --> rag_ready: ChromaDB проиндексирована
+    chunk_and_index --> rag_ready: Qdrant проиндексирована
 
     state tutoring {
         [*] --> generate_question
@@ -219,6 +225,85 @@ stateDiagram-v2
 >
 > **Стойкость сессии:** граф исполняется в фоне (asyncio-задача), каждое состояние сохраняется
 > асинхронным checkpointer'ом (AsyncSqliteSaver) — см. раздел 8.4 (В-4, В-5).
+
+---
+
+### 2.3. Целевая архитектура: агентный цикл + детерминированная FSM (гибрид)
+
+> **Статус:** раздел фиксирует **цель**. Сделано (Фаза 0 + Уровни 1–3, август 2026):
+> - [x] Инструменты агента реализованы и покрыты тестами: `src/agent_tools.py`
+>       (`AGENT_TOOLS` + `TOOL_SCHEMAS`, 11 инструментов, `execute_agent_tool`);
+> - [x] Багфиксы FSM (7.3.2–7.3.4): антидубликат вопросов, видимость урока, режимы
+>       explain/deep_dive;
+> - [x] `extract_intake_fields` как инструмент и в `intake_node` (5.4);
+> - [x] Пропуск topic-gate при конкретной теме (материалы собраны по теме → сразу
+>       урок/квиз; «все»/несовпадение → выбор урока из графа);
+> - [x] Подтверждение намерения перед поиском/индексацией («Готовлю урок по теме…»);
+> - [x] **Агентный intake (Фаза 1)**: `src/agent_loop.py` — ReAct-цикл, модель ведёт
+>       интервью через function calling (`interview_progress`/`set_intake`/
+>       `extract_intake_fields`/`route_to_source`); детерминированный `intake_node` —
+>       фолбэк при недоступности агентной LLM. `USE_AGENT_INTAKE=true` (по умолчанию).
+> - [x] **Агент в квизе (Фаза 2, опция `USE_AGENT_TUTOR`)**: `src/evaluation.py` —
+>       единая логика оценки (узел + инструмент `evaluate_answer`); `agent_tutor_node` +
+>       ReAct-цикл `run_tutor_agent` (evaluate_answer/generate_quiz/explain_error/deep_dive/
+>       finish_session). По умолчанию выключен — ход агента ~60с (2-3 LLM-вызова),
+>       детерминированный квиз быстрее.
+> Осталось (Фаза 4): наблюдаемость инструментов (`action`/`reason_summary`/`status`).
+
+**Принцип:** разделение по критерию «кто принимает решение».
+
+- **Детерминированная FSM** — там, где решение не принадлежит модели: загрузка/индексация
+  документа, OCR-пайплайн, веб-поиск источников, guardrails, бандиты, судьи, экспорт.
+- **Агентный цикл (`agent_loop`)** — там, где решение принимает модель: intake-интервью,
+  ведение квиза, урок/объяснение/глубокий разбор, свободные вопросы ученика.
+
+**Правило:** детерминированные функции **становятся инструментами модели** (function calling).
+Модель решает, какой инструмент вызвать; инструмент возвращает результат; модель решает,
+продолжать или завершить (Reason → Act → Observe).
+
+```mermaid
+flowchart TD
+    START["START"] --> AGENT["agent_loop (LLM-оркестратор)<br/>history + tools"]
+    AGENT -->|"interview_progress / set_intake / extract_entities"| INT["Инструменты интервью"]
+    AGENT -->|"rag_search / get_knowledge_graph"| RET["Инструменты retrieval"]
+    AGENT -->|"generate_lesson / generate_quiz / explain_error / deep_dive"| GEN["Инструменты тьюторинга"]
+    AGENT -->|"route_to_source"| FSM["source_fsm (детерминированный субграф)<br/>upload / OCR / индексация / веб-поиск"]
+    FSM -->|"материалы готовы"| AGENT
+    AGENT -->|"finish / лимиты"| END["END (суммаризация + экспорт)"]
+    AGENT -->|"вопрос ученику"| USER["Ответ ученика → history"]
+    USER --> AGENT
+```
+
+**Инструменты агента (целевой реестр для `TOOL_FUNCTIONS`):**
+
+| Инструмент | Когда вызывается моделью |
+|------------|--------------------------|
+| `interview_progress()` | Перед вопросом: какие поля чек-листа заполнены/пусты (5.4) |
+| `set_intake(field, value)` | Из ответа ученика извлечено значение поля; нормализация типов — детерминированная (5.4) |
+| `extract_entities(text)` | Свободный ответ ученика → сущности (класс/предмет/тема/автор/глава) |
+| `rag_search(query, k)` | Нужен контекст/факт для урока, вопроса или объяснения |
+| `get_knowledge_graph()` | Выбор темы/урока, связи prerequisite/related для deep-dive |
+| `generate_lesson(topic)` | Режим «урок»: синтез объяснения по RAG-контексту |
+| `generate_quiz(topic, difficulty)` | Режим «квиз»: следующий вопрос (антидубликат — 7.3.2) |
+| `explain_error(question, answer)` | Ответ неверен → объяснение с цитатой §N |
+| `deep_dive(topic)` | Режим «глубокий разбор»: синтез по нескольким секциям графа |
+| `route_to_source()` | Нет материалов — делегировать в `source_fsm` (детерминированный субграф) |
+| `finish_session()` | Квиз завершён / ученик закончил → суммаризация + экспорт |
+
+**Инварианты агентного цикла (Standard Operation Procedure):**
+
+1. Модель не выдумывает факты за пределами контекста инструментов (`rag_search`).
+2. Перед генерацией вопроса/урока/объяснения модель обязана вызвать `rag_search` либо
+   подтвердить наличие контекста в state.
+3. `set_intake` принимает только нормализованные значения (валидация типов
+   детерминированна); «не знаю» → поле не заполняется, итерация без прогресса (В-3).
+4. Лимиты (итерации, стоимость, вызовы — раздел 3.7) имеют приоритет над волей модели:
+   при достижении лимита цикл прерывается и передаёт управление в детерминированную ветку
+   завершения.
+5. Каждый вызов инструмента логируется: `action`, `reason_summary`, `status` (раздел 10.2).
+6. Ошибка инструмента возвращается модели как `{ok: false, error}`; модель решает —
+   повторить запрос, сменить аргументы или завершить; число повторов ограничено
+   детерминированно (retry limit).
 
 ---
 
@@ -253,9 +338,10 @@ stateDiagram-v2
 
 | Компонент | Технология | Обоснование |
 |-----------|-----------|-------------|
-| **Векторная БД** | **ChromaDB** | Лёгкая, встроенная, без инфраструктуры; из `hybrid-rag-project` и geo_tutor-master |
-| **Семантический поиск** | ChromaDB similarity search | top-K по косинусному расстоянию с **метаданными** (class, subject, section_number, source) для фильтрации по классу/главе |
-| **Фильтр по классу/главе** | ChromaDB `where` | `section_number`, `grade`, `curriculum`, `subject` — из geo_tutor-master (фильтр по параграфам) |
+| **Векторная БД** | **Qdrant** (`VECTOR_STORE=qdrant`, roadmap #1) — предпочтительно; **ChromaDB** (`VECTOR_STORE=chroma`); **NumpyVectorStore** (`VECTOR_STORE=numpy`, портативный, без MSVC) | Qdrant — персистентное векторное хранилище с metadata-фильтрацией и масштабируемостью. Два режима: **server** (`QDRANT_URL`, docker-compose.yml, порт 6333/6334) и **embedded** (`QDRANT_PATH` — локальный персистентный каталог через `qdrant-client`, без Docker). Адаптер `src/qdrant_store.py` реализует интерфейс `VectorStore` (add/search/count/reset/delete); коллекция создаётся при старте, если её нет (миграция) |
+| **Семантический поиск** | Qdrant similarity search (ChromaDB — опциональный бэкенд) | top-K по косинусному расстоянию с **метаданными** (class, subject, section_number, source) для фильтрации по классу/главе |
+| **Payload-поля (Qdrant)** | `subject`, `grade`, `section_number`, `section_title`, `source`, `page_number` | Metadata-filtered search (roadmap #1): фильтр по классу/главе/источнику без повторной индексации |
+| **Фильтр по классу/главе** | Qdrant `Filter`/ChromaDB `where` | `section_number`, `grade`, `curriculum`, `subject` — из geo_tutor-master (фильтр по параграфам) |
 | **Checkpointer сессий** | AsyncSqliteSaver (LangGraph) | Возобновление графа после долгих операций и перезапусков; асинхронный saver — не блокирует event loop (В-4) |
 
 ### 3.4. API и UI
@@ -486,6 +572,40 @@ class IntakeState(BaseModel):
 | Школьник загрузил **сканированный** учебник | upload → `detect_text_layer` (нет текстового слоя) → **ask_page_range**: «открой учебник, укажи страницы (12-15) и тему/урок» → `parse_doc_request` → физический диапазон (буфер `OCR_PAGE_BUFFER` + оффсет) → **ocr_pages** (ru+en) → `validate_topic_in_text` → чанки (`page_number`) → индекс → квиз; «не знаю» → повторный запрос (≤ `OCR_MAX_ATTEMPTS`), затем «все»/отмена | 
 | Пользователь отвечает «не знаю» на всё | 2 итерации без прогресса → **экстренный старт** с минимальным набором (В-3) |
 
+### 5.4. Модельно-управляемое интервью (целевое)
+
+> **Текущее:** чек-лист исполняется как форма — `intake_node` по очереди берёт первое
+> недостающее поле и задаёт вопрос из `INTAKE_QUESTIONS`; ответ парсится regex-ами
+> `normalize_answer`. Модель в цикле интервью отсутствует.
+> **Сделано (Уровень 2 + Фаза 1, август 2026):** `extract_intake_fields` подключён в
+> `intake_node` (детерминированный фолбэк) и в **`agent_loop`** (`src/agent_loop.py`) —
+> модель ведёт интервью через function calling и сама решает, когда данных достаточно.
+> Один развёрнутый ответ заполняет несколько полей разом; вопросы чек-листа переработаны
+> (разговорные, без избыточного `chapter`); распознаются сегменты «все»/«нет».
+> **Целевое:** чек-лист остаётся **схемой данных** (поля, порядок, обязательность — 5.2),
+> интервью ведёт `agent_loop` (2.3): модель формулирует вопросы свободно, понимает
+> развёрнутые ответы, извлекает несколько полей из одной фразы и сама решает, когда данных
+> достаточно.
+
+**Как работает (Reason → Act → Observe):**
+
+1. **Reason.** Модель вызывает `interview_progress()` → видит пустые поля чек-листа.
+2. **Act.** Выбирает действие: `set_intake(field, value)` (одно поле) либо
+   `extract_entities(text)` (несколько сущностей из свободной фразы ученика).
+3. **Observe.** Детерминированный валидатор `validate_intake` (5.2) — единственный источник
+   истины о достаточности (`ask` / `start` / `emergency_start`). Модель получает результат
+   и решает, что дальше: ещё вопрос / смена формулировки / старт.
+
+**Гарантии:**
+- Валидация достаточности и экстренный старт (В-3) остаются детерминированными — модель не
+  может «продавить» старт с недостаточными данными.
+- «Не знаю» и ответы не по теме → поле не заполняется, итерация без прогресса (счётчики В-3).
+- Ученик может ответить на весь чек-лист одной фразой — `extract_entities` заполнит несколько
+  полей за один ход (меньше итераций, чем пошаговая форма).
+- Потолок на интервью: `MAX_INTAKE_ITERATIONS` + контроль прогресса — приоритет над моделью.
+- `set_intake` принимает только нормализованные значения (типы валидируются
+  детерминированно, переиспользуется `normalize_answer` как финальный фильтр).
+
 ---
 
 ## 6. Авто-поиск и сбор учебных материалов (crawl4ai)
@@ -495,8 +615,8 @@ class IntakeState(BaseModel):
 > **Реальность источников (решение заказчика):** полный PDF учебника с сайта издательства («Просвещение» и др.) легально **не скачать** — издательства продают/предоставляют учебники по лицензиям (для школ), открытого легального PDF нет. Поэтому **find_textbook ориентирован не на «скачать учебник целиком», а на сбор материалов по теме** с легальных источников (Plan A). Если пользователь не загрузил учебник сам — агент собирает коллекцию материалов по теме (подграф `web_search`), а не ищет пиратский PDF.
 >
 > **Источники контента — Plan A / Plan B (В-2, решение заказчика):**
-> - **Plan A (легальные открытые источники):** локальные PDF-учебники из каталога Downloads (`_56_klassy_alekseev_a_i_2024.pdf`, `istoria-vseobsaa-istoria-istoria-srednih-vekov-6-klass.pdf` и др.), Викиучебник (ru.wikibooks.org) и открытые коллекции, поиск через Tavily/Yandex по открытым сайтам.
-> - **Ограничение:** РЭШ (resh.edu.ru) и НЭБ (rusneb.ru) имеют **антибот-защиты**; **капчу НЕ обходим** (это запрещено/нереализуемо) — при блокировке автоматически переходим на другие источники Plan A.
+> - **Plan A (легальные открытые источники):** локальные PDF-учебники из каталога Downloads (`_56_klassy_alekseev_a_i_2024.pdf`, `istoria-vseobsaa-istoria-istoria-srednih-vekov-6-klass.pdf` и др.), **Библиотека цифрового образовательного контента Минпросвещения (lesson.edu.ru/catalog)** — preferred открытая библиотека по ФГОС, Викиучебник (ru.wikibooks.org) и открытые коллекции, поиск через Tavily/Yandex по открытым сайтам.
+> - **Ограничение:** РЭШ (resh.edu.ru) и НЭБ (rusneb.ru) имеют **антибот-защиты**; **капчу НЕ обходим** (это запрещено/нереализуемо) — при блокировке автоматически переходим на другие источники Plan A (в первую очередь lesson.edu.ru).
 > - **Plan B (приёмка):** локальные PDF из Downloads используются как основной материал демо-сценариев (`schoolchild_grade6_geography` и др.) — не требует авто-поиска.
 
 ### 6.1. Инструменты
@@ -570,7 +690,7 @@ REASON  │ Анализ текущего состояния:
         │ → Решение: generate_question / explain / summarize
         ▼
 ACT     │ Выполнение действия:
-        │ • RAG-поиск: векторный (ChromaDB/NumpyStore, фильтр subject+grade+chapter)
+        │ • RAG-поиск: векторный (Qdrant/NumpyStore, фильтр subject+grade+chapter)
         │   + BM25 (Okapi) с fusion через RRF (гибридный retrieval, HYBRID_RAG=true)
         │   → top-K чанков
         │ • Дешёвая модель: простые фактологические вопросы; TUTOR_MODEL: сложные
@@ -612,14 +732,66 @@ OBSERVE │ Оценка результата:
 | `crawl_textbook_catalog(...)` | Поиск учебника в каталогах-агрегаторах (crawl4ai, только как указатель) | Нет учебника, есть класс/предмет/автор |
 | `crawl_page_js(url)` | Загрузка JS-рендеримых страниц **без обхода защит** (crawl4ai) | Поиск ссылки на PDF на официальном ресурсе |
 | `download_file(url, dest)` | Скачивание PDF/DOCX с валидацией | Учебник найден на легальном источнике |
-| `process_document(file)` | Docling → чанки → ChromaDB; если скан → `ask_page_range` → `ocr_pages` | Обучаемый загрузил / найден PDF/DOCX |
+| `process_document(file)` | Docling → чанки → Qdrant; если скан → `ask_page_range` → `ocr_pages` | Обучаемый загрузил / найден PDF/DOCX |
 | `ocr_pages(pdf, pages, langs)` | EasyOCR (ru+en) по указанным страницам | Загружен сканированный учебник, страницы известны |
-| `rag_search(query, k)` | Семантический поиск по ChromaDB (фильтр по классу/главе) | Генерация вопроса / объяснение |
+| `rag_search(query, k)` | Семантический поиск по Qdrant (фильтр по классу/главе) | Генерация вопроса / объяснение |
 | `get_knowledge_graph()` | Граф знаний учебника (NetworkX): темы/уроки + связи (part_of/prerequisite/related) | Подготовка по темам: выбрать урок → квиз по нему (раздел 7) |
 | `export_knowledge_package()` | **OKF (Open Knowledge Format v0.2)** бандл знаний учебника (index + log + topics/*.md с YAML-frontmatter) | Переносимость/интероперабельность: `GET /api/sessions/{id}/knowledge-package` (раздел 7) |
 | `classify_intent(query)` | Интент: rule-based/классификатор с few-shot + fallback (В-1) | Разбор первичного запроса |
 | `extract_entities(query)` | NER: шаблонно-регексный парсер + LLM-дополнение (В-1) | Парсинг темы/класса/автора/главы |
 | `save_progress(data)` | Сохранение прогресса обучаемого | После каждого ответа |
+
+### 7.3. Агентный цикл тьюторинга (целевое) и исправление известных проблем
+
+> **Текущее:** квиз — детерминированный цикл `generate_question → evaluate_answer → summary`.
+> **Сделано (Фаза 0):**
+> - [x] **7.3.2 Антидубликат** — `asked_questions` хранит тексты; история в промпт
+>       `_question_prompt`; cosine-guard `is_duplicate_question` (`QUESTION_DEDUPE_THRESHOLD=0.85`,
+>       `QUESTION_DEDUPE_RETRIES=2`) с регенерацией в `generate_question_node`.
+> - [x] **7.3.3 Видимость урока/разбора** — `tutor.lesson` добавлен в `WsEvent`; урок в
+>       `message_response` (тип `lesson`) и в ответе `select_topic`; `agent_question`
+>       подтверждения ставится в том же шаге; фронтенд: `answerResolvedEvents` + resync.
+> - [x] **7.3.4 explain/deep_dive** — `content_node` (диспетчер по режиму), генераторы
+>       `generate_explanation`/`generate_deep_dive`; ветки в `route_after_topic_gate`.
+> **Целевое:** квиз/урок/объяснение/глубокий разбор — инструменты `agent_loop` (2.3).
+
+#### 7.3.1. Целевой поток
+
+```
+REASON  │ История диалога + состояние (intake, knowledge_map, bandit, records).
+        │ Решение модели: следующий вопрос / объяснение / смена сложности / урок /
+        │ глубокий разбор / завершение.
+ACT     │ Вызов инструмента: rag_search → generate_quiz / generate_lesson /
+        │ explain_error / deep_dive / finish_session.
+OBSERVE │ Результат инструмента → history → модель решает продолжать или завершить.
+```
+
+#### 7.3.2. Антидубликат вопросов (исправление «вопросы дублируются логически»)
+
+1. `state.asked_questions` хранит **тексты** вопросов (не только id).
+2. Промпт `generate_quiz` получает список уже заданных вопросов с инструкцией «не повторяй
+   эти вопросы по смыслу» + RAG-запрос с фильтром по уже покрытым `section_number`.
+3. Детерминированный guard на выходе: эмбеддинг нового вопроса vs эмбеддинги заданных
+   (cosine, порог `QUESTION_DEDUPE_THRESHOLD=0.85`) → при превышении регенерация
+   (не более `QUESTION_DEDUPE_RETRIES=2`), затем — следующий чанк/параграф.
+
+#### 7.3.3. Видимость урока и разбора (исправление «пользователь не видит урок»)
+
+1. Артефакты `lesson_text` / `explanation` хранить в state и отдавать через `message_response`
+   и resync (не только через WS-событие) — раздел 8.2.
+2. `select_topic` (8.1) возвращает поле `lesson`/`explanation`, а не только `question`.
+3. WS-событие `tutor.lesson` включить в `answerResolvedEvents` фронтенда (9.2).
+4. После генерации урока в том же шаге ставить `agent_question` (подтверждение перехода
+   к квизу) — исключить «зависший» ход без вопроса.
+
+#### 7.3.4. Режимы explain / deep_dive (исправление «мёртвых» режимов)
+
+- `mode="explain"` → `explain_error`-инструмент по последнему неверному ответу/теме.
+- `mode="deep_dive"` → `deep_dive`-инструмент: multi-chunk синтез по нескольким секциям
+  графа знаний (prerequisite/related), структурированный разбор с цитатами §N.
+  **Опционально** deep_dive реализуется как внутренний подграф в стиле Deep Agents
+  (менеджер → воркеры по секциям → валидатор цитат), не затрагивая основной цикл.
+- `route_after_topic_gate` (2.2) получает ветки для обоих режимов до перехода в квиз.
 
 ---
 
@@ -697,12 +869,20 @@ class WsEvent(BaseModel):
         "source.progress",    # {stage: "catalog"|"download"|"verify"|"index", url: str, status: str}
         "source.failed",      # {session_id: str, source_id: str, reason: str} — эмитится узлом source_failed (В-3, Ж-4)
         "quiz.card",          # QuizCard
+        "tutor.lesson",       # {text, topic} — урок/объяснение/глубокий разбор
         "tutor.explanation",  # {text, citation: {paragraph, source}}
         "tutor.summary",      # {correct, total, knowledge_map}
+        "token",              # {text} — реальный стриминг токенов (stream=True) при генерации урока/объяснения
         "session.error",      # {code, message}
     ]
     data: Dict[str, Any]
 ```
+
+> **Реальный стриминг токенов (stream=True):** при генерации урока/объяснения/глубокого
+> разбора токены LLM стримятся в браузер событием `token` (`{text: <фрагмент>}`) через
+> `LLMClient.chat_stream(on_chunk=...)` → `GraphDeps.on_token` → WS. Финальный текст приходит
+> событием `tutor.lesson`. Это настоящий поток, а не имитация (в отличие от референса
+> real-time-a2a-agent, где используется `stream=False` и посимвольная имитация).
 
 > **Ж-4:** событие `source.failed` эмитится узлом **`source_failed`** графа (раздел 2.2, В-3) — материалов по теме нет вообще. Поля: `session_id`, `source_id` (идентификатор последнего обработанного источника/шага поиска), `reason` (например: `empty_result`, `license_blocked`, `search_timeout`). UI отображает причину и предлагает загрузку собственного документа (`upload`).
 
@@ -812,7 +992,7 @@ edututor.session                            ← корневой (session_id, to
 │   └── source.source_failed               ← материалов нет вообще (В-3)
 ├── knowledge.grade_curriculum             ← справочник ФГОС + LLM-сверка (В-8)
 ├── knowledge.process_document              ← Docling (файл, чанки, время)
-│   └── knowledge.chunk_and_index          ← индексация в ChromaDB
+│   └── knowledge.chunk_and_index          ← индексация в Qdrant
 ├── guardrail.prompt_injection             ← проверка на injection
 ├── guardrail.content_filter               ← контент-фильтр
 ├── tutor.generate_question                ← генерация вопроса
@@ -879,7 +1059,7 @@ edututor/
 │   ├── states.py                   # Pydantic-модели состояний (IntakeState, TutorState)
 │   ├── intake.py                   # Чек-лист + validate_intake (достаточность + прогресс, В-3)
 │   ├── source_finder.py            # crawl4ai: поиск/скачивание учебника (легальные источники), crawl_page_js
-│   ├── knowledge.py                # Docling + ChromaDB (обработка документов)
+│   ├── knowledge.py                # Docling + Qdrant (обработка документов)
 │   ├── cheap_llm.py                # Дешёвые роли: суммаризация, рерайтинг, простые вопросы, пре-оценка, intent-fallback
 │   ├── nlp.py                      # НОВОЕ: rule-based intent + regex-NER + LLM-дополнение (В-1)
 │   ├── tutor.py                    # Генерация квизов, оценка ответов, update_knowledge_map, адаптация сложности
@@ -976,7 +1156,8 @@ cd frontend && npm install && npm run dev
 | FastAPI / uvicorn | последняя стабильная | async + WebSocket |
 | Docling | последняя стабильная | PDF/DOCX → Markdown |
 | crawl4ai | последняя стабильная | `crawl_page_js` (dynamic rendering); **обязателен `python -m playwright install chromium` (В-3)** |
-| ChromaDB | последняя стабильная | персистентная, встроенная (отдельный сервис не нужен) |
+| Qdrant | последняя стабильная | основной векторный бэкенд: server (`QDRANT_URL`) или embedded (`QDRANT_PATH`, без Docker); коллекция создаётся при старте (миграция) |
+| ChromaDB | опционально | альтернативный бэкенд (`VECTOR_STORE=chroma`), встроенная, отдельный сервис не нужен |
 | sentence-transformers | последняя стабильная | основной embedding (intfloat/multilingual-e5-small) |
 | Phoenix (arize-phoenix) | последняя стабильная | OTLP-коллектор + openinference-instrumentation-openai |
 | Ollama | опционально | CPU-режим медленный: qwen2.5:3b ≈ 5–15 с/вызов — только если включён |
@@ -988,10 +1169,10 @@ cd frontend && npm install && npm run dev
 | # | Вопрос | Ответ для EduTutor |
 |---|--------|--------------------|
 | 1 | Какую полезную задачу решает агент? | Адаптивный тьюторинг для студентов и **школьников N-го класса**: авто-поиск учебника в легальных источниках → разбор → квизы → объяснение ошибок → карта знаний → прогресс |
-| 2 | Где агент сам выбирает следующее действие? | LangGraph: **conditional edges** (route_learner, route_grade, route_source, route_textbook_result, route_web_search_result) + после оценки ответа → следующий вопрос / объяснение / смена сложности / завершение |
+| 2 | Где агент сам выбирает следующее действие? | Два уровня: **агентный цикл `agent_loop`** (2.3) — LLM выбирает действие среди инструментов (интервью, retrieval, урок/квиз/объяснение/глубокий разбор, делегирование в `source_fsm`, завершение), получает результат и решает, продолжать или завершить; + **детерминированные conditional edges** FSM для инфраструктуры (source/OCR/индексация/экспорт) |
 | 3 | Когда и почему выбирается каждая модель? | Дешёвые (API-модели RouterAI, напр. google/gemma-3-4b-it; Ollama — опционально) — суммаризация/рерайтинг/простые вопросы/пре-оценка; rule-based+fallback — intent/NER (В-1); Тьютор (qwen3.7-flash) — генерация и оценка в основном потоке; Expert (deepseek-v4-flash) — deep dive и оценка сложных/нестандартных ответов (критерий Ж-8); Judge (Gemini другого семейства на RouterAI — без VPN, К-4) — 3 контракта качества |
-| 4 | Какой инструмент вызывает модель через function calling? | `rag_search`, `search_web`, `fetch_url`, `fetch_html`, `crawl_textbook_catalog`, `crawl_page_js`, `download_file`, `process_document`, `classify_intent`, `extract_entities`, `save_progress` |
-| 5 | Когда агент решает обратиться к памяти? | Перед генерацией каждого вопроса — RAG-поиск по ChromaDB (фильтр по классу/главе) + **knowledge_map** (приоритет слабых тем). Если нет релевантного — `search_web` для дополнения |
+| 4 | Какой инструмент вызывает модель через function calling? | `interview_progress`, `set_intake`, `extract_entities`, `rag_search`, `get_knowledge_graph`, `generate_lesson`, `generate_quiz`, `explain_error`, `deep_dive`, `route_to_source`, `finish_session` — через `TOOL_FUNCTIONS`/`execute_tool` (`src/tools.py`) + цикл обработки `tool_calls` в `agent_loop` (2.3); инфраструктурные `search_web`, `fetch_url`, `download_file`, `ocr_pages` — детерминированно в `source_fsm` |
+| 5 | Когда агент решает обратиться к памяти? | Модель решает, нужен ли retrieval: перед генерацией урока/вопроса/объяснения `rag_search` **обязателен** (инвариант 2.3); ученик задал свободный вопрос по контексту → `rag_search`; нет релевантного результата → `route_to_source` для дополнения источников; иначе — `knowledge_map` для приоритета слабых тем (Ж-6) |
 | 6 | Где ветвление, повтор шага и условие остановки? | Ветвление: intake-валидация, тип обучаемого, класс, источник, `source_failed`. Повтор: adaptive difficulty, цикл уточнений (≤3 **и ≤2 итераций без прогресса**), anti-repeat. Остановка: `MAX_LLM_CALLS_PER_SESSION`, суммарный бюджет `MAX_COST_USD` и бюджеты по ролям, `MAX_QUESTIONS_PER_SESSION`, квиз завершён (В-7) |
 | 7 | Как доказать, что система работает? | Unit-тесты, golden set + **EduTutorEval** (новый модуль, В-6), три контракта LLM-as-Judge, Phoenix-трейсы, guardrails, метрики (вкл. успешность find_textbook, отказы дешёвых ролей) в project_report.md |
 
@@ -1025,7 +1206,7 @@ cd frontend && npm install && npm run dev
 | **Очистка текста PDF** | `clean_pdf_text()` (`pdf_processor.py`) — восстановление переносов, удаление колонтитулов, нормализация пробелов с защитой Markdown-таблиц | Переиспользуем 1:1 |
 | **Детекция параграфов** | `extract_sections(text, start=39, end=48)` (`app_final.py:198`) — regex `§N`/«Параграф N» → `section_number`/`section_title`/`source`; словарь `SECTION_TITLES` (`app_final.py:132`) **содержит только §39–§48**, UI и поиск жёстко завязаны на этот диапазон | **Ограничение клона**: работает только для учебника «География 5–6 класс, Алексеев» (§39–§48 «Атмосфера»). Для других учебников — **новая разработка**: диапазон и словарь заголовков из структуры документа, параметризация по учебнику/классу |
 | **Обогащение чанков** | `create_chunks_hybrid()` (`app_final.py:234`) — Docling `HybridChunker`, префикс «Параграф N: название» в чанке → точнее RAG | Переиспользуем; добавить метаданные `grade`/`subject` |
-| **Фильтр по диапазону** | `search_context(query, top_k, section_filter, use_rerank)` (`app_final.py:463`) — ChromaDB `where` по параграфам | Переиспользуем; расширяем на `grade`/`subject` |
+| **Фильтр по диапазону** | `search_context(query, top_k, section_filter, use_rerank)` (`app_final.py:463`) — ChromaDB `where` по параграфам (в клоне geo_tutor) | Переиспользуем; бэкенд — Qdrant `Filter` по параграфам, расширяем на `grade`/`subject` |
 | **Генерация теста JSON** | `generate_test()` (`app_final.py:747`) — JSON-массив (single/multiple, explanation, paragraph), retry ×3, авто-закрытие скобок, валидация, temperature 0.3 | Переиспользуем; доработка: Pydantic-схема `QuizCard` (В-4), число вопросов из intake |
 | **Оценка ответа** | `check_answer()` (`app_final.py:855`) — LLM-промпт «экзаменатор»: формат «Оценка 2–5 / краткое пояснение / номер параграфа / доп. пояснение» + fallback-оценка «3» при сбое (2 попытки). Арифметический расчёт 5/4/3/2 по score/max (`app_final.py:959`) — **отдельно**, только для теста с вариантами (`show_test_results`) | **Доработка (не 1:1), частично с нуля**: формат — неструктурированная Markdown-строка, оценку нельзя извлечь программно. Для EduTutor — **новая разработка структурированного контракта** (Pydantic: `score` 0..10, `feedback`, `citation_ok`) + интеграция с судьёй «оценка ответа ученика» (К-4) |
 | **Защита от повторов вопросов** | `gen_question(key, ctxs, model, asked_questions)` (`app_final.py:682`) + `st.session_state.asked_questions` (`app_final.py:1104`, история ≤20) — anti-repeat по ключевым словам последних 5 вопросов, случайный параграф и тип вопроса | Переиспользуем механику anti-repeat; **доработка**: история в state графа (не `st.session_state`), приоритет слабых тем из `knowledge_map` (Ж-6), типы вопросов из квиз-карточек |
@@ -1097,9 +1278,10 @@ CRAWL_RATE_LIMIT_SEC=1.5
 MAX_CRAWL_PAGES=20
 MAX_TEXTBOOK_SEARCH_SEC=300
 # Источники Plan A (В-2): локальные PDF из Downloads, Викиучебник (ru.wikibooks.org),
-# открытые коллекции, поиск Tavily/Yandex по открытым сайтам; РЭШ/НЭБ имеют антибот-защиты —
+# открытые коллекции, поиск Tavily/Yandex по открытым сайтам; lesson.edu.ru — открытая
+# библиотека Минпросвещения (preferred, без антибот-защиты); РЭШ/НЭБ имеют антибот-защиты —
 # капчу НЕ обходим, при блокировке переходим на другие источники Plan A (К-2, раздел 6).
-TEXTBOOK_CATALOGS=ru.wikibooks.org,resh.edu.ru,rusneb.ru
+TEXTBOOK_CATALOGS=lesson.edu.ru,ru.wikibooks.org,resh.edu.ru,rusneb.ru
 
 # --- OCR сканированных учебников (раздел 3.2) ---
 OCR_LANGUAGES=ru,en                    # языки EasyOCR (всегда обе)
@@ -1124,9 +1306,18 @@ FGOS_REFERENCE_DIR=./data/fgos_reference
 TEXTBOOKS_DOWNLOADS_DIR=./downloads
 
 # --- Хранилище ---
+# VECTOR_STORE: numpy (портативный, без MSVC) | chroma (ChromaDB) | qdrant (roadmap #1)
+VECTOR_STORE=numpy
 CHROMA_PERSIST_DIR=./data/chroma        # персистентная БД
 SOURCES_CACHE_DIR=./data/sources_cache  # кэш скачанных файлов/HTML
 CHECKPOINT_DB=./data/checkpoints.db     # AsyncSqliteSaver (LangGraph) (В-4, В-5)
+
+# --- Qdrant (roadmap #1; VECTOR_STORE=qdrant) ---
+# server-режим (docker compose up -d qdrant): QDRANT_URL=http://localhost:6333
+QDRANT_URL=http://localhost:6333
+QDRANT_API_KEY=
+# embedded-режим (без Docker, персистентный локальный каталог):
+# QDRANT_PATH=./data/qdrant
 
 # --- Лимиты (В-7) ---
 MAX_LLM_CALLS_PER_SESSION=90            # вместо MAX_STEPS: страховка от зацикливания графа (В-6)
@@ -1209,7 +1400,7 @@ API_PORT=8000
 - [ ] [МВП] Phoenix: спаны intake.checklist, intake.validate
 
 ### Этап 2 — Парсинг и индексация документов (RAG) · ~1 неделя
-**Задачи:** `process_document` (Docling → pdfplumber → OCR, из pdf_processor.py geo_tutor-master); очистка текста; детекция параграфов; обогащение чанков; ChromaDB с метаданными (subject, grade, section_number); **embeddings `intfloat/multilingual-e5-small` (основной, многоязычный, русский)**; Ollama `nomic-embed-text` — опционально; реранкинг.
+**Задачи:** `process_document` (Docling → pdfplumber → OCR, из pdf_processor.py geo_tutor-master); очистка текста; детекция параграфов; обогащение чанков; Qdrant с метаданными (subject, grade, section_number); **embeddings `intfloat/multilingual-e5-small` (основной, многоязычный, русский)**; Ollama `nomic-embed-text` — опционально; реранкинг.
 **Чек-лист приёмки:**
 - [ ] [МВП] Учебник/коллекция материалов 300+ страниц индексируется без OOM (pdfplumber fallback срабатывает)
 - [ ] [МВП] Чанки содержат section_number/section_title/source; фильтр по главе работает
@@ -1302,7 +1493,7 @@ API_PORT=8000
 - [ ] [МВП] Инструмент вызывается через function calling (раздел 8.1)
 - [ ] [МВП] Описана Standard Operation Procedure: когда/как агент использует инструмент, обработка результата и ошибок, ограничения (раздел 8.3)
 - [ ] [МВП] Обработаны базовые ошибки вызова инструмента (разделы 8.3, 3.7)
-- [ ] [МВП] Подключена векторная память/хранилище (ChromaDB, раздел 3.3)
+- [ ] [МВП] Подключена векторная память/хранилище (Qdrant, раздел 3.3)
 - [ ] [МВП] Реализован семантический поиск релевантной информации (раздел 3.3)
 - [ ] [МВП] Агент управляет retrieval: решает, нужен ли поиск, формирует запрос, повторяет или завершает (разделы 6, 8.1)
 - [ ] [МВП] Логирование с уникальным ID запроса пользователя для трассировки по этапам (разделы 3.6, 10.2)
@@ -1341,7 +1532,7 @@ python scripts/model_probe.py         # Этап 0: тест-колл досту
 
 1. **Intake:** запустить сессию → чек-лист → намеренно не указать класс → уточняющий вопрос → старт; «не знаю» на всё → экстренный старт через 2 итерации без прогресса (В-3)
 2. **Сбор материалов:** «6 класс, география, Алексеев» без файла → показать цепочку: легальные платформы (РЭШ/конспекты) → license_check → загрузка → Docling → чанки; полный PDF учебника не ищется (К-2, раздел 6)
-3. **Docling:** загрузить PDF → показать чанки в ChromaDB (метаданные §, класс, предмет)
+3. **Docling:** загрузить PDF → показать чанки в Qdrant (метаданные §, класс, предмет)
 4. **Квиз:** пройти 5 вопросов → показать адаптацию сложности, роли моделей (дешёвая/тьютор) и обновление knowledge_map (Ж-6)
 5. **Объяснение:** ответить неправильно → объяснение с цитатой и §N
 6. **Судья:** показать оценки по трём контрактам (вопрос/объяснение/оценка) (К-4)
@@ -1391,6 +1582,17 @@ python scripts/model_probe.py         # Этап 0: тест-колл досту
 - [ ] Кнопки-горячки `1, 2, 3, 4...` для вариантов квиза (keyboard shortcuts)
 - [ ] Граф знаний: пульсация активного узла SVG circle (css animation: pulse-glow на `.kg-node.active`)
 - [ ] Dark mode toggle
+
+**Фаза 4 — Агентность (критично для требований курса; целевая архитектура — разделы 2.3, 5.4, 7.3):**
+| # | Задача | Статус | Приоритет | Зависимость |
+|---|--------|--------|-----------|-------------|
+| 1 | Багфиксы FSM: антидубликат вопросов (7.3.2), видимость урока (7.3.3), ветки `explain`/`deep_dive` (7.3.4) | ✅ | Высокий | — |
+| 2 | Слой агентных инструментов `src/agent_tools.py`: `AGENT_TOOLS` + `TOOL_SCHEMAS` + `execute_agent_tool` (11 инструментов) | ✅ | Высокий | — |
+| 3 | `extract_intake_fields` (много-полевое извлечение) как инструмент; чек-лист переработан (без `chapter`) | ✅ | Высокий | — |
+| 4 | `agent_loop` для intake: модель ведёт интервью через tools; `validate_intake` остаётся детерминированным (5.4) | ✅ | Высокий | П.2 |
+| 5 | Подключить `TOOL_SCHEMAS` к `LLMClient.chat(tools=...)`; цикл обработки `tool_calls` в `agent_loop` (2.3) | ✅ | Высокий | П.4 |
+| 6 | Агент в квизе: `evaluate_answer`/`generate_quiz`/`explain_error`/`deep_dive`/`finish_session` как инструменты (`USE_AGENT_TUTOR`) | ✅ | Средний | П.5 |
+| 7 | Наблюдаемость инструментов: `action`/`reason_summary`/`status` (10.2) | ⬜ | Средний | П.6 |
 
 ---
 

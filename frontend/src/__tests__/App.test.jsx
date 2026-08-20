@@ -11,7 +11,7 @@ vi.mock('../api', async () => {
       createSession: vi.fn().mockResolvedValue({ session_id: 'sess-1' }),
       intakeStatus: vi.fn().mockResolvedValue({
         missing_fields: ['learner_type'],
-        next_question: 'Кто ты? (студент / ученик N класса)',
+        next_question: 'Для кого готовим материал — ученик какого класса или студент?',
         complete: false,
       }),
       postIntake: vi.fn().mockResolvedValue({ missing_fields: [], complete: true }),
@@ -41,7 +41,7 @@ describe('App', () => {
     expect(screen.getByText(/Сессия создаётся/)).toBeInTheDocument()
 
     // вопрос показывается дважды: в ленте и в карточке IntakeWizard
-    const questions = await screen.findAllByText(/Кто ты\?/)
+    const questions = await screen.findAllByText(/Для кого готовим материал/)
     expect(questions.length).toBeGreaterThan(0)
     expect(screen.getByPlaceholderText('Ваш ответ…')).toBeEnabled()
   })
@@ -49,7 +49,7 @@ describe('App', () => {
   it('ответ в чек-лист вызывает postIntake', async () => {
     const user = userEvent.setup()
     render(<App />)
-    await screen.findAllByText(/Кто ты\?/)
+    await screen.findAllByText(/Для кого готовим материал/)
 
     await user.type(screen.getByPlaceholderText('Ваш ответ…'), 'студент')
     await user.click(screen.getByRole('button', { name: 'Отправить' }))
@@ -59,7 +59,7 @@ describe('App', () => {
 
   it('WS-событие quiz.card рисует карточку вопроса', async () => {
     render(<App />)
-    await screen.findAllByText(/Кто ты\?/)
+    await screen.findAllByText(/Для кого готовим материал/)
 
     const ws = globalThis.WebSocket.instances[globalThis.WebSocket.instances.length - 1]
     ws.onmessage({
@@ -83,7 +83,7 @@ describe('App', () => {
 
   it('WS-событие source.failed выводит ошибку', async () => {
     render(<App />)
-    await screen.findAllByText(/Кто ты\?/)
+    await screen.findAllByText(/Для кого готовим материал/)
 
     const ws = globalThis.WebSocket.instances[globalThis.WebSocket.instances.length - 1]
     ws.onmessage({
@@ -94,5 +94,23 @@ describe('App', () => {
     })
 
     expect(await screen.findByText('Материалы не найдены')).toBeInTheDocument()
+  })
+
+  it('source.progress сбрасывает баннер чек-листа', async () => {
+    render(<App />)
+    await screen.findAllByText(/Для кого готовим материал/)
+    expect(screen.getByText(/Чек-лист/)).toBeInTheDocument()
+
+    const ws = globalThis.WebSocket.instances[globalThis.WebSocket.instances.length - 1]
+    ws.onmessage({
+      data: JSON.stringify({
+        event: 'source.progress',
+        data: { stage: 'catalog', status: 'searching', message: 'Поиск материалов по теме…' },
+      }),
+    })
+
+    expect(await screen.findByText('Поиск материалов по теме…')).toBeInTheDocument()
+    // баннер чек-листа должен исчезнуть (фаза источника = intake завершён)
+    await waitFor(() => expect(screen.queryByText(/Чек-лист/)).not.toBeInTheDocument())
   })
 })

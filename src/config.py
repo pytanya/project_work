@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from dotenv import load_dotenv
 from pydantic import Field, field_validator
@@ -77,7 +77,7 @@ class Settings(BaseSettings):
     # true — выбор сложности бандитом (контекст: мастерство/класс/недавний результат);
     # false — эвристика adjust_difficulty (3 верных → ↑, 2 ошибки → ↓).
     ADAPTIVE_BANDIT: bool = Field(default=True)
-    CHEAP_MODEL: str = Field(default="google/gemma-3-4b-it")
+    CHEAP_MODEL: str = Field(default="google/gemma-3-12b-it")
     CHEAP_FALLBACK_MODEL: str = Field(default="qwen/qwen3.7-flash")
     CHEAP_TIMEOUT_SEC: float = Field(default=30.0, gt=0)
 
@@ -102,7 +102,7 @@ class Settings(BaseSettings):
     CRAWL_RATE_LIMIT_SEC: float = Field(default=1.5, ge=0.0)
     MAX_CRAWL_PAGES: int = Field(default=20, ge=1)
     MAX_TEXTBOOK_SEARCH_SEC: float = Field(default=300.0, gt=0)
-    TEXTBOOK_CATALOGS: str = Field(default="ru.wikibooks.org,resh.edu.ru,rusneb.ru")
+    TEXTBOOK_CATALOGS: str = Field(default="lesson.edu.ru,ru.wikibooks.org,resh.edu.ru,rusneb.ru")
     CRAWL4AI_PLAYWRIGHT_ENABLED: bool = Field(default=True)
     CRAWL4AI_PLAYWRIGHT_HEADLESS: bool = Field(default=True)
     CRAWL4AI_PLAYWRIGHT_TIMEOUT_MS: int = Field(default=30000, gt=0)
@@ -128,6 +128,16 @@ class Settings(BaseSettings):
     CHECKPOINT_DB: Path = Field(default=BASE_DIR / "data" / "checkpoints.db")
     # Дисковый кэш графов знаний учебников (per-textbook, переживает сессии)
     KNOWLEDGE_GRAPH_DIR: Path = Field(default=BASE_DIR / "data" / "knowledge_graphs")
+    # Knowledge Wiki (roadmap #2): персистентные wiki-статьи по subject/topic
+    # (markdown + YAML-frontmatter OKF v0.2), накапливаются между сессиями
+    KNOWLEDGE_WIKI_DIR: Path = Field(default=BASE_DIR / "data" / "knowledge_wiki")
+
+    # --- Qdrant векторное хранилище (roadmap #1; VECTOR_STORE=qdrant) ---
+    # Режим сервера (docker-compose.yml): QDRANT_URL=http://localhost:6333.
+    # Embedded-режим (без Docker, персистентный каталог): задать QDRANT_PATH.
+    QDRANT_URL: str = Field(default="http://localhost:6333")
+    QDRANT_API_KEY: str = Field(default="")
+    QDRANT_PATH: Optional[Path] = Field(default=None)
 
     # --- Лимиты (В-7) ---
     MAX_LLM_CALLS_PER_SESSION: int = Field(default=90, ge=1)
@@ -136,6 +146,17 @@ class Settings(BaseSettings):
     TUTOR_ALLOWANCE_USD: float = Field(default=0.5, ge=0.0)
     JUDGE_ALLOWANCE_USD: float = Field(default=0.5, ge=0.0)
     MAX_QUESTIONS_PER_SESSION: int = Field(default=15, ge=1)
+    # Агентный intake (спека 5.4): true — intake ведёт agent_loop с function calling
+    # (детерминированный фолбэк сохраняется); false — классический пошаговый чек-лист.
+    USE_AGENT_INTAKE: bool = Field(default=True)
+    # Агент в квизе (спека 7.3.1): true — тьюторинг ведёт agent_loop (модель выбирает
+    # следующее действие через tools); false — детерминированный цикл квиза (быстрее,
+    # по умолчанию: агентный ход квиза добавляет ~30-60с на ответ из-за 2-3 LLM-вызовов).
+    USE_AGENT_TUTOR: bool = Field(default=False)
+    # Антидубликат вопросов (спека 7.3.2): cosine-порог семантической близости
+    # нового вопроса к уже заданным; при превышении — регенерация (≤ RETRIES раз).
+    QUESTION_DEDUPE_THRESHOLD: float = Field(default=0.85, ge=0.0, le=1.0)
+    QUESTION_DEDUPE_RETRIES: int = Field(default=2, ge=0)
     # TTL бездействия сессии (сек) — устаревшие сессии очищаются сервером
     SESSION_IDLE_TTL_SEC: float = Field(default=1800.0, gt=0)
     # Таймаут одного шага графа (сек) — зависшие операции не блокируют сессию
@@ -200,6 +221,7 @@ class Settings(BaseSettings):
     @field_validator(
         "FGOS_REFERENCE_DIR", "TEXTBOOKS_DOWNLOADS_DIR", "CHROMA_PERSIST_DIR",
         "SOURCES_CACHE_DIR", "CHECKPOINT_DB", "KNOWLEDGE_GRAPH_DIR", "LOGS_DIR", "OUTPUT_DIR",
+        "QDRANT_PATH", "KNOWLEDGE_WIKI_DIR",
         mode="before",
     )
     @classmethod

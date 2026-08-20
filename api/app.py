@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
 
 from .engine import SessionStore
-from .routes import documents, graph, intake, messages, sessions, source
+from .routes import documents, graph, intake, messages, sessions, source, wiki
 
 
 def create_app(store: Optional[SessionStore] = None) -> FastAPI:
@@ -26,10 +26,20 @@ def create_app(store: Optional[SessionStore] = None) -> FastAPI:
     app.include_router(source.router)
     app.include_router(messages.router)
     app.include_router(graph.router)
+    app.include_router(wiki.router)
 
     @app.get("/api/health", tags=["monitoring"])
     def health():
-        return {"status": "ok"}
+        st = app.state.store
+        store = getattr(st, "_base_deps", None).store if getattr(st, "_base_deps", None) else None
+        # HybridVectorStore — обёртка над реальным бэкендом; отдаём внутренний класс
+        inner = getattr(store, "inner", store)
+        backend = type(inner).__name__ if inner else "unknown"
+        return {
+            "status": "ok",
+            "vector_store": backend,
+            "collection": getattr(store, "collection_name", None),
+        }
 
     @app.get("/api/metrics", tags=["monitoring"])
     def metrics():

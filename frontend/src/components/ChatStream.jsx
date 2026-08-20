@@ -26,6 +26,12 @@ export default function ChatStream({ feed, busy = false }) {
               <LessonPanel text={m.text} topic={m.data?.topic} />
             </div>
           )}
+          {m.kind === 'stream' && (
+            <div className="bubble agent stream">
+              <span className="stream-text">{m.text}</span>
+              <span className="stream-caret" aria-hidden="true" />
+            </div>
+          )}
           {m.kind === 'explanation' && (
             <div className="bubble agent">
               <ExplanationPanel

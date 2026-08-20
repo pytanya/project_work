@@ -48,10 +48,17 @@ export default function App() {
   const sessionIdRef = useRef(null)
   const inputRef = useRef(null)
   const settingsBtnRef = useRef(null)
+  const currentRef = useRef(null)          // зеркало current для обработчиков WS (без stale-closure)
+  const streamRef = useRef(null)           // id «живого» пузыря со стримингом токенов
   // Refs: отслеживаем ожидаем ли результат ответа на текущий вопрос
   const pendingAnswer = useRef(null)       // текст отправленного ответа
   const currentKindAtSubmit = useRef(null) // kind экрана в момент отправки
   const isWaitingForAnswer = useRef(false) // флаг: ждём WS событие после отправки
+
+  // Синхронизируем currentRef с current (для handleEvent, у которого stable-замыкание)
+  useEffect(() => {
+    currentRef.current = current
+  }, [current])
 
   // Загрузка настроек из localStorage при старте
   useEffect(() => {
@@ -86,10 +93,29 @@ export default function App() {
 
   const push = useCallback((kind, text, data) => {
     setFeed((f) => {
-      const last = f[f.length - 1]
-      if (last && last.kind === kind && last.text === text) return f
+      // Глобальная проверка на дубли по тексту (исправляет повторение одного сообщения разными kind)
+      const normalized = text.trim().toLowerCase()
+      const alreadyExists = f.some((m) => (m.text || '').trim().toLowerCase() === normalized)
+      if (alreadyExists) return f
       return [...f, { id: `${Date.now()}-${Math.random()}`, kind, text, data }]
     })
+  }, [])
+
+  // Реальный стриминг токенов (stream=True): токены накапливаются в одном «живом» пузыре.
+  const pushToken = useCallback((text) => {
+    setFeed((f) => {
+      if (streamRef.current) {
+        return f.map((m) => (m.id === streamRef.current ? { ...m, text: (m.text || '') + text } : m))
+      }
+      const id = `stream-${Date.now()}-${Math.random()}`
+      streamRef.current = id
+      return [...f, { id, kind: 'stream', text, data: {} }]
+    })
+  }, [])
+
+  // Завершение стриминга: финальное событие завершает «живой» пузырь.
+  const endStream = useCallback(() => {
+    streamRef.current = null
   }, [])
 
   const refreshGraph = useCallback(async () => {
@@ -110,7 +136,7 @@ export default function App() {
       // и получили событие от бэкенда (quiz.card, tutor.explanation, system, etc.)
       if (isWaitingForAnswer.current) {
         const answerResolvedEvents = [
-          'quiz.card', 'tutor.explanation', 'system', 
+          'quiz.card', 'tutor.lesson', 'tutor.explanation', 'system', 
           'tutor.summary', 'intake.question', 'source.progress'
         ]
         if (answerResolvedEvents.includes(evt.event)) {
@@ -120,11 +146,16 @@ export default function App() {
       }
       
       switch (evt.event) {
+        case 'token':
+          pushToken(d.text)
+          break
         case 'intake.question':
+          endStream()
           setCurrent({ kind: 'intake', question: d.question, missingFields: d.missing_fields })
           push('intake', d.question)
           break
         case 'quiz.card':
+          endStream()
           setCurrent({
             kind: 'quiz',
             question: d.question,
@@ -137,15 +168,18 @@ export default function App() {
           push('quiz', d.question)
           break
         case 'tutor.explanation':
+          endStream()
           setCurrent(null)
           // Логирование для отладки LaTeX
           console.log('tutor.explanation message:', JSON.stringify(d.message?.substring(0, 200)))
           push('explanation', d.message, d)
           break
         case 'tutor.lesson':
+          endStream()
           push('lesson', d.text, { topic: d.topic })
           break
         case 'tutor.summary':
+          endStream()
           setCurrent(null)
           setKnowledge(d.knowledge_map || {})
           setScore({ correct: d.correct || 0, total: d.total || 0 })
@@ -154,19 +188,21 @@ export default function App() {
           push('summary', `Квиз завершён: правильных ${d.correct}/${d.total}`)
           break
         case 'source.progress':
+          endStream()
           setSource({ status: d.status, note: d.message })
-          // Исправление #1: правильная проверка active question
-          // Проверяем что current имеет valid kind ('quiz' или 'intake')
-          // Вместо некорректной проверки несуществующих полей current.current_question / current.agent_question
-          if (!current || (current.kind !== 'quiz' && current.kind !== 'intake')) {
+          // Фаза источника = intake уже завершён: баннер чек-листа сбрасываем,
+          // активную карточку квиза не трогаем.
+          const cProg = currentRef.current
+          if (!cProg || cProg.kind !== 'quiz') {
             setCurrent(null)
           }
           push('source', d.message)
           break
         case 'source.failed':
+          endStream()
           setSource({ status: 'failed', note: d.message })
-          // Исправление #1 (duplicate): та же корректная проверка для source.failed
-          if (!current || (current.kind !== 'quiz' && current.kind !== 'intake')) {
+          const cFail = currentRef.current
+          if (!cFail || cFail.kind !== 'quiz') {
             setCurrent(null)
           }
           push('error', d.message)
@@ -179,6 +215,7 @@ export default function App() {
           setWikiReloadKey((k) => k + 1)
           break
         case 'system':
+          endStream()
           setCurrent(null)
           push('system', d.message)
           break
@@ -194,7 +231,7 @@ export default function App() {
           break
       }
     },
-    [push, refreshGraph],
+    [push, refreshGraph, pushToken, endStream],
   )
 
   useEffect(() => {
@@ -207,15 +244,25 @@ export default function App() {
     let reconnectTimer = null
 
     const connectWs = (sid) => {
+      // Защита от дублей: не создаём второе подключение, если живое уже есть/устанавливается.
+      const cur = wsRef.current
+      if (cur && (cur.readyState === WebSocket.OPEN || cur.readyState === WebSocket.CONNECTING)) {
+        return cur
+      }
       const ws = new WebSocket(wsUrl(sid))
       ws.onmessage = (e) => {
         try {
           handleEvent(JSON.parse(e.data))
         } catch (_) {}
       }
-      // auto-reconnect: бэкенд мог перезапуститься (WS закрылся) — переподключаемся
-      ws.onclose = () => {
+      ws.onopen = () => {
+        reconnectAttempts = 0
+      }
+      // auto-reconnect: бэкенд мог перезапуститься (WS закрылся аномально) — переподключаемся.
+      // Код 1000 = штатное закрытие сервером (idle-таймаут сессии) — переподключение не нужно.
+      ws.onclose = (ev) => {
         if (cancelled || !sessionIdRef.current) return
+        if (ev.code === 1000) return
         if (reconnectAttempts < 6) {
           reconnectAttempts += 1
           reconnectTimer = setTimeout(() => {
@@ -296,7 +343,27 @@ export default function App() {
         setCurrent({ kind: 'intake', question: d.agent_question, missingFields: d.missing_fields || [] })
       }
       // else: оставляем текущий current без изменений если фронтенд уже показывает вопрос
+
+      // 7.3.3: урок/разбор не теряется при resync (WS мог переподключиться).
+      // Отдаём lesson_text из состояния, если он ещё не показан в фиде.
+      if (d.lesson_text && !hasFrontendActiveQuestion) {
+        const alreadyShown = feed.some((m) => m.kind === 'lesson' && m.text === d.lesson_text)
+        if (!alreadyShown) {
+          push('lesson', d.lesson_text, { topic: d.active_topic || d.topic || '' })
+        }
+      }
       
+      // Захватываем поля intake-фазы для отображения в чек-листе
+      setIntake((prev) => ({
+        ...prev,
+        learner_type: d.learner_type ?? prev.learner_type,
+        grade: d.grade ?? prev.grade,
+        subject: d.subject ?? prev.subject,
+        topic: d.topic ?? prev.topic,
+        has_textbook: d.has_textbook ?? prev.has_textbook,
+        chapter: d.chapter ?? prev.chapter,
+        mode: d.mode ?? prev.mode,
+      }))
       setKnowledge(d.knowledge_map || {})
       setScore({ correct: d.correct_count || 0, total: d.answered_count || 0 })
       if (d.source_status) {
@@ -318,7 +385,7 @@ export default function App() {
     } catch (e) {
       push('error', String(e.message || e))
     }
-  }, [push])
+  }, [push, feed])
 
   async function submitAnswer() {
     const text = answer.trim()
@@ -329,24 +396,33 @@ export default function App() {
     setChatBusy(true)
     isWaitingForAnswer.current = true  // помечаем что ждём WS событие от бэкенда
     
-    // Таймаут fallback: если WS событие не пришло за 15 секунд — сбрасываем busy
+    // Таймаут fallback: если WS событие не пришло за 240 секунд — сбрасываем busy.
+    // Агентный intake + фаза источника + генерация урока/квиза могут занять 2-4 минуты
+    // (несколько последовательных LLM-вызовов и эмбеддингов).
     const timeout = setTimeout(() => {
       if (isWaitingForAnswer.current) {
         setChatBusy(false)
         isWaitingForAnswer.current = false
       }
-    }, 15000)
+    }, 240000)
     
     try {
-      if (current?.kind === 'intake') {
+      const isIntakeTurn = current?.kind === 'intake'
+      if (isIntakeTurn) {
         await api.postIntake(sessionId, text)
       } else {
         await api.postMessage(sessionId, text)
       }
-      // resync убран: WS события уже обновляют UI (quiz.card, tutor.explanation, system)
-      // Но оставляем intakeStatus для корректной работы intake чек-листа
-      const st = await api.intakeStatus(sessionId)
-      setIntake({ missingFields: st.missing_fields, complete: st.complete })
+      // intakeStatus — только на ходах чек-листа (иначе лишний GET после ответа на квиз).
+      // WS события уже обновляют UI (quiz.card, tutor.explanation, system).
+      if (isIntakeTurn) {
+        const st = await api.intakeStatus(sessionId)
+        setIntake({ missingFields: st.missing_fields, complete: st.complete })
+        // Баннер чек-листа: intake завершён → снимаем вопрос (дальше идут source/урок/квиз)
+        if (st.complete && currentRef.current?.kind === 'intake') {
+          setCurrent(null)
+        }
+      }
     } catch (e) {
       push('error', String(e.message || e))
       setChatBusy(false)
@@ -423,6 +499,10 @@ export default function App() {
           kind: 'quiz', question: q.question, options: q.options, answerType: q.answer_type,
           topic: q.topic, difficulty: q.difficulty, questionId: q.question_id,
         })
+      } else if (r.lesson) {
+        // 7.3.3: режим «урок» — показываем урок и ждём подтверждения
+        setCurrent({ kind: 'intake', question: r.next_question || 'Готов(а) перейти к квизу?', missingFields: [] })
+        push('lesson', r.lesson, { topic: r.title })
       } else if (r.next_question) {
         // Есть следующий вопрос (intake)
         setCurrent({ kind: 'intake', question: r.next_question, missingFields: [] })
@@ -528,7 +608,19 @@ export default function App() {
               quickAnswer={quickAnswer}
             />
           ) : (
-            <IntakeWizard missing={current.missingFields ?? intake.missingFields} question={current.question} />
+            <IntakeWizard
+              missing={current.missingFields ?? intake.missingFields}
+              question={current.question}
+              fieldValues={{
+                learner_type: intake.learner_type,
+                grade: intake.grade,
+                subject: intake.subject,
+                topic: intake.topic,
+                has_textbook: intake.has_textbook,
+                chapter: intake.chapter,
+                mode: intake.mode,
+              }}
+            />
           ))}
         {confirmedOption && (
           <div className="confirm-bar">

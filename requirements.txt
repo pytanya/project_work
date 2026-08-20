@@ -56,6 +56,9 @@ docling
 pdfplumber
 chromadb
 sentence-transformers
+# Qdrant векторное хранилище (roadmap #1; VECTOR_STORE=qdrant).
+# qdrant-client поддерживает embedded-режим (QDRANT_PATH) без сервера/Docker.
+qdrant-client
 # OCR сканированных учебников (3.2) — страницы по запросу ученика
 easyocr
 

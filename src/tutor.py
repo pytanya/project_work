@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
@@ -64,6 +65,32 @@ def _score01(value: Any) -> float:
     if v > 1.0:
         return max(0.0, min(1.0, v / 10.0))
     return max(0.0, min(1.0, v))
+
+
+def generate_text(
+    messages: List[Dict[str, str]],
+    llm_call: Optional[Callable[[List[Dict[str, str]]], str]] = None,
+    on_token: Optional[Callable[[str], None]] = None,
+    role: str = "tutor",
+    temperature: float = 0.3,
+    max_tokens: Optional[int] = 512,
+) -> str:
+    """Вызов LLM: реальный стриминг токенов (on_token) или обычный вызов.
+
+    - llm_call задан (мок в тестах) → обычный вызов без стриминга;
+    - on_token задан → LLMClient.chat_stream(stream=True), токены уходят в браузер;
+    - иначе → обычный LLMClient.chat.
+    """
+    if llm_call is not None:
+        return llm_call(messages)
+    from .llm_client import LLMClient
+
+    client = LLMClient(role=role)
+    if on_token is not None:
+        resp = client.chat_stream(messages, on_chunk=on_token,
+                                  temperature=temperature, max_tokens=max_tokens)
+        return resp.content or ""
+    return client.chat(messages, temperature=temperature, max_tokens=max_tokens).content or ""
 
 
 # ----------------------------------------------------------------------
@@ -116,6 +143,7 @@ def _question_prompt(
     grade: Optional[str],
     curriculum: Optional[str],
     simple: bool,
+    asked: Optional[List[str]] = None,
 ) -> List[Dict[str, str]]:
     system = (
         "Ты — тьютор EduTutor, генерируешь вопрос учебного квиза. "
@@ -141,6 +169,12 @@ def _question_prompt(
             "одинаковой длины и стиля с правильным)."
         )
     )
+    if asked:
+        system += (
+            " Уже задавали такие вопросы: "
+            + "; ".join(str(q) for q in asked[-10:])
+            + ". НЕ повторяй их по смыслу — задай другой вопрос по тому же материалу."
+        )
     ctx = "\n---\n".join(context)[:MAX_EXPLANATION_CHARS]
     user = f"Тема: {topic}\nКонтекст:\n{ctx}"
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -163,7 +197,8 @@ def generate_question(
 
     simple = difficulty == "easy"
     messages = _question_prompt(
-        topic, context, difficulty, state.grade, state.curriculum, simple=simple
+        topic, context, difficulty, state.grade, state.curriculum, simple=simple,
+        asked=list(state.asked_questions),
     )
     raw = llm_call(messages)
     data = parse_llm_json(raw)
@@ -188,9 +223,40 @@ def generate_question(
     # Эталонные ответы генерирует LLM (мозг); они НЕ входят в QuizCard/UI.
     refs = data.get("correct_answers")
     state.current_answers = [str(r).strip() for r in refs if str(r).strip()] if isinstance(refs, list) else []
-    state.asked_questions.append(qid)
+    state.asked_questions.append(card.question)  # тексты вопросов — для антидубликата (7.3.2)
     state.current_question = card
     return card
+
+
+def is_duplicate_question(
+    embedder: Any,
+    new_question: str,
+    prev_questions: List[str],
+    threshold: float = 0.85,
+) -> bool:
+    """Семантический антидубликат (спека 7.3.2): cosine-близость нового вопроса
+    к любому из уже заданных ≥ threshold → дубль (True).
+
+    При недоступности эмбеддера или вырожденных векторах возвращает False
+    (не блокируем генерацию вопроса).
+    """
+    if not prev_questions or not (new_question or "").strip():
+        return False
+    try:
+        new_vec = embedder.encode_query(new_question)
+        prev_vecs = embedder.encode(list(prev_questions))
+    except Exception:
+        return False
+
+    def _cos(a: List[float], b: List[float]) -> float:
+        if not a or not b or len(a) != len(b):
+            return 0.0
+        dot = sum(x * y for x, y in zip(a, b))
+        na = math.sqrt(sum(x * x for x in a)) or 1.0
+        nb = math.sqrt(sum(y * y for y in b)) or 1.0
+        return dot / (na * nb)
+
+    return any(_cos(new_vec, pv) >= threshold for pv in prev_vecs)
 
 
 # ----------------------------------------------------------------------
@@ -208,7 +274,7 @@ def _lesson_prompt(topic: str, context: List[str], grade: Optional[str], curricu
             " Структура: 3-5 абзацев — что это такое, главные факты, пример, "
             "итог одним предложением. Пиши своими словами, связно, без списков-перечислений "
             "из канцелярита, без заголовков-эмодзи. Не выдумывай факты за пределами контекста. "
-            "Верни строго JSON: {\"text\": \"полный текст урока\"}."
+            "Отвечай ЧИСТЫМ ТЕКСТОМ урока — без JSON, без кавычек-обёрток, без форматирования."
         )
     )
     ctx = "\n---\n".join(context)[:MAX_EXPLANATION_CHARS]
@@ -221,21 +287,92 @@ def generate_lesson(
     context: List[str],
     state: TutorState,
     llm_call: Optional[Callable[[List[Dict[str, str]]], str]] = None,
+    on_token: Optional[Callable[[str], None]] = None,
 ) -> str:
-    """Синтез урока по RAG-контексту (тьютор-модель)."""
-    from .llm_client import LLMClient
-
-    if llm_call is None:
-        client = LLMClient(role="tutor")
-        llm_call = lambda msgs: client.chat(msgs, temperature=0.4, max_tokens=700).content or ""
-
+    """Синтез урока по RAG-контексту (тьютор-модель). on_token — стриминг токенов в браузер."""
     messages = _lesson_prompt(topic, context, state.grade, state.curriculum)
-    raw = llm_call(messages)
+    raw = generate_text(messages, llm_call=llm_call, on_token=on_token,
+                        role="tutor", temperature=0.4, max_tokens=700)
     data = parse_llm_json(raw)
     text = str(data.get("text") or raw or "").strip()
     if len(text) < 40:
         # Fallback: даём первый абзац контекста как урок
         text = (context[0] if context else f"Материалы по теме «{topic}» ещё пополняются.")[:1200]
+    return text
+
+
+# ----------------------------------------------------------------------
+# Объяснение темы (режим explain) и глубокий разбор (режим deep_dive)
+# ----------------------------------------------------------------------
+def _topic_explain_prompt(topic: str, context: List[str], grade: Optional[str], curriculum: Optional[str]) -> List[Dict[str, str]]:
+    system = (
+        "Ты — тьютор EduTutor. Объясни тему ученику понятным языком по контексту учебника. "
+        + grade_prompt(grade)
+        + (
+            f" Учебная программа: {curriculum}." if curriculum else ""
+        )
+        + (
+            " Структура: что это такое (определение), почему это важно, главные факты, "
+            "наглядный пример, итог одним предложением. Пиши связно, без списков-канцелярита "
+            "и заголовков-эмодзи. Не выдумывай факты за пределами контекста. "
+            "Отвечай ЧИСТЫМ ТЕКСТОМ объяснения — без JSON и обёрток."
+        )
+    )
+    ctx = "\n---\n".join(context)[:MAX_EXPLANATION_CHARS]
+    user = f"Тема: {topic}\nКонтекст учебника:\n{ctx}"
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def generate_explanation(
+    topic: str,
+    context: List[str],
+    state: TutorState,
+    llm_call: Optional[Callable[[List[Dict[str, str]]], str]] = None,
+    on_token: Optional[Callable[[str], None]] = None,
+) -> str:
+    """Объяснение темы (режим explain): определение, факты, пример, цитата."""
+    messages = _topic_explain_prompt(topic, context, state.grade, state.curriculum)
+    raw = generate_text(messages, llm_call=llm_call, on_token=on_token,
+                        role="tutor", temperature=0.3, max_tokens=700)
+    data = parse_llm_json(raw)
+    text = str(data.get("text") or raw or "").strip()
+    if len(text) < 40:
+        text = (context[0] if context else f"Материалы по теме «{topic}» ещё пополняются.")[:1200]
+    return text
+
+
+def _deep_dive_prompt(topic: str, context: List[str], grade: Optional[str]) -> List[Dict[str, str]]:
+    system = (
+        "Ты — эксперт EduTutor, делаешь ГЛУБОКИЙ РАЗБОР темы по нескольким фрагментам учебника. "
+        + grade_prompt(grade)
+        + (
+            " Структура: ключевые понятия и их определения, внутренние связи между разделами, "
+            "причинно-следственные цепочки, примеры, типичные ошибки, вывод. Опирайся ТОЛЬКО "
+            "на предоставленный контекст, не выдумывай. Указывай параграфы-источники (§N) для "
+            "ключевых утверждений. "
+            "Отвечай ЧИСТЫМ ТЕКСТОМ разбора — без JSON и обёрток."
+        )
+    )
+    ctx = "\n---\n".join(context)[:MAX_EXPLANATION_CHARS]
+    user = f"Тема: {topic}\nКонтекст (несколько разделов):\n{ctx}"
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def generate_deep_dive(
+    topic: str,
+    context: List[str],
+    state: TutorState,
+    llm_call: Optional[Callable[[List[Dict[str, str]]], str]] = None,
+    on_token: Optional[Callable[[str], None]] = None,
+) -> str:
+    """Глубокий разбор (режим deep_dive): multi-chunk синтез эксперт-моделью."""
+    messages = _deep_dive_prompt(topic, context, state.grade)
+    raw = generate_text(messages, llm_call=llm_call, on_token=on_token,
+                        role="expert", temperature=0.2, max_tokens=900)
+    data = parse_llm_json(raw)
+    text = str(data.get("text") or raw or "").strip()
+    if len(text) < 40:
+        text = (context[0] if context else f"Материалы по теме «{topic}» ещё пополняются.")[:1500]
     return text
 
 

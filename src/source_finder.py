@@ -285,10 +285,28 @@ def _get_text(url: str, client: httpx.Client, max_chars: int) -> Tuple[str, str]
 
 
 def _strip_html(raw: str) -> str:
-    text = re.sub(r"<script[^>]*>.*?</script>", " ", raw, flags=re.S | re.I)
-    text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.S | re.I)
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
+    """Очистка HTML до текста с СОХРАНЕНИЕМ структуры (заголовки/абзацы/списки).
+
+    Раньше весь текст схлопывался в одну строку → extract_sections и граф знаний
+    не видели структуру веб-конспектов (только один generic-узел «topic»).
+    Теперь: блочные теги → перенос строки, заголовки h1-h6 → маркдаун-заголовки,
+    остальные теги убираем, внутри строки пробелы схлопываем.
+    """
+    text = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", raw)
+    # блочные границы → перенос строки
+    text = re.sub(r"(?i)</(p|div|li|ul|ol|tr|table|blockquote|section|article|h[1-6])>", "\n", text)
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    # заголовки h1-h6 → маркдаун-заголовок (в любом месте строки)
+    text = re.sub(r"(?i)</h([1-6])>\s*$", lambda m: "  \n" + ("#" * int(m.group(1))) + " ", text)
+    text = re.sub(r"(?i)<h([1-6])[^>]*>", lambda m: "#" * int(m.group(1)) + " ", text)
+    # убрать оставшиеся теги
+    text = re.sub(r"<[^>]+>", "", text)
+    # декодировать базовые сущности
+    text = text.replace("&nbsp;", " ").replace("&mdash;", "—").replace("&ndash;", "–")
+    text = text.replace("&amp;", "&").replace("&quot;", '"').replace("&laquo;", "«").replace("&raquo;", "»")
+    # схлопнуть пробелы внутри строк, сохранив переводы строк
+    lines = [re.sub(r"[ \t]+", " ", l).strip() for l in text.splitlines()]
+    text = "\n".join(l for l in lines if l)
     return text
 
 
@@ -616,7 +634,11 @@ def collect_source_materials(
         http = httpx.Client(timeout=s.REQUEST_TIMEOUT)
         close = True
     try:
-        query = f"{topic or subject} {subject} {grade} класс конспект урок".strip()
+        # Для школьников добавляем «класс», для студентов — «конспект лекции/курс»
+        grade_part = f"{grade} класс" if grade else ""
+        audience_part = "" if grade else "лекция конспект курс"
+        query = f"{topic or subject} {subject} {grade_part} {audience_part}".strip()
+        query = re.sub(r"\s+", " ", query).strip()
         results = search_web(query, settings=s)
         if not results:
             return SourceCollection(

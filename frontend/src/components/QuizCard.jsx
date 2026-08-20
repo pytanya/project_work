@@ -1,4 +1,6 @@
 // QuizCard — карточка вопроса квиза (раздел 9.2)
+import LatexText from './LatexText'
+
 export default function QuizCard({ q, onSelect, questionNum, totalQuestions, selectedOption, quickAnswer }) {
   return (
     <div className="card quiz">
@@ -10,7 +12,7 @@ export default function QuizCard({ q, onSelect, questionNum, totalQuestions, sel
           <span className="badge counter">вопрос {questionNum}/{totalQuestions}</span>
         )}
       </div>
-      <div className="question-text">{q.question}</div>
+      <div className="question-text"><LatexText text={q.question} /></div>
       {q.options && (
         <div className="options">
           {q.options.map((opt, i) => (
@@ -20,7 +22,7 @@ export default function QuizCard({ q, onSelect, questionNum, totalQuestions, sel
               onClick={() => onSelect(opt)}
             >
               <span className="option-letter">{String.fromCharCode(65 + i)}</span>
-              {opt}
+              <LatexText text={opt} />
             </button>
           ))}
         </div>

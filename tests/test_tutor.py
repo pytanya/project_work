@@ -14,10 +14,62 @@ from src.tutor import (
     generate_lesson,
     generate_question,
     grade_prompt,
+    is_duplicate_question,
     parse_llm_json,
     simplicity_precheck,
     update_knowledge_map,
 )
+
+
+class _SimpleEmbedder:
+    """Хэш-эмбеддер (md5, 16 измерений): одинаковый текст → одинаковый вектор."""
+
+    def _vec(self, text):
+        import hashlib
+
+        v = [0.0] * 16
+        for token in (text or "").lower().split():
+            h = int(hashlib.md5(token.encode("utf-8")).hexdigest()[:4], 16)
+            v[h % 16] += 1.0
+        norm = sum(x * x for x in v) ** 0.5 or 1.0
+        return [x / norm for x in v]
+
+    def encode(self, texts):
+        return [self._vec(t) for t in texts]
+
+    def encode_query(self, text):
+        return self._vec(text)
+
+
+class TestDuplicateQuestion:
+    def test_identical_question_is_duplicate(self):
+        emb = _SimpleEmbedder()
+        assert is_duplicate_question(emb, "Что такое атмосфера?", ["Что такое атмосфера?"]) is True
+
+    def test_similar_question_detected(self):
+        emb = _SimpleEmbedder()
+        prev = ["Сколько процентов азота в атмосфере?"]
+        assert is_duplicate_question(emb, "Каково содержание азота в атмосфере?", prev, threshold=0.3) is True
+
+    def test_distinct_question_not_duplicate(self):
+        emb = _SimpleEmbedder()
+        prev = ["Что такое атмосфера?"]
+        assert is_duplicate_question(emb, "Перечисли слои земной коры.", prev) is False
+
+    def test_empty_prev_or_question(self):
+        emb = _SimpleEmbedder()
+        assert is_duplicate_question(emb, "Вопрос?", []) is False
+        assert is_duplicate_question(emb, "", ["Вопрос?"]) is False
+
+    def test_embedder_failure_does_not_block(self):
+        class Broken:
+            def encode_query(self, _):
+                raise RuntimeError("no model")
+
+            def encode(self, _):
+                raise RuntimeError("no model")
+
+        assert is_duplicate_question(Broken(), "Вопрос?", ["Вопрос?"]) is False
 
 
 class TestGradePrompt:
@@ -69,7 +121,7 @@ class TestGenerateQuestion:
         assert card.answer_type == "single"
         assert card.difficulty == "easy"
         assert card.topic == "Атмосфера"
-        assert state.asked_questions == ["q1"]
+        assert state.asked_questions == ["Что такое атмосфера?"]  # тексты для антидубликата
         assert state.current_question is card
         # эталонные ответы LLM хранятся в состоянии, но НЕ в QuizCard (не утекают в UI)
         assert state.current_answers == ["газ"]
@@ -171,6 +223,21 @@ class TestEvaluateAnswer:
         fake = lambda m: "не json вообще"
         text = generate_lesson("Атмосфера", ["Атмосфера — воздушная оболочка Земли."], state, llm_call=fake)
         assert "воздушная оболочка" in text
+
+    def test_generate_lesson_with_on_token_mock(self):
+        """on_token (стриминг) + мок-llm_call: токены НЕ вызываются (мок), текст корректен."""
+        state = _state()
+        seen = []
+        fake = lambda m: '{"text": "Атмосфера — газовая оболочка Земли. Она защищает планету от радиации и метеоритов."}'
+        text = generate_lesson("Атмосфера", ["контекст"], state, llm_call=fake, on_token=lambda t: seen.append(t))
+        assert "газовая оболочка" in text
+        assert seen == []  # при мок-llm_call стриминг не запускается
+
+    def test_generate_text_returns_llm_output(self):
+        from src.tutor import generate_text
+
+        text = generate_text([{"role": "user", "content": "x"}], llm_call=lambda m: "ответ")
+        assert text == "ответ"
 
 
 class TestAdjustDifficulty:

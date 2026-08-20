@@ -60,6 +60,7 @@ def deps(make_settings, tmp_path):
         MAX_INTAKE_ITERATIONS=8,
         OCR_MIN_TEXT_CHARS=20,
         KNOWLEDGE_GRAPH_DIR=str(tmp_path / "kg"),
+        KNOWLEDGE_WIKI_DIR=str(tmp_path / "wiki"),
     )
     embedder = FakeEmbedder()
     store = NumpyVectorStore("t", embedder)
@@ -104,7 +105,7 @@ class TestIntakeFlow:
     def test_full_intake_to_quiz(self, deps):
         graph = build_graph(deps)
         state = TutorState(num_questions=3, sources=[{"type": "web", "url": "x"}], collection_id="web")
-        res = _feed(graph, state, ["ученик 6 класса", "6", "география", "Атмосфера", "нет", "квиз"])
+        res = _feed(graph, state, ["ученик 6 класса", "география", "Атмосфера", "нет", "квиз"])
         # intake завершён, источник готов (pre-seeded), задан вопрос квиза
         assert res.agent_question
         assert res.current_question is not None
@@ -118,6 +119,23 @@ class TestIntakeFlow:
         res = _feed(graph, state, ["не знаю", "не знаю"])
         assert res.agent_question or res.current_question
         assert res.intake_field is None
+
+    def test_full_intake_in_one_message(self, deps):
+        """Уровень 2 (5.4): один развёрнутый ответ заполняет весь чек-лист разом."""
+        graph = build_graph(deps)
+        state = TutorState(num_questions=3, sources=[{"type": "web", "url": "x"}], collection_id="web")
+        res = _invoke(graph, {
+            **state.model_dump(),
+            "pending_answer": "я в 7 классе, география, тема Атмосфера, учебника нет, хочу квиз",
+        })
+        assert res.learner_type == "schoolchild"
+        assert res.grade == "7"
+        assert res.subject == "география"
+        assert res.topic == "Атмосфера"
+        assert res.has_textbook is False
+        assert res.mode == "quiz"
+        assert res.missing_fields == []
+        assert res.current_question is not None  # intake завершён, квиз сразу
 
 
 class TestQuizFlow:
@@ -183,6 +201,46 @@ class TestQuizFlow:
         assert res.records[0]["judge_score"] == 8.0
         assert res.records[0]["model_used"] == "tutor"
 
+    def test_duplicate_question_regenerated(self, deps):
+        """Антидубликат (7.3.2): второй вопрос, совпавший с первым по смыслу,
+        регенерируется до отличного; в asked_questions — тексты."""
+        calls = {"n": 0}
+
+        def gen(m):
+            calls["n"] += 1
+            if calls["n"] <= 2:  # q1 и первый дубль q2
+                return '{"question":"Что такое атмосфера?","options":null,"answer_type":"open","topic":"Атмосфера"}'
+            return '{"question":"Из каких газов состоит атмосфера?","options":null,"answer_type":"open","topic":"Атмосфера"}'
+
+        deps.tutor_llm = gen
+        graph = build_graph(deps)
+        state = TutorState(num_questions=2, sources=[{"type": "web", "url": "x"}], collection_id="web")
+        res = _feed(graph, state, ["студент", "география", "Атмосфера", "нет", "квиз"])
+        assert res.asked_questions == ["Что такое атмосфера?"]
+
+        res = _invoke(graph, {**res.model_dump(), "pending_answer": "Воздушная оболочка."})
+        assert res.current_question is not None
+        assert res.current_question.question == "Из каких газов состоит атмосфера?"
+        assert res.asked_questions == ["Что такое атмосфера?", "Из каких газов состоит атмосфера?"]
+        assert calls["n"] == 3  # q1 + q2-дубль + q2-регенерация
+
+    def test_wiki_updated_on_quiz(self, deps, tmp_path):
+        """Knowledge Wiki (roadmap #2): после квиза статья темы появляется на диске."""
+        from src.wiki import KnowledgeWiki
+
+        graph = build_graph(deps)
+        state = TutorState(num_questions=1, sources=[{"type": "web", "url": "x"}], collection_id="web")
+        res = _feed(graph, state, ["студент", "философия", "Кант", "нет", "квиз"])
+        res = _invoke(graph, {**res.model_dump(), "pending_answer": "Кант — основоположник критической философии."})
+
+        # мок-генератор _GEN создаёт вопрос с topic «Атмосфера» — статья создаётся по нему
+        wiki = KnowledgeWiki(tmp_path / "wiki")
+        articles = wiki.list_articles()
+        assert len(articles) >= 1
+        art = articles[0]
+        assert art.attempts >= 1
+        assert art.subject  # предмет из сессии сохранён
+
     def test_lesson_mode_before_quiz(self, deps):
         """Режим «урок»: объяснение темы → подтверждение → квиз."""
         def llm(messages):
@@ -207,6 +265,45 @@ class TestQuizFlow:
         # «да» → переход к квизу
         res = _invoke(graph, {**res.model_dump(), "pending_answer": "да"})
         assert res.lesson_confirmed is True
+        assert res.current_question is not None
+
+    def test_explain_mode_shows_explanation(self, deps):
+        """Режим «объяснение» (7.3.4): генерируется объяснение темы, затем подтверждение к квизу."""
+        def llm(messages):
+            system = messages[0]["content"] if messages else ""
+            if "Объясни тему ученику" in system:
+                return '{"text": "Атмосфера — газовая оболочка Земли, важнейший слой планеты."}'
+            return _GEN
+
+        deps.tutor_llm = llm
+        graph = build_graph(deps)
+        state = TutorState(num_questions=1, sources=[{"type": "web", "url": "x"}], collection_id="web")
+        res = _feed(graph, state, ["студент", "география", "Атмосфера", "нет", "объяснение"])
+        assert res.mode == "explain"
+        assert res.lesson_done is True
+        assert "оболочка" in res.lesson_text
+        assert res.current_question is None
+        assert res.agent_question  # подтверждение перехода к квизу
+        res = _invoke(graph, {**res.model_dump(), "pending_answer": "да"})
+        assert res.current_question is not None
+
+    def test_deep_dive_mode_uses_more_context(self, deps):
+        """Режим «глубокий разбор» (7.3.4): синтез экспертной моделью, больше контекста."""
+        def llm(messages):
+            system = messages[0]["content"] if messages else ""
+            if "ГЛУБОКИЙ РАЗБОР" in system:
+                return '{"text": "Развёрнутый разбор атмосферы: понятия, связи, выводы.", "paragraphs": ["§12"]}'
+            return _GEN
+
+        deps.tutor_llm = llm
+        deps.expert_llm = llm
+        graph = build_graph(deps)
+        state = TutorState(num_questions=1, sources=[{"type": "web", "url": "x"}], collection_id="web")
+        res = _feed(graph, state, ["студент", "география", "Атмосфера", "нет", "глубокий разбор"])
+        assert res.mode == "deep_dive"
+        assert "разбор" in res.lesson_text.lower()
+        assert res.current_question is None
+        res = _invoke(graph, {**res.model_dump(), "pending_answer": "да"})
         assert res.current_question is not None
 
 
@@ -238,17 +335,13 @@ class TestSourceFlow:
         graph = build_graph(deps)
         state = TutorState(num_questions=1, textbook_file=str(doc))
         res = _feed(graph, state, ["студент", "география", "Атмосфера", "да", "квиз"])
-        # после upload файл индексируется, строит граф и ЖДЁТ выбор темы
+        # Уровень 1: конкретная тема «Атмосфера» нашлась среди уроков графа →
+        # гейт пропущен, тема выбрана автоматически, квиз сразу
         assert res.source_status == "ready"
-        assert res.awaiting_topic is True
-        assert res.current_question is None
+        assert res.awaiting_topic is False
+        assert res.current_question is not None
         assert res.knowledge_graph is not None
         assert len(res.knowledge_graph["nodes"]) >= 3  # book + 2 параграфа
-        # выбираем тему по названию → генерируется вопрос
-        res = _invoke(graph, {**res.model_dump(), "pending_answer": "Атмосфера"})
-        assert res.awaiting_topic is False
-        assert res.active_topic is not None
-        assert res.current_question is not None
 
     def test_has_textbook_true_without_file_asks_upload(self, deps):
         """«да, есть учебник», но файл не загружен → просим загрузить, а не веб-поиск."""
@@ -363,15 +456,11 @@ class TestScannedDoc:
         assert res.textbook_scanned is True
         assert res.agent_question and "страниц" in res.agent_question
 
-        # 2) ответ «1-1, Атмосфера» → OCR(мок) → индекс → граф, ЖДЁМ тему
+        # 2) ответ «1-1, Атмосфера» → OCR(мок) → индекс → граф; тема конкретна → квиз сразу
         res = _invoke(graph, {**res.model_dump(), "pending_answer": "1-1, Атмосфера"})
         assert res.textbook_pages == "1-1, Атмосфера"
         assert res.source_status == "ready"
         assert res.collection_id == "ocr"
-        assert res.awaiting_topic is True
-        assert res.current_question is None
-        # 3) выбираем тему → генерируется вопрос квиза
-        res = _invoke(graph, {**res.model_dump(), "pending_answer": "Атмосфера"})
         assert res.awaiting_topic is False
         assert res.current_question is not None
         assert res.agent_question
@@ -398,10 +487,108 @@ class TestScannedDoc:
         res = _invoke(graph, {**res.model_dump(), "pending_answer": "не знаю"})
         assert res.doc_pages_attempts == 1
         assert res.agent_question and "открой" in res.agent_question
-        # «все» → полный OCR → индекс → ждём тему
+        # «все» → полный OCR → индекс; тема «Атмосфера» конкретна → квиз сразу
         res = _invoke(graph, {**res.model_dump(), "pending_answer": "все"})
         assert res.source_status == "ready"
-        assert res.awaiting_topic is True
-        # выбираем тему → квиз
-        res = _invoke(graph, {**res.model_dump(), "pending_answer": "Атмосфера"})
+        assert res.awaiting_topic is False
         assert res.current_question is not None
+
+
+class TestWebSourceFlow:
+    """Студент без учебника: find_textbook → веб-материалы → логичный граф (roadmap: «лепнина»)."""
+
+    @pytest.fixture
+    def web_deps(self, make_settings, tmp_path):
+        s = make_settings(
+            FGOS_REFERENCE_DIR=str(FGOS_DIR),
+            TEXTBOOKS_DOWNLOADS_DIR=str(tmp_path / "downloads"),
+            MAX_INTAKE_ITERATIONS=8,
+            OCR_MIN_TEXT_CHARS=20,
+            KNOWLEDGE_GRAPH_DIR=str(tmp_path / "kg"),
+            KNOWLEDGE_WIKI_DIR=str(tmp_path / "wiki"),
+        )
+        embedder = FakeEmbedder()
+        store = NumpyVectorStore("web", embedder)
+
+        def fake_collector(**kw):
+            from src.source_finder import SourceCollection
+
+            return SourceCollection(
+                status="ready",
+                sources=[
+                    {"type": "page", "url": "https://ru.wikipedia.org/wiki/Кант", "license": "ok"},
+                    {"type": "page", "url": "https://ru.wikibooks.org/wiki/Философия", "license": "ok"},
+                ],
+                texts=[
+                    "# Иммануил Кант\n## Жизнь и биография\nТекст.\n## Критика чистого разума\nТекст.\n## Примечания\nМусор.\n",
+                    "# Философия\n## Категорический императив\nТекст.\n## См. также\nМусор.\n",
+                ],
+                message="Собрано 2 источника",
+            )
+
+        return GraphDeps(
+            embedder=embedder, store=store, settings=s,
+            source_collector=fake_collector,
+            tutor_llm=lambda m: _GEN,
+            eval_llm=lambda m: _EVAL_OK,
+            expert_llm=lambda m: _EXPL,
+            judge_llm=lambda m: _JUDGE,
+        )
+
+    def test_graph_built_per_source_no_noise(self, web_deps):
+        """Граф: корень + узлы-источники + их подтемы; шумовые секции отсекаются."""
+        graph = build_graph(web_deps)
+        state = TutorState(num_questions=3)
+        res = _feed(graph, state, ["студент", "философия", "Кант", "нет", "квиз"])
+        assert res.source_status == "ready"
+        # Уровень 1: тема «Кант» конкретна → гейт пропущен, квиз сразу
+        assert res.awaiting_topic is False
+        assert res.current_question is not None
+
+        kg = res.knowledge_graph or {}
+        titles = [n["title"].lower() for n in kg.get("nodes", [])]
+        # логичные темы присутствуют
+        assert "жизнь и биография" in titles
+        assert "критика чистого разума" in titles
+        assert "категорический императив" in titles
+        # шум не попал в узлы
+        assert not any("примечания" in t for t in titles)
+        assert not any("см. также" in t for t in titles)
+        # узлы-источники присутствуют
+        assert any("wikipedia" in t for t in titles)
+        # корень-книга присутствует
+        node_types = {n["type"] for n in kg.get("nodes", [])}
+        assert "book" in node_types
+
+    def test_student_no_textbook_concrete_topic_skips_gate(self, web_deps):
+        """Уровень 1: конкретная тема в intake → после сбора материалов гейт не нужен."""
+        graph = build_graph(web_deps)
+        state = TutorState(num_questions=3)
+        res = _feed(graph, state, ["студент", "философия", "Кант", "нет", "квиз"])
+        assert res.source_status == "ready"
+        assert res.awaiting_topic is False
+        assert res.current_question is not None  # квиз начался без переспроса темы
+
+    def test_all_topic_goes_to_gate(self, web_deps):
+        """Тема «все» → нужен выбор темы из графа (гейт остаётся)."""
+        graph = build_graph(web_deps)
+        state = TutorState(num_questions=3)
+        res = _feed(graph, state, ["студент", "философия", "все", "нет", "квиз"])
+        assert res.source_status == "ready"
+        assert res.awaiting_topic is True
+        assert res.current_question is None
+        # выбор темы из графа → квиз
+        res = _invoke(graph, {**res.model_dump(), "pending_answer": "Критика чистого разума"})
+        assert res.awaiting_topic is False
+        assert res.current_question is not None
+
+    def test_intent_message_emitted_before_search(self, web_deps):
+        """Уровень 3: подтверждение намерения (режим+тема) эмитится перед поиском."""
+        events = []
+        web_deps.on_event = lambda event, data: events.append((event, data))
+        graph = build_graph(web_deps)
+        state = TutorState(num_questions=3)
+        res = _feed(graph, state, ["студент", "философия", "Кант", "нет", "квиз"])
+        intents = [d.get("message") for ev, d in events if ev == "system" and d.get("kind") == "intent"]
+        assert intents, "intent-сообщение не отправлено"
+        assert any("квиз" in m and "Кант" in m for m in intents)

@@ -133,6 +133,21 @@ class TestFetchUrl:
         assert "Атмосфера" in text
         assert "<p>" not in text
 
+    def test_preserves_structure_headings(self):
+        """Веб-конспект: заголовки h1-h3 сохраняются как markdown-строки (не одна строка)."""
+        from src.source_finder import _strip_html
+
+        html = (
+            "<html><body><h1>Кант</h1><p>Введение.</p>"
+            "<h2>Биография</h2><p>Текст.</p><h3>Критика</h3><p>Текст.</p></body></html>"
+        )
+        text = _strip_html(html)
+        assert "# Кант" in text
+        assert "## Биография" in text
+        assert "### Критика" in text
+        # структура сохранилась: несколько строк, а не одна гигантская
+        assert text.count("\n") >= 3
+
     def test_truncated(self, make_settings):
         s = make_settings(MAX_FETCH_CHARS=50)
         client = self._client_with(b"x " * 500)

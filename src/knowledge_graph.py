@@ -223,11 +223,16 @@ class KnowledgeGraph:
         node_type: str = "topic",
         section_number: Optional[str] = None,
         parent_id: Optional[str] = None,
+        allow_url: bool = False,
         **attrs: Any,
     ) -> None:
-        """Add topic with hierarchy support (parent_id) and URL filtering."""
+        """Add topic with hierarchy support (parent_id) and URL filtering.
+
+        allow_url=True — намеренно создаваемый узел (страница-источник), заголовок
+        которого может быть доменным именем; URL-фильтр в этом случае не применяется.
+        """
         # Validation: topic must not be a URL
-        if _is_url_like(title):
+        if not allow_url and _is_url_like(title):
             return
         data = dict(attrs)
         data.update(

@@ -17,18 +17,18 @@ from typing import Any, Dict, List, Literal, Optional
 from .states import IntakeState
 
 INTAKE_QUESTIONS: Dict[str, str] = {
-    "learner_type": "Кто ты? (студент / ученик N класса)",
-    "grade": "В каком ты классе? (5-11)",
-    "subject": "Какой предмет изучаем?",
-    "topic": "Какая тема или раздел?",
-    "has_textbook": "Есть ли у тебя учебник? (да/нет)",
-    "chapter": "Какая глава/раздел нужна? (или 'все')",
-    "mode": "Что будем делать: урок (изучить тему), квиз, объяснение или глубокий разбор?",
+    "learner_type": "Для кого готовим материал — ученик какого класса или студент?",
+    "grade": "Какой у тебя класс? (например: 6)",
+    "subject": "Какой предмет изучаем? (например: география, физика)",
+    "topic": "Какая тема или раздел? (например: Атмосфера)",
+    "has_textbook": "Есть ли у тебя учебник по этой теме? (да/нет)",
+    "mode": "Что делаем: изучим тему (урок), проверим знания (квиз), объясню конкретный вопрос или сделаем глубокий разбор?",
 }
 
-# Порядок вопросов чек-листа (5.1)
+# Порядок вопросов чек-листа (5.1). chapter исключён: он дублирует topic и
+# определяется автоматически после индексации по графу знаний.
 CHECKLIST_ORDER = [
-    "learner_type", "grade", "subject", "topic", "has_textbook", "chapter", "mode",
+    "learner_type", "grade", "subject", "topic", "has_textbook", "mode",
 ]
 
 _MODE_MAP = {
@@ -86,13 +86,20 @@ def normalize_answer(field: str, value: str) -> Any:
     """Приведение ответа пользователя к значению поля. None — «не знаю»/неопределённо."""
     if value is None:
         return None
-    text = str(value).strip().lower()
+    # Типизированные значения (например, из extract_intake_fields) нормализуются идемпотентно
+    if isinstance(value, bool):
+        text = "да" if value else "нет"
+    else:
+        text = str(value).strip().lower()
     if not text:
         return None
     if text in _UNKNOWN:
         return None
 
     if field == "learner_type":
+        # типизированное значение (extract_intake_fields) — идемпотентно
+        if isinstance(value, str) and value in ("student", "schoolchild"):
+            return value
         if "студент" in text or "student" in text:
             return "student"
         if "ученик" in text or "школьник" in text or "класс" in text:
@@ -150,6 +157,79 @@ def apply_answer(state: IntakeState, field: str, value: str) -> IntakeState:
 
     state.missing_fields = list(missing_after)
     return state
+
+
+def extract_intake_fields(text: str) -> Dict[str, Any]:
+    """Много-полевое извлечение из свободного ответа (5.4 / инструмент set_intake).
+
+    Один развёрнутый ответ ученика может заполнить несколько полей чек-листа:
+    «я в 7 классе, география, атмосфера, учебника нет, хочу квиз».
+    Возвращает только поля, распознанные уверенно. topic — только при явном маркере
+    («тема/тему/раздел/глава»), иначе тема остаётся на следующий уточняющий вопрос.
+    """
+    from .nlp import SUBJECTS  # локальный импорт — без циклической зависимости
+
+    result: Dict[str, Any] = {}
+    t = (text or "").strip()
+    if not t or t.lower() in _UNKNOWN:
+        return result
+    low = t.lower()
+
+    # Учебник
+    segments = [s.strip().lower() for s in low.split(",")]
+    if low in _YES or any(s in _YES for s in segments):
+        result["has_textbook"] = True
+    elif low in _NO or any(s in _NO for s in segments):
+        result["has_textbook"] = False
+    else:
+        if any(ph in low for ph in ("есть учебник", "учебник есть", "имеется учебник")):
+            result["has_textbook"] = True
+        elif any(ph in low for ph in ("учебника нет", "нет учебника", "учебник отсутствует")):
+            result["has_textbook"] = False
+
+    # Режим
+    for key, mode in _MODE_MAP.items():
+        if len(key) >= 3 and key in low:
+            result["mode"] = mode
+            break
+
+    # Тип обучаемого + класс
+    if "студент" in low or "student" in low:
+        result["learner_type"] = "student"
+    elif "ученик" in low or "школьник" in low or re.search(r"\d{1,2}\s*класс", low):
+        result["learner_type"] = "schoolchild"
+    g = re.search(r"(\d{1,2})\s*(?:-?й)?\s*класс", low)
+    if g:
+        result["grade"] = g.group(1)
+    elif re.fullmatch(r"\d{1,2}", t.strip()):
+        # «7» в ответ на «какой класс?» — класс
+        result["grade"] = t.strip()
+
+    # Предмет
+    for subj in SUBJECTS:
+        if subj in low:
+            result["subject"] = subj
+            break
+
+    # Тема — «весь учебник» (сегмент «все»/«всё») или с явным маркером («тема X»)
+    all_markers = ("все", "всё", "вся", "весь", "весь учебник", "все темы")
+    if any(seg.strip() in all_markers for seg in low.split(",")):
+        result["topic"] = "all"
+    else:
+        m = re.search(
+            r"(?:тема|тему|раздел|глава|главу)\s+[\"«]?([а-яёА-ЯЁa-z0-9 _\-]{2,60})[\"»]?",
+            t, re.IGNORECASE,
+        )
+        if m:
+            candidate = m.group(1).strip().strip(".,;")
+            if (
+                candidate
+                and candidate not in _YES
+                and candidate not in _NO
+                and not any(kw in candidate for kw in _MODE_MAP)
+            ):
+                result["topic"] = candidate
+    return result
 
 
 def validate_intake(

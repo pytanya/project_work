@@ -83,7 +83,8 @@ body {
 }
 .btn.small { width: auto; margin: 0; padding: 6px 12px; font-size: 12px; }
 .session-id {
-  font-family: var(--font-mono); font-size: 10.5px; color: var(--muted);
+  font-family: var(--font-mono); font-size: 10.5px; line-height: 1.4; min-height: 14px;
+  color: var(--muted);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
@@ -127,16 +128,162 @@ body {
 .kg-node:hover circle { stroke-width: 3; filter: brightness(1.15); }
 .kg-node.active circle { filter: drop-shadow(0 0 6px var(--green)); }
 .kg-node text { fill: var(--ink); pointer-events: none; font-family: var(--font-mono); font-weight: 700; }
+
+/* --- Граф: zoom/pan, рёбра, mastery, drill-down (roadmap #3) --- */
+.graph-svg-wrap {
+  position: relative; overflow: hidden; border: 1px solid var(--line);
+  border-radius: 12px; background: rgba(238, 241, 234, 0.55);
+  touch-action: none; user-select: none;
+}
+.graph-svg { width: 100%; height: auto; display: block; }
+.graph-zoom-hint {
+  position: absolute; right: 6px; bottom: 4px; font-size: 10px;
+  color: var(--ink-soft); opacity: 0.7; pointer-events: none;
+}
+/* --- Граф: Obsidian-стиль (roadmap #3) --- */
+.kg-node { cursor: pointer; transition: opacity 0.15s ease; }
+.kg-node.dim { opacity: 0.16; }
+.kg-node:hover circle { filter: brightness(1.18); }
+.kg-node.active circle { filter: drop-shadow(0 0 6px var(--green)); }
+.kg-hover-label {
+  fill: var(--ink); font-size: 10px; font-weight: 700;
+  font-family: var(--font-mono); pointer-events: none;
+  paint-order: stroke; stroke: var(--paper); stroke-width: 3px; stroke-linejoin: round;
+}
+.kg-edge { transition: opacity 0.15s ease; }
+.kg-edge.dim { opacity: 0.05; }
+.kg-tooltip {
+  position: absolute; z-index: 30; pointer-events: none;
+  max-width: 220px; min-width: 140px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  padding: 8px 10px; font-size: 11px; color: var(--ink);
+}
+.kg-tooltip-title { font-weight: 700; font-size: 12px; margin-bottom: 4px; }
+.kg-tooltip-meta { display: flex; flex-wrap: wrap; gap: 4px 8px; color: var(--ink-soft); font-size: 10.5px; }
+.kg-tooltip-type {
+  display: inline-block; padding: 1px 6px; border-radius: 6px;
+  background: var(--green-soft); color: var(--green-strong); font-weight: 700;
+}
+.kg-tooltip-mastery { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+.kg-tooltip-mastery .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.kg-tooltip-source { margin-top: 4px; color: var(--ink-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.graph-legend { display: flex; flex-wrap: wrap; gap: 8px 12px; font-size: 11px; color: var(--ink-soft); align-items: center; }
+.graph-legend span { display: inline-flex; align-items: center; gap: 4px; }
+.graph-legend i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+.graph-legend i.dot-high { background: #2E9E4F; }
+.graph-legend i.dot-mid { background: #F0B429; }
+.graph-legend i.dot-low { background: #E4572E; }
+.graph-wiki {
+  position: relative; border: 1px solid var(--green); border-radius: 10px;
+  background: var(--paper); padding: 10px 12px; margin-top: 6px; font-size: 12px;
+}
+.graph-wiki-close {
+  position: absolute; right: 6px; top: 4px; border: none; background: none;
+  cursor: pointer; color: var(--ink-soft); font-size: 13px; line-height: 1;
+}
+.graph-wiki-title { font-weight: 700; color: var(--ink); margin-bottom: 4px; font-size: 13px; }
+.wiki-mastery-line { font-size: 12px; margin-bottom: 4px; }
+.wiki-mastery-line.high { color: #2E9E4F; }
+.wiki-mastery-line.mid { color: #b8860b; }
+.wiki-mastery-line.low { color: #E4572E; }
+.graph-wiki-notes { display: flex; flex-direction: column; gap: 3px; margin: 6px 0; }
+.graph-wiki-note { font-size: 11px; color: var(--ink-soft); border-left: 3px solid var(--green); padding-left: 6px; }
+.graph-wiki-body { font-size: 12px; color: var(--ink); line-height: 1.5; max-height: 160px; overflow-y: auto; }
+
+/* --- Donut-диаграмма тем учебника --- */
+.kg-chart-wrapper {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  padding: 8px 0;
+}
+.kg-chart-svg {
+  width: 100%; height: auto; max-width: 300px;
+  touch-action: manipulation;
+}
+.kg-slice { cursor: pointer; }
+.kg-slice path {
+  transition: opacity 0.15s ease, filter 0.15s ease;
+}
+.kg-slice:hover path {
+  filter: brightness(1.2);
+  opacity: 1;
+}
+.kg-slice.active path {
+  filter: drop-shadow(0 0 6px var(--green));
+  opacity: 1;
+}
+.kg-tooltip {
+  width: 100%; padding: 10px 12px;
+  background: var(--paper); border: 1px solid var(--line); border-radius: 10px;
+  font-size: 12px; color: var(--ink);
+  animation: fadeIn 0.15s ease;
+}
+.kg-tooltip-header {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+}
+.kg-tooltip-title {
+  font-weight: 700; font-size: 13px; color: var(--ink);
+  font-family: var(--font-mono);
+}
+.kg-tooltip-badge {
+  font-size: 10px; padding: 2px 7px; border-radius: 6px;
+  background: var(--green-soft); color: var(--green-strong);
+  font-family: var(--font-mono); font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.05em;
+}
+.kg-tooltip-details { display: flex; flex-direction: column; gap: 4px; }
+.kg-tooltip-row {
+  display: flex; align-items: baseline; gap: 6px;
+}
+.kg-tooltip-label {
+  font-size: 11px; color: var(--muted); flex: none; min-width: 70px;
+}
+.kg-tooltip-value {
+  font-size: 12px; color: var(--ink); word-break: break-all;
+}
+.kg-tooltip-link {
+  color: var(--green-strong); text-decoration: none;
+  word-break: break-all;
+}
+.kg-tooltip-link:hover { text-decoration: underline; }
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 .topic-chip {
   text-align: left; padding: 8px 11px; border-radius: 9px; cursor: pointer;
   background: var(--card); border: 1.5px solid var(--line);
   color: var(--ink); font-family: var(--font-body); font-size: 13px; font-weight: 600;
   border-left: 4px solid var(--chip-color, var(--green));
   transition: all 0.12s ease;
+  /* Fix #1: обрезка длинных названий тем */
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  max-width: 100%;
 }
 .topic-chip:hover:not(:disabled) { background: color-mix(in srgb, var(--chip-color, var(--green)) 12%, var(--card)); transform: translateX(3px); }
 .topic-chip.active { border-color: var(--chip-color, var(--green)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--chip-color, var(--green)) 30%, transparent); }
 .topic-chip:disabled { opacity: 0.5; cursor: default; }
+
+/* --- База знаний (roadmap #2) --- */
+.card.wiki { display: flex; flex-direction: column; gap: 8px; }
+.wiki-subject-name {
+  font-size: 12px; font-weight: 700; color: var(--ink-soft);
+  text-transform: uppercase; letter-spacing: 0.4px; margin-top: 4px;
+}
+.wiki-topic {
+  display: flex; align-items: center; gap: 7px; font-size: 13px;
+  padding: 5px 6px; border-radius: 8px; background: var(--paper);
+  border: 1px solid var(--line);
+}
+.wiki-topic-name { flex: 1; font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wiki-topic-meta { font-size: 11px; color: var(--ink-soft); white-space: nowrap; }
+.wiki-mastery { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.wiki-mastery.high { background: var(--ok); }
+.wiki-mastery.mid { background: #f0b429; }
+.wiki-mastery.low { background: var(--err); }
 .graph-legend { font-size: 11px; color: var(--muted); }
 
 /* --- Источник / загрузка --- */
@@ -145,6 +292,14 @@ body {
 .source-status.failed { border-color: var(--err); color: var(--err); background: var(--red-soft); }
 .source-status.indexing, .source-status.searching { border-color: var(--green); color: var(--green-strong); background: var(--green-soft); }
 .source-note { font-size: 12px; color: var(--ink-soft); margin: 6px 0; }
+.source-author { font-size: 13px; margin: 6px 0; }
+.source-author strong { color: var(--ink); }
+.source-list { font-size: 12px; margin: 8px 0 2px; }
+.source-list-title { font-weight: 600; color: var(--ink-soft); margin-bottom: 4px; }
+.source-list ul { margin: 0; padding-left: 16px; color: var(--ink-soft); }
+.source-list li { margin: 3px 0; line-height: 1.35; word-break: break-all; }
+.source-list a { color: var(--green-strong); text-decoration: none; }
+.source-list a:hover { text-decoration: underline; }
 .btn {
   margin-top: 9px; width: 100%; padding: 9px; border: 1px solid var(--green);
   background: var(--card); color: var(--green-strong); border-radius: 10px;
@@ -193,6 +348,13 @@ body {
 }
 .bubble.user { background: var(--green-strong); color: #fff; margin-left: auto; border-bottom-right-radius: 4px; }
 .bubble.agent { background: var(--card); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+.bubble.agent.stream { border-left: 3px solid var(--green); min-height: 1.2em; }
+.stream-caret {
+  display: inline-block; width: 7px; height: 14px; margin-left: 2px;
+  vertical-align: text-bottom; background: var(--green);
+  animation: stream-blink 0.8s steps(2, start) infinite;
+}
+@keyframes stream-blink { to { visibility: hidden; } }
 .bubble.agent.intake { border-left: 3px solid var(--red); }   /* тьютор «пишет красным» */
 .bubble.agent.quiz { border-left: 3px solid var(--amber); }   /* квиз = маркер */
 .bubble.summary { background: var(--green-soft); border: 1px solid var(--ok); color: var(--ok); }
@@ -439,5 +601,172 @@ body {
 /* --- Кнопка отправки (➤) --- */
 .answerbar button {
   min-width: 48px; display: flex; align-items: center; justify-content: center;
+}
+
+/* ============================================================
+   KnowledgeWikiPanel — круговая диаграмма тем (donut chart)
+   ============================================================ */
+
+.wiki-chart-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.wiki-chart-svg {
+  width: 100%;
+  height: auto;
+  border-radius: 12px;
+  background: rgba(238, 241, 234, 0.3);
+  touch-action: manipulation;
+}
+
+/* Сектор диаграммы */
+.wiki-slice-path {
+  transition: opacity 0.2s ease, filter 0.2s ease;
+}
+.wiki-slice:hover .wiki-slice-path {
+  opacity: 0.95;
+  filter: brightness(1.2) drop-shadow(0 2px 6px rgba(0, 0, 0, 0.2));
+}
+
+/* Пустое состояние */
+.wiki-empty-hint {
+  font-size: 12px;
+  color: var(--muted);
+  text-align: center;
+  padding: 20px 10px;
+  line-height: 1.5;
+  border-top: 1px dashed var(--line);
+  margin-top: 8px;
+}
+
+/* ============================================
+   Wiki Tooltip / Detail Panel
+   ============================================ */
+.wiki-tooltip {
+  background: var(--card);
+  border: 1.5px solid var(--line);
+  border-left: 4px solid var(--green);
+  border-radius: 10px;
+  padding: 12px 14px;
+  box-shadow: var(--shadow);
+  animation: tooltip-fade-in 0.2s ease;
+}
+
+@keyframes tooltip-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.wiki-tooltip-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.wiki-tooltip-title {
+  font-weight: 700;
+  font-size: 13.5px;
+  color: var(--ink);
+  flex: 1;
+}
+
+.wiki-tooltip-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-family: var(--font-mono);
+}
+
+.wiki-tooltip-badge.high {
+  background: var(--green-soft);
+  color: var(--green-strong);
+}
+
+.wiki-tooltip-badge.mid {
+  background: var(--amber-soft);
+  color: #b87a1e;
+}
+
+.wiki-tooltip-badge.low {
+  background: var(--red-soft);
+  color: var(--err);
+}
+
+.wiki-tooltip-details {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.wiki-tooltip-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+}
+
+.wiki-tooltip-label {
+  color: var(--muted);
+  min-width: 130px;
+  font-size: 11.5px;
+}
+
+.wiki-tooltip-value {
+  color: var(--ink);
+  font-weight: 600;
+  font-size: 12.5px;
+}
+
+.wiki-tooltip-code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--paper);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+/* Полоска мастерства */
+.wiki-tooltip-meter {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 140px;
+}
+
+.wiki-tooltip-meter-fill {
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--green), var(--green-strong));
+  transition: width 0.4s ease;
+}
+
+/* Заметки в тултипе */
+.wiki-tooltip-notes {
+  margin-top: 4px;
+  padding: 8px;
+  background: var(--paper);
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wiki-tooltip-note {
+  color: var(--ink-soft);
+  line-height: 1.4;
+  padding-left: 8px;
+  border-left: 2px solid var(--red-soft);
 }
 

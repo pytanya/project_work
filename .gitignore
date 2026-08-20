@@ -31,6 +31,20 @@ data/*
 # --- Черновики / заметки ---
 tmp/
 
+# --- Временные артефакты и логи (не коммитить) ---
+*.log
+tmp_patch*.py
+fix_ui.py
+None
+_tmp_gh/
+_gh/
+*.PNG
+*.png
+.roo/
+.roomodes
+frontend/node_modules/
+frontend/dist/
+
 # --- IDE ---
 .vscode/
 .idea/

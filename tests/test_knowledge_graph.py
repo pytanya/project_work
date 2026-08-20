@@ -11,6 +11,7 @@ from src.knowledge_graph import (
     RELATED,
     build_or_load_textbook_graph,
     build_textbook_graph,
+    clean_title,
     graph_cache_key,
     load_cached_graph,
     save_graph,
@@ -34,6 +35,49 @@ class TestBuild:
     def test_no_sections_falls_back_to_topic(self):
         kg = build_textbook_graph("Просто текст без заголовков.", source="x")
         assert kg.graph.number_of_nodes() == 2  # book + topic
+
+    def test_web_headings_build_topics(self):
+        """Веб-конспект: markdown-заголовки → несколько узлов-тем (не один generic «topic»)."""
+        text = (
+            "# Иммануил Кант\n"
+            "Введение в философию Канта.\n"
+            "## Жизнь и биография\n"
+            "Родился в Кёнигсберге.\n"
+            "## Критика чистого разума\n"
+            "Основной труд.\n"
+            "### Трансцендентальная эстетика\n"
+            "Учение о пространстве и времени.\n"
+        )
+        kg = build_textbook_graph(text, source="Кант")
+        titles = [d["title"] for _, d in kg.graph.nodes(data=True)]
+        assert "Жизнь и биография" in titles
+        assert "Критика чистого разума" in titles
+        assert "Трансцендентальная эстетика" in titles
+        assert kg.graph.number_of_nodes() >= 4  # book + 3+ темы
+
+    def test_web_headings_clean_entities_and_surrogates(self):
+        """HTML-entities (&#8470;) и суррогаты не попадают в заголовки узлов."""
+        text = (
+            "# Параграф &#8470;&#160;43. Критика\n"
+            "Текст.\n"
+            "## Учение о &#171;вещи в себе&#187;\n"
+            "Текст.\n"
+            "## Философия \udc98ммануила Канта\n"
+            "Текст.\n"
+        )
+        kg = build_textbook_graph(text, source="Кант")
+        titles = [d["title"] for _, d in kg.graph.nodes(data=True)]
+        assert "Параграф № 43. Критика" in titles or "Параграф № 43" in "|".join(titles)
+        assert "Учение о «вещи в себе»" in titles
+        # суррогат удалён, повреждённая буква потеряна, но слово осталось читаемым
+        assert not any("\udc98" in t for t in titles)
+        assert "Канта" in "|".join(titles)
+
+    def test_clean_title(self):
+        assert clean_title("Тема &#8470;&#160;1") == "Тема № 1"
+        assert clean_title("Философия \udc98ммануила") == "Философия ммануила"
+        assert clean_title("  # Просто текст  ") == "Просто текст"
+        assert clean_title("") == ""
 
     def test_running_header_lessons_detected(self):
         # колонтитулы вида «4 Урок 1 ОСНОВЫ…» (не начало строки) — ловим номера

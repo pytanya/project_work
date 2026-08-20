@@ -215,8 +215,10 @@ class LLMClient:
         tool_choice: Any,
         max_tokens: Optional[int],
         temperature: Optional[float],
+        stream_fn: Optional[Callable[..., LLMResponse]] = None,
+        on_chunk: Optional[Callable[[str], None]] = None,
     ) -> LLMResponse:
-        """Запрос с retry на одном провайдере/модели."""
+        """Запрос с retry на одном провайдере/модели. stream_fn — стриминговый вариант."""
         name = provider["name"]
         client = self._clients.get(name)
         if client is None:
@@ -225,9 +227,12 @@ class LLMClient:
         last_error: Optional[Exception] = None
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                resp = self._make_request(
-                    client, name, model, messages, tools, tool_choice, max_tokens, temperature
-                )
+                if stream_fn is not None:
+                    resp = stream_fn(client, name, model, messages, on_chunk, max_tokens, temperature)
+                else:
+                    resp = self._make_request(
+                        client, name, model, messages, tools, tool_choice, max_tokens, temperature
+                    )
                 resp.provider = name
                 resp.model = model
                 resp.role = self.role
@@ -324,3 +329,92 @@ class LLMClient:
 
     def judge(self, messages, **kw) -> LLMResponse:
         return self.chat(messages, **kw)
+
+    # ------------------------------------------------------------------
+    # Стриминг токенов (stream=True) — для браузерного чата
+    # ------------------------------------------------------------------
+    def _stream_one(
+        self,
+        client: openai.OpenAI,
+        provider_name: str,
+        model: str,
+        messages: List[Dict[str, Any]],
+        on_chunk: Optional[Callable[[str], None]],
+        max_tokens: Optional[int],
+        temperature: Optional[float],
+    ) -> LLMResponse:
+        """Один стриминговый запрос (без retry). on_chunk вызывается на каждый фрагмент."""
+        kwargs: Dict[str, Any] = {"model": model, "messages": messages, "stream": True}
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+
+        stream = client.chat.completions.create(**kwargs)
+        parts: List[str] = []
+        usage: Dict[str, int] = {}
+        for chunk in stream:
+            choice = chunk.choices[0] if chunk.choices else None
+            delta = choice.delta if choice else None
+            if delta is not None and delta.content:
+                parts.append(delta.content)
+                if on_chunk is not None:
+                    on_chunk(delta.content)
+            if getattr(chunk, "usage", None) is not None:
+                u = chunk.usage
+                usage = {
+                    "prompt_tokens": getattr(u, "prompt_tokens", 0) or 0,
+                    "completion_tokens": getattr(u, "completion_tokens", 0) or 0,
+                    "total_tokens": getattr(u, "total_tokens", 0) or 0,
+                }
+
+        cost = _estimate_cost(usage, provider=provider_name, model=model)
+        return LLMResponse(
+            content="".join(parts) or None,
+            usage=usage,
+            cost_usd=round(cost, 6),
+            cost_raw=round(cost, 6),
+            provider=provider_name,
+            model=model,
+            role=self.role,
+        )
+
+    def chat_stream(
+        self,
+        messages: List[Dict[str, Any]],
+        on_chunk: Optional[Callable[[str], None]] = None,
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+    ) -> LLMResponse:
+        """Реальный стриминг токенов (stream=True) с провайдерским каскадом и retry.
+
+        on_chunk(text) вызывается по мере генерации — именно так токены попадают в браузер.
+        """
+        errors: List[str] = []
+        for provider in self.providers:
+            models = self._model_list(provider)
+            for model in models:
+                name = provider["name"]
+                client = self._clients.get(name)
+                if client is None:
+                    errors.append(f"{name}: клиент не инициализирован")
+                    continue
+                try:
+                    resp = self._request_with_retry(
+                        provider, model, messages, None, None, max_tokens, temperature,
+                        stream_fn=self._stream_one, on_chunk=on_chunk,
+                    )
+                    self._record(
+                        status="OK",
+                        prompt_tokens=resp.usage.get("prompt_tokens", 0),
+                        completion_tokens=resp.usage.get("completion_tokens", 0),
+                        cost_usd=resp.cost_usd,
+                        provider=resp.provider,
+                    )
+                    return resp
+                except openai.APIStatusError as e:
+                    errors.append(f"{name}/{model}: {e}")
+                except Exception as e:
+                    errors.append(f"{name}/{model}: {e}")
+                    break
+        raise RuntimeError("Стриминг недоступен: " + "; ".join(errors))
