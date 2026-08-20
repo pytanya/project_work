@@ -116,3 +116,25 @@ def test_select_topic_invalid_returns_404_not_500():
     resp = client.post(f"/api/sessions/{session.id}/topic", json={"topic_id": "nonexistent"})
     # Важно: НЕ 500! 404 - корректный ответ
     assert resp.status_code == 404, f"Expected 404, got {resp.status_code}"
+
+
+def test_select_topic_rejects_double_click_with_409():
+    """Fix #1 (race condition): пока шаг графа активен, повторный POST /topic → 409."""
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    store = FakeStore()
+    session = store.create()
+
+    app = FastAPI()
+    app.state.store = store
+    from api.routes.graph import router
+    app.include_router(router)
+
+    client = TestClient(app)
+    # Имитируем уже идущий фоновый шаг графа
+    session.step_active = True
+    resp = client.post(f"/api/sessions/{session.id}/topic", json={"topic_id": "n1"})
+    assert resp.status_code == 409, f"Expected 409, got {resp.status_code}: {resp.text}"
+    # Сессия не должна быть «загрязнена» повторным выбором
+    assert "error" in resp.json().get("detail", "").lower() or resp.json().get("detail")

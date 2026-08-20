@@ -152,15 +152,32 @@ export default function App() {
       const d = evt.data || {}
       
       // Сбрасываем busy если мы ожидали ответ на предыдущий вопрос
-      // и получили событие от бэкенда (quiz.card, tutor.explanation, system, etc.)
-      if (isWaitingForAnswer.current) {
+      // и получили ФИНАЛЬНОЕ событие шага. Промежуточные (source.progress,
+      // system kind="intent") НЕ сбрасывают busy — иначе индикатор «раздумий»
+      // пропадает, хотя генерация ещё идёт.
+      // НО не во время фоновой подготовки темы: там busy держит isPreparingTopic,
+      // иначе событие `system` от select_topic сбросит индикатор раньше времени.
+      if (isWaitingForAnswer.current && !isPreparingTopic.current) {
         const answerResolvedEvents = [
-          'quiz.card', 'tutor.lesson', 'tutor.explanation', 'system', 
-          'tutor.summary', 'intake.question', 'source.progress'
+          'quiz.card', 'tutor.lesson', 'tutor.explanation',
+          'tutor.summary', 'intake.question', 'source.failed', 'session.error'
         ]
         if (answerResolvedEvents.includes(evt.event)) {
           setChatBusy(false)
           isWaitingForAnswer.current = false
+        }
+        // `system` сбрасывает busy только когда это финал шага (не intent/warning):
+        // topic.all / topic.selected / lesson.done / lesson.repeat / lesson.ready /
+        // agent.message / doc.scanned.
+        if (evt.event === 'system') {
+          const finalSystemKinds = [
+            'topic.all', 'topic.selected', 'lesson.done', 'lesson.repeat',
+            'lesson.ready', 'agent.message', 'doc.scanned'
+          ]
+          if (finalSystemKinds.includes(d.kind)) {
+            setChatBusy(false)
+            isWaitingForAnswer.current = false
+          }
         }
       }
 
@@ -236,12 +253,15 @@ export default function App() {
           }
           break
         case 'system.heartbeat':
-          // Heartbeat: продлеваем busy-таймаут + обновляем контекст прогресса
+          // Heartbeat: продлеваем busy-таймаут + обновляем контекст прогресса.
+          // elapsed (сек) показываем в сообщении — пользователь видит, что генерация идёт.
           resetBusyAfterTimeout()
           if (isPreparingTopic.current) {
             setProgressPhase((p) => ({
               stage: p?.stage || 'topic',
-              message: d.message || p?.message || 'Обработка продолжается…',
+              message: `${d.message || p?.message || 'Обработка продолжается…'}${
+                d.elapsed ? ` (${d.elapsed} сек)` : ''
+              }`,
               status: 'working',
             }))
           }
@@ -524,8 +544,16 @@ export default function App() {
 
   async function handleSelectTopic(node) {
     if (!sessionId) return
+    if (isPreparingTopic.current) {
+      push('system', 'Уже готовимся по предыдущей теме — дождитесь завершения.')
+      return
+    }
     setChatBusy(true)
     isPreparingTopic.current = true  // busy до финального WS-события (fire-and-forget)
+    // Клик по теме суперсидирует ожидание ответа на предыдущий вопрос:
+    // сбрасываем флаг, чтобы событие `system`/`source.progress` не сняли busy
+    // во время подготовки (fix #2).
+    isWaitingForAnswer.current = false
     // НЕ обнуляем current - показываем что готовимся по теме
     // node.title может быть URL — используем readable version
     const displayTitle = node.title && node.title.startsWith('http')

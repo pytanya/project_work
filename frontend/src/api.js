@@ -9,7 +9,14 @@ async function jsonFetch(path, options = {}) {
     ...options,
   })
   if (!res.ok) {
-    throw new Error(`HTTP ${res.status}: ${await res.text()}`)
+    // FastAPI отвечает {detail: "..."} — достаём человекочитаемое сообщение.
+    let detail = `HTTP ${res.status}`
+    try {
+      const body = await res.json()
+      if (typeof body?.detail === 'string') detail = body.detail
+      else if (Array.isArray(body?.detail)) detail = body.detail.map((d) => d.msg).join('; ')
+    } catch (_) { /* не-JSON ответ — оставляем HTTP-статус */ }
+    throw new Error(detail)
   }
   return res.json()
 }

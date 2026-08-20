@@ -66,7 +66,9 @@ function forceLayout(nodes, edges, bookNode) {
   }
   const k = Math.sqrt((W * H) / Math.max(1, nodes.length))
 
-  for (let iter = 0; iter < 260; iter++) {
+  // Итерации снижены с 260 до 120 (fix #3): для >20 узлов сходимость
+  // достигается раньше, а синхронный расчёт в useMemo не «замораживает» UI.
+  for (let iter = 0; iter < 120; iter++) {
     const forces = {}
     const ids = Object.keys(pos)
     for (const id of ids) forces[id] = { fx: 0, fy: 0 }
@@ -163,7 +165,7 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
       (edges || []).map((e) => `${e.source}->${e.target}`).sort().join('|'),
     [nodes, edges],
   )
-  const layout = useMemo(() => computeLayout(nodes, edges), [layoutKey, nodes, edges])
+  const layout = useMemo(() => computeLayout(nodes, edges), [layoutKey])
 
   // Степень узла (число связей) — размер точки в графе (как в Obsidian)
   const degree = useMemo(() => {

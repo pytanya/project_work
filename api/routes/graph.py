@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -22,8 +23,27 @@ from ..engine import SessionStore, run_step
 router = APIRouter(prefix="/api/sessions/{session_id}", tags=["graph"])
 
 # Фоновые шаги графа (fire-and-forget): держим ссылку, чтобы задача не была
-# собрана GC до завершения (asyncio.create_task).
+# собрана GC до завершения (asyncio.create_task). Завершённые задачи удаляются
+# через done-callback — модульный set не копит мусор (fix #6: утечка в dev/hot-reload).
 _bg_tasks: set = set()
+_MAX_BG_TASKS = 32
+
+
+def _track_background_task(task: asyncio.Task) -> None:
+    """Регистрируем фоновую задачу с автозачисткой завершённых.
+
+    Помимо done-callback (не растёт в памяти), ограничиваем общее число
+    незавершённых задач: при переполнении отменяем старейшую — защита от
+    «накрутки» тем двойными кликами/перезагрузкой страницы.
+    """
+    task._bg_created_at = time.monotonic()
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+    while len(_bg_tasks) > _MAX_BG_TASKS:
+        stale = min(_bg_tasks, key=lambda t: getattr(t, "_bg_created_at", 0))
+        _bg_tasks.discard(stale)
+        if not stale.done():
+            stale.cancel()
 
 
 async def _run_step_background(session) -> None:
@@ -164,11 +184,27 @@ async def select_topic(session_id: str, body: TopicBody, store: SessionStore = D
         )
         session.history.append({"role": "system", "text": f"Подготовка по теме: {title}"})
 
+        # Гвард от двойного запуска (fix #1): если шаг графа уже выполняется —
+        # отклоняем 409, иначе два фоновых run_step мутируют session.state параллельно.
+        if session.step_active:
+            logger.warning(
+                "select_topic: step already active for session %s — rejecting %s",
+                session_id, body.topic_id,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail="Идёт подготовка предыдущей темы. Дождитесь завершения.",
+            )
+
         # Fire-and-forget (оптимизация #2): HTTP не ждёт генерации вопроса/урока.
         # Результат и прогресс приходят через WS (source.progress, token, quiz.card,
         # tutor.lesson) — UI не «зависает» на 30-120 сек.
+        # Закрываем окно между проверкой и стартом задачи: помечаем шаг активным
+        # синхронно (run_step сбросит флаг в finally), чтобы два concurrent POST
+        # не прошли гвард (fix #1).
+        session.step_active = True
         task = asyncio.create_task(_run_step_background(session))
-        _bg_tasks.add(task)
+        _track_background_task(task)
         logger.info("Topic prepared in background for session %s", session_id)
 
         return {

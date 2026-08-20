@@ -902,6 +902,22 @@ class WsEvent(BaseModel):
 > (`{message: "Обработка продолжается…", elapsed: <сек>}`) — фронтенд обновляет контекст прогресса и
 > продлевает busy-таймаут, исключая «зависание» UI на 30–120 сек.
 
+> **Исправление кодового ревью (2026-08-20):**
+> - **409 Conflict на повторный выбор темы (race #1):** `POST /topic` проверяет `session.step_active` —
+>   если шаг графа уже выполняется, запрос отклоняется кодом `409` (сообщение «Идёт подготовка предыдущей
+>   темы…»). Окно между проверкой и стартом задачи закрыто синхронной установкой `step_active=True`
+>   перед `create_task` — два concurrent POST не запустят параллельных `run_step`, мутирующих
+>   `session.state`. Фронтенд дополнительно блокирует клики по темам, пока `isPreparingTopic.current`.
+> - **`source.progress` исключён из `answerResolvedEvents` (race #2):** событие прогресса больше не
+>   сбрасывает `chatBusy` при конфликте флагов `isWaitingForAnswer`/`isPreparingTopic` — busy держится
+>   до финального события (`quiz.card`/`tutor.lesson`/…). `system`-события разделены по `kind`:
+>   промежуточные (`intent`, `intake.warning`) не сбрасывают busy, финальные (`topic.all`,
+>   `topic.selected`, `lesson.done`, `lesson.repeat`, `lesson.ready`, `agent.message`, `doc.scanned`)
+>   — сбрасывают. В `answerResolvedEvents` добавлены `source.failed`/`session.error` — индикатор
+>   «раздумий» после отправки ответа виден до конца генерации и не зависает при ошибке.
+> - **elapsed в UI (heartbeat):** фронтенд показывает «Обработка продолжается… (N сек)» из поля
+>   `elapsed` события `system.heartbeat`.
+
 ### 8.4. Шаблон исполнения графа с WebSocket (В-5)
 
 ```
@@ -919,6 +935,8 @@ POST /cancel ◀─── task.cancel() + checkpoint сохранён (сост�
 - **Primary-каналы:** WS — стриминг (вопросы intake, прогресс поиска, квиз-карточки, объяснения); HTTP — ввод (ответы ученика, upload, cancel, статусы).
 - **POST /cancel — cooperative cancellation (В-4):** асинхронный граф корректно отменяется **без блокировки event loop** — проверка на точках прерывания/`await` (interrupt/checkpoint); `task.cancel()` снимается на ближайшей `await`-точке, checkpoint сохраняется, повторный запуск продолжает с сохранённого состояния.
 - **Fire-and-forget выбор темы (2026-08-20, оптимизация стриминга):** `POST /topic` больше не ждёт полного завершения графа (LLM+RAG могут занять 30–120 сек). Эндпоинт синхронно обновляет `active_topic`/`awaiting_topic`, запускает `asyncio.create_task(_run_step_background(session))` и сразу отвечает `{ok, active_topic, title}`. Вопрос/урок и прогресс приходят через WS (`source.progress` → `token` → `quiz.card`/`tutor.lesson`). Ссылка на фоновую задачу удерживается в модульном сете `_bg_tasks` (защита от сборки GC), ошибка фона публикуется событием `session.error`.
+  - **Анти-double-fire (race #1):** повторный `POST /topic`, пока выполняется шаг графа, → `HTTP 409 Conflict`; флаг `session.step_active` выставляется синхронно перед `create_task`, чтобы два параллельных запроса не прошли гвард.
+  - **Очистка `_bg_tasks` (fix #6):** завершённые задачи удаляются через `add_done_callback(_bg_tasks.discard)`; при превышении `_MAX_BG_TASKS=32` отменяется старейшая задача — сет не копит мусор (в т.ч. при hot-reload в dev).
 
 ### 8.5. SQLite persistence сессий (Фаза 2 реализована)
 
