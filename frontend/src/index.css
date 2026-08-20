@@ -300,6 +300,20 @@ body {
 .bubble.system, .bubble.source { background: var(--paper); border: 1px solid var(--line); color: var(--ink-soft); font-size: 13.5px; }
 .bubble.error { background: var(--red-soft); border: 1px solid var(--err); color: var(--err); }
 
+/* ---Thinking / три точки (busy без progressPhase) --- */
+.bubble.agent.progress {
+  display: inline-flex; align-items: center; padding: 10px 16px;
+}
+.bubble.agent.progress .dot {
+  display: inline-block;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--green);
+  animation: bounce-dot 1.4s infinite ease-in-out both;
+  margin: 0 4px;
+}
+.bubble.agent.progress .dot:nth-child(2) { animation-delay: 0.16s; }
+.bubble.agent.progress .dot:nth-child(3) { animation-delay: 0.32s; }
+
 /* --- Карточки вопроса/интейка: «флешкарты» --- */
 .card.quiz, .card.intake { border: 1px solid var(--green); }
 .quiz-meta { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
@@ -714,7 +728,7 @@ body {
    ============================================================ */
 
 /* --- Прогресс в чате вместо трёх точек при подготовке темы/урока --- */
-.bubble.agent.progress {
+.bubble.agent.progress.has-phase {
   display: flex; flex-direction: column; gap: 8px;
   min-width: 200px; border-left: 3px solid var(--green);
 }

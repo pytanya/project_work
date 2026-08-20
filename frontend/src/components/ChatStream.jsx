@@ -48,7 +48,7 @@ export default function ChatStream({ feed, busy = false, progressPhase = null })
       ))}
       {busy && (
         <div className="msg progress-indicator">
-          <div className="bubble agent progress">
+          <div className={`bubble agent progress${progressPhase ? ' has-phase' : ''}`}>
             {progressPhase ? (
               <>
                 <div className="progress-text">{progressPhase.message}</div>
