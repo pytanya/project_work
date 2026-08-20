@@ -3,7 +3,7 @@ import { useEffect, useRef } from 'react'
 import ExplanationPanel from './ExplanationPanel'
 import LessonPanel from './LessonPanel'
 
-export default function ChatStream({ feed, busy = false }) {
+export default function ChatStream({ feed, busy = false, progressPhase = null }) {
   const endRef = useRef(null)
   useEffect(() => {
     try {
@@ -47,9 +47,18 @@ export default function ChatStream({ feed, busy = false }) {
         </div>
       ))}
       {busy && (
-        <div className="msg typing-indicator">
-          <div className="bubble agent typing">
-            <span className="dot" /><span className="dot" /><span className="dot" />
+        <div className="msg progress-indicator">
+          <div className="bubble agent progress">
+            {progressPhase ? (
+              <>
+                <div className="progress-text">{progressPhase.message}</div>
+                <div className="progress-bar-wrap">
+                  <div className="progress-bar-indeterminate" />
+                </div>
+              </>
+            ) : (
+              <><span className="dot" /><span className="dot" /><span className="dot" /></>
+            )}
           </div>
         </div>
       )}

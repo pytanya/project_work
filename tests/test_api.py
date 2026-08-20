@@ -274,14 +274,25 @@ class TestGraph:
         assert r.status_code == 404
 
     def test_select_topic_generates_question(self, client):
+        """Fire-and-forget (оптимизация #2): HTTP возвращается мгновенно,
+        вопрос/урок приходят через WS, а не в HTTP-ответе."""
         sid = self._session_with_graph(client)
         g = client.get(f"/api/sessions/{sid}/graph").json()
         node = next(n for n in g["nodes"] if n.get("type") == "section")
-        r = client.post(f"/api/sessions/{sid}/topic", json={"topic_id": node["id"]})
-        assert r.status_code == 200
-        assert r.json()["ok"] is True
-        assert r.json()["active_topic"] == node["id"]
-        assert r.json()["question"] or r.json()["next_question"]
+        with client.websocket_connect(f"/api/sessions/{sid}/ws") as ws:
+            r = client.post(f"/api/sessions/{sid}/topic", json={"topic_id": node["id"]})
+            assert r.status_code == 200
+            assert r.json()["ok"] is True
+            assert r.json()["active_topic"] == node["id"]
+            assert "question" not in r.json()  # больше не ждём генерацию в HTTP-ответе
+            # Ждём финальное событие графа через WS
+            got = False
+            for _ in range(120):
+                ev = ws.receive_json()
+                if ev["event"] in ("quiz.card", "tutor.lesson", "tutor.explanation", "session.error"):
+                    got = True
+                    break
+            assert got, "Фоновый шаг графа не опубликовал финальное событие через WS"
 
     def test_related_nodes(self, client):
         sid = self._session_with_graph(client)

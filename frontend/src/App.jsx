@@ -42,6 +42,8 @@ export default function App() {
   // Разделение busy: upload для индексации чат для квиза/сообщений
   const [uploadBusy, setUploadBusy] = useState(false)
   const [chatBusy, setChatBusy] = useState(false)
+  // Контекстный прогресс подготовки урока/вопроса: {stage, message, status}
+  const [progressPhase, setProgressPhase] = useState(null)
   // Счётчик вопросов квиза из записей
   const [questionNum, setQuestionNum] = useState(0)
   const wsRef = useRef(null)
@@ -54,6 +56,8 @@ export default function App() {
   const pendingAnswer = useRef(null)       // текст отправленного ответа
   const currentKindAtSubmit = useRef(null) // kind экрана в момент отправки
   const isWaitingForAnswer = useRef(false) // флаг: ждём WS событие после отправки
+  const isPreparingTopic = useRef(false)   // флаг: идёт фоновая подготовка темы (fire-and-forget)
+  const answerTimeoutRef = useRef(null)    // id busy-таймаута (сбрасывается heartbeat'ом)
 
   // Синхронизируем currentRef с current (для handleEvent, у которого stable-замыкание)
   useEffect(() => {
@@ -118,6 +122,21 @@ export default function App() {
     streamRef.current = null
   }, [])
 
+  // Busy-таймаут (оптимизация #5): 120 сек вместо 240. Каждый WS-событие heartbeat
+  // (system.heartbeat) продлевает таймаут, поэтому долгая генерация не «отваливается».
+  const ANSWER_TIMEOUT = 120000
+  const resetBusyAfterTimeout = useCallback(() => {
+    if (answerTimeoutRef.current) clearTimeout(answerTimeoutRef.current)
+    answerTimeoutRef.current = setTimeout(() => {
+      if (isWaitingForAnswer.current || isPreparingTopic.current) {
+        setChatBusy(false)
+        setProgressPhase(null)
+        isWaitingForAnswer.current = false
+        isPreparingTopic.current = false
+      }
+    }, ANSWER_TIMEOUT)
+  }, [])
+
   const refreshGraph = useCallback(async () => {
     if (!sessionIdRef.current) return
     try {
@@ -142,6 +161,20 @@ export default function App() {
         if (answerResolvedEvents.includes(evt.event)) {
           setChatBusy(false)
           isWaitingForAnswer.current = false
+        }
+      }
+
+      // Fire-and-forget подготовка темы: busy держим до финального события
+      // (вопрос/урок/сводка), а прогресс-события обновляют progressPhase.
+      if (isPreparingTopic.current) {
+        const finalEvents = [
+          'quiz.card', 'tutor.lesson', 'tutor.summary', 'intake.question',
+          'source.failed', 'session.error'
+        ]
+        if (finalEvents.includes(evt.event)) {
+          isPreparingTopic.current = false
+          setChatBusy(false)
+          setProgressPhase(null)
         }
       }
       
@@ -197,6 +230,21 @@ export default function App() {
             setCurrent(null)
           }
           push('source', d.message)
+          // Гранулярный прогресс при подготовке темы (оптимизация #1)
+          if (isPreparingTopic.current && d.message && d.status !== 'done' && d.status !== 'ready') {
+            setProgressPhase({ stage: d.stage, message: d.message, status: d.status })
+          }
+          break
+        case 'system.heartbeat':
+          // Heartbeat: продлеваем busy-таймаут + обновляем контекст прогресса
+          resetBusyAfterTimeout()
+          if (isPreparingTopic.current) {
+            setProgressPhase((p) => ({
+              stage: p?.stage || 'topic',
+              message: d.message || p?.message || 'Обработка продолжается…',
+              status: 'working',
+            }))
+          }
           break
         case 'source.failed':
           endStream()
@@ -231,7 +279,7 @@ export default function App() {
           break
       }
     },
-    [push, refreshGraph, pushToken, endStream],
+    [push, refreshGraph, pushToken, endStream, resetBusyAfterTimeout],
   )
 
   useEffect(() => {
@@ -396,15 +444,9 @@ export default function App() {
     setChatBusy(true)
     isWaitingForAnswer.current = true  // помечаем что ждём WS событие от бэкенда
     
-    // Таймаут fallback: если WS событие не пришло за 240 секунд — сбрасываем busy.
-    // Агентный intake + фаза источника + генерация урока/квиза могут занять 2-4 минуты
-    // (несколько последовательных LLM-вызовов и эмбеддингов).
-    const timeout = setTimeout(() => {
-      if (isWaitingForAnswer.current) {
-        setChatBusy(false)
-        isWaitingForAnswer.current = false
-      }
-    }, 240000)
+    // Таймаут fallback: если WS событие не пришло за 120 секунд — сбрасываем busy.
+    // Heartbeat-события (system.heartbeat) продлевают таймаут при долгой генерации.
+    resetBusyAfterTimeout()
     
     try {
       const isIntakeTurn = current?.kind === 'intake'
@@ -428,7 +470,7 @@ export default function App() {
       setChatBusy(false)
       isWaitingForAnswer.current = false
     } finally {
-      clearTimeout(timeout)
+      if (answerTimeoutRef.current) clearTimeout(answerTimeoutRef.current)
       // busy сбросится при получении WS события или по timeout
     }
   }
@@ -483,36 +525,27 @@ export default function App() {
   async function handleSelectTopic(node) {
     if (!sessionId) return
     setChatBusy(true)
+    isPreparingTopic.current = true  // busy до финального WS-события (fire-and-forget)
     // НЕ обнуляем current - показываем что готовимся по теме
     // node.title может быть URL — используем readable version
     const displayTitle = node.title && node.title.startsWith('http')
       ? (node.title.match(/https?:\/\/[^\/\s]+/)?.[0]?.replace('https://', '').replace('http://', '') || 'Источник')
       : (node.title || 'тема')
     push('system', `Готовимся по теме: ${displayTitle}...`)
+    setProgressPhase({ stage: 'topic', message: `Готовимся по теме: ${displayTitle}...`, status: 'starting' })
     try {
       const r = await api.selectTopic(sessionId, node.id)
       setGraph((g) => ({ ...g, activeTopic: r.active_topic }))
-      // Если бэкенд уже сгенерировал вопрос - обновляем UI
-      if (r.question) {
-        const q = r.question
-        setCurrent({
-          kind: 'quiz', question: q.question, options: q.options, answerType: q.answer_type,
-          topic: q.topic, difficulty: q.difficulty, questionId: q.question_id,
-        })
-      } else if (r.lesson) {
-        // 7.3.3: режим «урок» — показываем урок и ждём подтверждения
-        setCurrent({ kind: 'intake', question: r.next_question || 'Готов(а) перейти к квизу?', missingFields: [] })
-        push('lesson', r.lesson, { topic: r.title })
-      } else if (r.next_question) {
-        // Есть следующий вопрос (intake)
-        setCurrent({ kind: 'intake', question: r.next_question, missingFields: [] })
-      }
-      // resync не нужен - уже получили данные из selectTopic
+      // Вопрос/урок придут через WS (source.progress → token → quiz.card / tutor.lesson) —
+      // не ждём их в HTTP-ответе (оптимизация #2).
+      resetBusyAfterTimeout()  // страховка, если WS-события вдруг не придут
     } catch (e) {
       push('error', String(e.message || e))
-    } finally {
+      isPreparingTopic.current = false
+      setProgressPhase(null)
       setChatBusy(false)
     }
+    // chatBusy сбросится при получении финального WS-события
   }
 
   function handleNewSession() {
@@ -530,9 +563,12 @@ export default function App() {
     setAnswer('')
     setChatBusy(false)
     setUploadBusy(false)
+    setProgressPhase(null)
     isWaitingForAnswer.current = false
+    isPreparingTopic.current = false
     pendingAnswer.current = null
     currentKindAtSubmit.current = null
+    if (answerTimeoutRef.current) clearTimeout(answerTimeoutRef.current)
     window.location.reload()
   }
 
@@ -596,7 +632,7 @@ export default function App() {
         <FileUpload onUpload={handleUpload} busy={uploadBusy} />
       </aside>
       <main className="chat">
-        <ChatStream feed={feed} busy={chatBusy || uploadBusy} />
+        <ChatStream feed={feed} busy={chatBusy || uploadBusy} progressPhase={progressPhase} />
         {current &&
           (current.kind === 'quiz' ? (
             <QuizCard

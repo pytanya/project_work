@@ -770,3 +770,62 @@ body {
   border-left: 2px solid var(--red-soft);
 }
 
+/* ============================================================
+   Оптимизация стриминга: контекстный прогресс (implementation_plan)
+   ============================================================ */
+
+/* --- Прогресс в чате вместо трёх точек при подготовке темы/урока --- */
+.bubble.agent.progress {
+  display: flex; flex-direction: column; gap: 8px;
+  min-width: 200px; border-left: 3px solid var(--green);
+}
+.progress-text {
+  font-size: 13.5px; color: var(--ink-soft); line-height: 1.4;
+}
+.progress-bar-wrap {
+  height: 6px; border-radius: 3px; background: var(--paper-deep);
+  overflow: hidden; position: relative;
+}
+.progress-bar-indeterminate {
+  position: absolute; top: 0; left: 0; height: 100%; width: 40%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--green-soft), var(--green), var(--green-soft));
+  animation: progress-slide 1.3s ease-in-out infinite;
+}
+@keyframes progress-slide {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(360%); }
+}
+
+/* --- Граф: пульсация активного узла --- */
+.kg-pulse {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: kg-pulse 1.8s ease-in-out infinite;
+}
+@keyframes kg-pulse {
+  0%, 100% { transform: scale(1); opacity: 0.95; }
+  50% { transform: scale(1.32); opacity: 0.7; }
+}
+
+/* --- Граф: overlay загрузки при подготовке темы --- */
+.graph-loading-overlay {
+  position: absolute; inset: 0; z-index: 5; pointer-events: none;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 9px;
+  background: rgba(238, 241, 234, 0.7);
+  backdrop-filter: blur(2px);
+  border-radius: 12px;
+}
+.graph-spinner {
+  width: 26px; height: 26px; border: 3px solid var(--line);
+  border-top-color: var(--green); border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+.graph-loading-text {
+  font-size: 12px; font-weight: 600; color: var(--green-strong);
+}
+@media (prefers-reduced-motion: reduce) {
+  .kg-pulse, .progress-bar-indeterminate, .graph-spinner { animation: none !important; }
+}
+

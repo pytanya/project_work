@@ -358,6 +358,8 @@ def agent_tutor_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     st = state.model_copy(deep=True)
     prev_qid = st.current_question.question_id if st.current_question else None
     prev_lesson = st.lesson_text
+    _emit(deps, "source.progress", stage="tutor", url="", status="generating",
+          message=f"Готовлю задание по теме «{st.topic or st.subject or 'тема'}»…")
     st, final_text = run_tutor_agent(st, deps)
 
     # Публикуем события для фронтенда по изменениям состояния
@@ -541,8 +543,13 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
             topic = title
     # deep_dive берёт больше контекста (несколько разделов, 7.3.4); lesson/explain — k=5
     k = 8 if mode == "deep_dive" else 5
+    # Гранулярный прогресс (оптимизация): пользователь видит этап генерации, а не «тишину»
+    _emit(deps, "source.progress", stage="content", url="", status="generating",
+          message=f"Ищу материалы по теме «{topic}»…")
     chunks = _rag_chunks(deps.store, topic, st, k=k)
     context = [c.chunk.text for c in chunks] or ["Нет контекста по теме."]
+    _emit(deps, "source.progress", stage="content", url="", status="generating",
+          message=f"Генерирую {_MODE_LABELS.get(mode, 'материал')} по теме «{topic}» ({len(context)} фрагментов)…")
     on_token = deps.on_token  # реальный стриминг токенов в браузер (stream=True)
     if mode == "deep_dive":
         st.lesson_text = tutor_mod.generate_deep_dive(topic, context, st, llm_call=deps.expert_llm, on_token=on_token)
@@ -903,6 +910,8 @@ def route_tutor_agent(state: TutorState) -> str:
 def generate_question_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     st = state.model_copy(deep=True)
     topic = st.topic or st.subject or "общая тема"
+    _emit(deps, "source.progress", stage="quiz", url="", status="generating",
+          message=f"Генерирую вопрос по теме «{topic}»…")
     chunks = _rag_chunks(deps.store, topic, st, k=3)
     context = [c.chunk.text for c in chunks]
     if not context:

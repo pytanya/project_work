@@ -20,6 +20,12 @@
 > **Roadmap #2 (2026-08-18): Knowledge Wiki + поток «студент без учебника».** Персистентные wiki-статьи по темам между сессиями (`src/wiki.py`, `data/knowledge_wiki/`), идемпотентное накопление mastery/attempts; Wiki-LLM (`enrich_body`) — тело статьи из RAG-контекста при изучении темы; граф из веб-источников — по страницам (book → page → subtopics), шум отсечён; источники+автор в UI; `/api/wiki`. См. раздел 3.3, roadmap.md.
 >
 > **Roadmap #3 (2026-08-18): визуализация графа знаний.** SVG zoom/pan/drag, типы рёбер (`part_of`/`prerequisite`/`related`) разными цветами, mastery overlay (цвет узла = усвоение из wiki, `/graph` возвращает mastery/attempts), drill-down клик по узлу → wiki-статья (`/graph/{node}/wiki`). Без внешней библиотеки — стабильнее. См. roadmap.md.
+>
+> **Оптимизация стриминга (2026-08-20, implementation_plan.md):** устранено «зависание» UI при подготовке урока:
+> - [x] **Fire-and-forget выбор темы:** `POST /topic` отвечает мгновенно (`{ok, active_topic, title}`), граф выполняется в фоне (`asyncio.create_task`), результат идёт через WS — HTTP больше не блокирует 30–120 сек (раздел 8.4)
+> - [x] **Гранулярный прогресс:** промежуточные `source.progress`-события при генерации урока/вопроса (stage `content`/`quiz`/`tutor`, «Ищу материалы…» → «Генерирую урок…») (раздел 8.3)
+> - [x] **Heartbeat:** при долгом `run_step` каждые 15 сек событие `system.heartbeat` — фронтенд продлевает busy-таймаут (240 → 120 сек) и показывает контекстный прогресс-бар вместо трёх точек (раздел 9.6)
+> - [x] **Граф знаний:** мемоизация layout по ключу, гибридный layout (radial ≤20 тем / force-directed >20 — читаемость при 50+ узлах), пульсация активного узла, overlay «Готовим материал…»
 
 ---
 
@@ -819,6 +825,8 @@ GET    /api/sessions/{id}/source-status # Статус поиска: катал�
 
 # Взаимодействие (чат)
 POST   /api/sessions/{id}/message       # Ответ ученика / короткий запрос → MessageResponse
+POST   /api/sessions/{id}/topic         # Выбрать тему графа (fire-and-forget: отвечает мгновенно,
+                                        #   граф идёт в фоне, вопрос/урок + прогресс — через WS, раздел 8.4)
 POST   /api/sessions/{id}/cancel        # Отмена долгой задачи (find_textbook до 300с) (В-5)
 GET    /api/sessions/{id}/history       # История сообщений
 
@@ -866,13 +874,14 @@ WS — **primary-канал вывода агента** (стриминг); HTTP
 class WsEvent(BaseModel):
     event: Literal[
         "intake.question",    # {question: str, missing_fields: [...]}
-        "source.progress",    # {stage: "catalog"|"download"|"verify"|"index", url: str, status: str}
+        "source.progress",    # {stage: "catalog"|"download"|"verify"|"index"|"content"|"quiz"|"tutor", url: str, status: str, message: str}
         "source.failed",      # {session_id: str, source_id: str, reason: str} — эмитится узлом source_failed (В-3, Ж-4)
         "quiz.card",          # QuizCard
         "tutor.lesson",       # {text, topic} — урок/объяснение/глубокий разбор
         "tutor.explanation",  # {text, citation: {paragraph, source}}
         "tutor.summary",      # {correct, total, knowledge_map}
         "token",              # {text} — реальный стриминг токенов (stream=True) при генерации урока/объяснения
+        "system.heartbeat",   # {message, elapsed} — каждые 15 сек при долгом шаге графа (продлевает busy-таймаут)
         "session.error",      # {code, message}
     ]
     data: Dict[str, Any]
@@ -885,6 +894,13 @@ class WsEvent(BaseModel):
 > real-time-a2a-agent, где используется `stream=False` и посимвольная имитация).
 
 > **Ж-4:** событие `source.failed` эмитится узлом **`source_failed`** графа (раздел 2.2, В-3) — материалов по теме нет вообще. Поля: `session_id`, `source_id` (идентификатор последнего обработанного источника/шага поиска), `reason` (например: `empty_result`, `license_blocked`, `search_timeout`). UI отображает причину и предлагает загрузку собственного документа (`upload`).
+
+> **Гранулярный прогресс при подготовке (2026-08-20, оптимизация стриминга):** при генерации урока/вопроса
+> узлы графа публикуют промежуточные `source.progress`-события: `stage="content"|"quiz"|"tutor"`,
+> `status="generating"`, `message` с этапом («Ищу материалы по теме…», «Генерирую урок… (N фрагментов)»,
+> «Генерирую вопрос…»). При долгом `run_step` каждые 15 сек приходит `system.heartbeat`
+> (`{message: "Обработка продолжается…", elapsed: <сек>}`) — фронтенд обновляет контекст прогресса и
+> продлевает busy-таймаут, исключая «зависание» UI на 30–120 сек.
 
 ### 8.4. Шаблон исполнения графа с WebSocket (В-5)
 
@@ -902,6 +918,7 @@ POST /cancel ◀─── task.cancel() + checkpoint сохранён (сост�
 - **Checkpointer (AsyncSqliteSaver):** используется **асинхронный** checkpoint saver, а не синхронный `SqliteSaver` (В-4) — граф исполняется в фоне (asyncio-задача), и синхронные I/O-операции с БД блокировали бы event loop. Состояние графа сохраняется на каждом шаге — долгий `find_textbook` (до 300 с) не блокирует соединение: WS получает промежуточные события `source.progress`, а граф может быть прерван/возобновлён.
 - **Primary-каналы:** WS — стриминг (вопросы intake, прогресс поиска, квиз-карточки, объяснения); HTTP — ввод (ответы ученика, upload, cancel, статусы).
 - **POST /cancel — cooperative cancellation (В-4):** асинхронный граф корректно отменяется **без блокировки event loop** — проверка на точках прерывания/`await` (interrupt/checkpoint); `task.cancel()` снимается на ближайшей `await`-точке, checkpoint сохраняется, повторный запуск продолжает с сохранённого состояния.
+- **Fire-and-forget выбор темы (2026-08-20, оптимизация стриминга):** `POST /topic` больше не ждёт полного завершения графа (LLM+RAG могут занять 30–120 сек). Эндпоинт синхронно обновляет `active_topic`/`awaiting_topic`, запускает `asyncio.create_task(_run_step_background(session))` и сразу отвечает `{ok, active_topic, title}`. Вопрос/урок и прогресс приходят через WS (`source.progress` → `token` → `quiz.card`/`tutor.lesson`). Ссылка на фоновую задачу удерживается в модульном сете `_bg_tasks` (защита от сборки GC), ошибка фона публикуется событием `session.error`.
 
 ### 8.5. SQLite persistence сессий (Фаза 2 реализована)
 
@@ -927,7 +944,7 @@ store = SessionStore(sqlite_store=SessionSQLiteStore(data/session_persist.db))
 ## 9. UI (React)
 
 > **Расширение заказчика** — не входит в MVP (раздел 15). Для MVP достаточно CLI-прогона сценария.
-> **Последняя доработка:** Фаза 1 оптимизаций (август 2026) — settings gear, quick answer toggle, разделение busy-состояний, счётчик «Вопрос N/M» и confirm-bar для режима подтверждения (см. статус реализации в шапке спецификации).
+> **Последняя доработка:** оптимизация стриминга (2026-08-20) — fire-and-forget выбор темы, контекстный прогресс-бар вместо трёх точек, heartbeat, гибридный layout графа (см. раздел 8.4 и шапку спецификации); ранее — Фаза 1 оптимизаций (август 2026): settings gear, quick answer toggle, разделение busy-состояний, счётчик «Вопрос N/M» и confirm-bar для режима подтверждения.
 
 ### 9.1. Концепция
 
@@ -965,14 +982,15 @@ Sidebar (левая панель):
 | `SourceSearchPanel` | Статус авто-поиска учебника: каталог → скачивание → проверка → индексация. Использует отдельный `busy=false` не блокирует — баннер «Загрузка…» не появляется при отправке ответа. | WS-событие `source.progress` |
 | `FileUpload` | Drag & drop PDF/DOCX с превью. Принимает пропс `busy={uploadBusy}` — только uploadBusy активирует баннер индексации (chatBusy не влияет) | `POST /upload` |
 | `QuizCard` | Карточка вопроса с адаптивной меткой сложности и счётчиком «Вопрос N/M». Варианты подсвечиваются как `selected` при выборе. Если `quickAnswer=false` — кнопка подтверждения появляется поверх карточки (`ConfirmBar`) | WS-событие `quiz.card` → `QuizCard` (В-4) |
-| `KnowledgeGraphPanel` | Граф знаний учебника: темы-уроки (мульти-акцентная раскраска); клик → подготовка по теме | `GET /api/sessions/{id}/graph`, `POST /api/sessions/{id}/topic` |
+| `KnowledgeGraphPanel` | Граф знаний учебника: темы-уроки (мульти-акцентная раскраска); клик → подготовка по теме. **Гибридный layout** (radial ≤20 тем / force-directed >20), мемоизация layout по ключу (hover/zoom не пересчитывают), пульсация активного узла, overlay «Готовим материал…» при фоновой подготовке | `GET /api/sessions/{id}/graph`, `POST /api/sessions/{id}/topic` |
 | `ExplanationPanel` | Объяснение с цитатой из учебника (подсветка источника) | WS-событие `tutor.explanation` |
 | `ProgressDashboard` | Прогресс по темам (knowledge_map), анимированные бары по уровню (low/mid/high). Счётчик с анимацией bump при обновлении правильных | `GET /sessions/{id}`, `tutor.summary` |
-| `ChatStream` | WebSocket-стриминг событий агента; когда есть `busy=true` внизу автоматически показывается Typing Indicator (три зелёные точки в анимации bounce) | WS `/api/sessions/{id}/ws` |
+| `ChatStream` | WebSocket-стриминг событий агента. При `busy=true` внизу показывается **контекстный индикатор прогресса**: если задан `progressPhase` — текст этапа («Готовимся по теме…», «Ищу материалы…») + indeterminate progress-bar, иначе классический Typing Indicator (три зелёные точки) | WS `/api/sessions/{id}/ws` |
 
 > **App.jsx — управление состоянием сессии:**
 > 1. `useEffect(resync())` — после каждого `submitAnswer()` состояние сериализуется в JSON и сохраняется в БД. Сервис загружает его обратно при запуске — прогресс ученика переживает перезагрузку сервера.
 > 2. **Режим быстрого ответа (`quickAnswer`, localStorage):** если включён — вариант отправляется мгновенно при клике (детерминированная свёрка closed questions = <100 мс). Если выключен — выбранный вариант показан в полосе подтверждения («Вы выбрали X» → «Подтвердить» / «Отмена»). Переключается в popup шестерёнки. Настройка хранится в `localStorage.edututor_settings`.
+> 3. **Контекстный прогресс подготовки (2026-08-20, оптимизация стриминга):** `handleSelectTopic` больше не ждёт вопрос/урок в HTTP-ответе (fire-and-forget). Флаг `isPreparingTopic` держит `chatBusy` до финального WS-события (`quiz.card` / `tutor.lesson` / `tutor.summary` / `intake.question` / `session.error`), а промежуточные `source.progress` и `system.heartbeat` обновляют state `progressPhase` (stage + message) — UI показывает этап генерации и indeterminate progress-bar. Busy-таймаут снижен 240 → 120 сек и **продлевается каждым heartbeat**, поэтому долгая генерация не «отваливается».
 
 ---
 

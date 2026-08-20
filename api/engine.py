@@ -235,6 +235,21 @@ async def run_step(session: SessionData, answer: Optional[str] = None) -> TutorS
 
     timeout = float(getattr(cfg_settings, "RUN_STEP_TIMEOUT_SEC", 300.0))
     session.step_active = True
+
+    # Heartbeat (оптимизация #5): каждые 15 сек шлём событие, чтобы фронтенд знал,
+    # что долгая генерация ещё идёт, и продлевал свой busy-таймаут.
+    async def _heartbeat():
+        start = time.monotonic()
+        while session.step_active:
+            await asyncio.sleep(15)
+            if session.step_active:
+                elapsed = int(time.monotonic() - start)
+                session.queue.put(WsEvent(
+                    event="system.heartbeat",
+                    data={"message": "Обработка продолжается…", "elapsed": elapsed},
+                ))
+
+    hb_task = asyncio.create_task(_heartbeat())
     try:
         session.state = await asyncio.wait_for(asyncio.to_thread(_invoke), timeout=timeout)
     except asyncio.TimeoutError:
@@ -248,6 +263,7 @@ async def run_step(session: SessionData, answer: Optional[str] = None) -> TutorS
         session.state = st
     finally:
         session.step_active = False
+        hb_task.cancel()
     
     # Сохраняем состояние после каждого шага (персистентность)
     if session.store and session.store._sqlite:

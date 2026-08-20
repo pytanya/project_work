@@ -48,6 +48,89 @@ function radialLayout(nodes, edges) {
   return { book: book ? { ...book, x: cx, y: cy } : null, topics: placed, byId }
 }
 
+// Простая force-directed симуляция на чистом JS (~d3-force-lite) для больших графов:
+// разводит перекрывающиеся узлы, сохраняя рёберные связи. Используется при >20 тем.
+function forceLayout(nodes, edges, bookNode) {
+  const W = VIEW_W
+  const H = VIEW_H
+  const pos = {}
+  nodes.forEach((n, i) => {
+    const ang = (2 * Math.PI * i) / Math.max(1, nodes.length)
+    pos[n.id] = { x: W / 2 + 90 * Math.cos(ang), y: H / 2 + 90 * Math.sin(ang) }
+  })
+  if (bookNode) pos[bookNode.id] = { x: W / 2, y: H / 2 }
+
+  const link = []
+  for (const e of edges || []) {
+    if (pos[e.source] && pos[e.target]) link.push({ a: e.source, b: e.target })
+  }
+  const k = Math.sqrt((W * H) / Math.max(1, nodes.length))
+
+  for (let iter = 0; iter < 260; iter++) {
+    const forces = {}
+    const ids = Object.keys(pos)
+    for (const id of ids) forces[id] = { fx: 0, fy: 0 }
+    // отталкивание
+    for (let i = 0; i < ids.length; i++) {
+      for (let j = i + 1; j < ids.length; j++) {
+        const a = pos[ids[i]]
+        const b = pos[ids[j]]
+        let dx = a.x - b.x
+        let dy = a.y - b.y
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1
+        const f = (k * k) / dist
+        const fx = (dx / dist) * f
+        const fy = (dy / dist) * f
+        forces[ids[i]].fx += fx
+        forces[ids[i]].fy += fy
+        forces[ids[j]].fx -= fx
+        forces[ids[j]].fy -= fy
+      }
+    }
+    // притяжение по рёбрам
+    for (const l of link) {
+      const a = pos[l.a]
+      const b = pos[l.b]
+      let dx = b.x - a.x
+      let dy = b.y - a.y
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1
+      const f = (dist * dist) / k
+      const fx = (dx / dist) * f
+      const fy = (dy / dist) * f
+      forces[l.a].fx += fx
+      forces[l.a].fy += fy
+      forces[l.b].fx -= fx
+      forces[l.b].fy -= fy
+    }
+    for (const id of ids) {
+      const p = pos[id]
+      p.x += forces[id].fx * 0.04 * 0.85
+      p.y += forces[id].fy * 0.04 * 0.85
+      p.x = Math.max(14, Math.min(W - 14, p.x))
+      p.y = Math.max(14, Math.min(H - 14, p.y))
+    }
+  }
+
+  const byId = {}
+  for (const n of nodes) byId[n.id] = { ...n, ...pos[n.id] }
+  if (bookNode) byId[bookNode.id] = { ...bookNode, ...pos[bookNode.id] }
+  return {
+    book: bookNode ? byId[bookNode.id] : null,
+    topics: nodes.map((n) => byId[n.id]),
+    byId,
+  }
+}
+
+// Гибрид: radial для небольших графов (≤20 тем), force-directed для больших —
+// radial складывает всё в круг и становится нечитаемым при 50+ узлах.
+function computeLayout(nodes, edges) {
+  const topics = (nodes || []).filter((n) => n.type !== 'book')
+  const book = (nodes || []).find((n) => n.type === 'book')
+  if (topics.length === 0) return { book: null, topics: [], byId: {} }
+  if (topics.length <= 20) return radialLayout(nodes, edges)
+  return forceLayout(topics, edges, book)
+}
+
 function shortTitle(title) {
   return String(title || '').replace(/^Урок\s*(\d+).*/i, '$1').slice(0, 14)
 }
@@ -70,7 +153,17 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
     return topics.filter((n) => String(n.title || '').toLowerCase().includes(q))
   }, [topics, query])
 
-  const layout = useMemo(() => radialLayout(nodes, edges), [nodes, edges])
+  // Мемоизация layout (оптимизация #4): ключ = отсортированные id узлов + рёбра.
+  // Изменение только атрибутов узлов (mastery и т.п.) не пересчитывает layout,
+  // а hover/zoom/drag не ре-раннят его вовсе.
+  const layoutKey = useMemo(
+    () =>
+      (nodes || []).map((n) => n.id).sort().join('|') +
+      '#' +
+      (edges || []).map((e) => `${e.source}->${e.target}`).sort().join('|'),
+    [nodes, edges],
+  )
+  const layout = useMemo(() => computeLayout(nodes, edges), [layoutKey, nodes, edges])
 
   // Степень узла (число связей) — размер точки в графе (как в Obsidian)
   const degree = useMemo(() => {
@@ -261,7 +354,7 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
                   onMouseEnter={() => onNodeEnter(t)}
                   onMouseLeave={onNodeLeave}
                 >
-                  <circle r={r} fill={fill} opacity={active ? 0.95 : 0.85} stroke={active ? '#fff' : fill} strokeWidth={active ? 2 : 1} />
+                  <circle r={r} fill={fill} className={active ? 'kg-pulse' : ''} opacity={active ? 0.95 : 0.85} stroke={active ? '#fff' : fill} strokeWidth={active ? 2 : 1} />
                   {mc && <circle r="2.6" fill="#fff" opacity="0.95" cx={r + 3} cy={-(r + 3)} />}
                   {showLabel && (
                     <text textAnchor="middle" dy="-14" className="kg-hover-label">{shortTitle(t.title)}</text>
@@ -287,6 +380,12 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
               </div>
             )}
             {tooltip.node.source && <div className="kg-tooltip-source">{tooltip.node.source}</div>}
+          </div>
+        )}
+        {busy && activeTopic && (
+          <div className="graph-loading-overlay">
+            <div className="graph-spinner" />
+            <div className="graph-loading-text">Готовим материал…</div>
           </div>
         )}
         <div className="graph-zoom-hint">колесо — масштаб · drag — сдвиг</div>

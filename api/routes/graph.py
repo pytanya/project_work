@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Optional
@@ -19,6 +20,31 @@ from ..deps import get_session, get_store
 from ..engine import SessionStore, run_step
 
 router = APIRouter(prefix="/api/sessions/{session_id}", tags=["graph"])
+
+# Фоновые шаги графа (fire-and-forget): держим ссылку, чтобы задача не была
+# собрана GC до завершения (asyncio.create_task).
+_bg_tasks: set = set()
+
+
+async def _run_step_background(session) -> None:
+    """Фоновый шаг графа — результат публикуется через WS-очередь (оптимизация #2).
+
+    HTTP POST /topic больше не ждёт полного завершения графа: пользователь сразу
+    получает ответ, а прогресс/токены/вопрос приходят через WebSocket.
+    """
+    task = asyncio.current_task()
+    try:
+        await run_step(session)
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:  # pragma: no cover — ошибка фона не должна теряться
+        logger.exception("Background run_step error: %s", e)
+        from api.schemas import WsEvent
+
+        session.queue.put(WsEvent(event="session.error", data={"message": str(e)}))
+    finally:
+        if task is not None:
+            _bg_tasks.discard(task)
 
 
 class TopicBody(BaseModel):
@@ -137,20 +163,18 @@ async def select_topic(session_id: str, body: TopicBody, store: SessionStore = D
             }
         )
         session.history.append({"role": "system", "text": f"Подготовка по теме: {title}"})
-        
-        logger.info("Running step after topic selection")
-        await run_step(session)
-        logger.info("Step completed, returning response")
-        
+
+        # Fire-and-forget (оптимизация #2): HTTP не ждёт генерации вопроса/урока.
+        # Результат и прогресс приходят через WS (source.progress, token, quiz.card,
+        # tutor.lesson) — UI не «зависает» на 30-120 сек.
+        task = asyncio.create_task(_run_step_background(session))
+        _bg_tasks.add(task)
+        logger.info("Topic prepared in background for session %s", session_id)
+
         return {
             "ok": True,
             "active_topic": session.state.active_topic,
             "title": title,
-            "question": session.state.current_question.model_dump() if session.state.current_question else None,
-            "next_question": session.state.agent_question or "",
-            # 7.3.3: урок/разбор в ответе — не теряется при HTTP-пути и resync
-            "lesson": session.state.lesson_text or None,
-            "explanation": session.state.agent_message or None,
         }
     except Exception as e:
         logger.exception("select_topic error: %s", e)
