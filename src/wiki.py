@@ -318,11 +318,22 @@ class WikiArticle:
 
 
 class KnowledgeWiki:
-    """Хранилище wiki-статей (персистентное, между сессиями)."""
+    """Хранилище wiki-статей (персистентное, между сессиями).
 
-    def __init__(self, root_dir: Optional[Any] = None) -> None:
-        self.root = Path(root_dir or default_settings.KNOWLEDGE_WIKI_DIR)
+    Персональное пространство по ученику: при `student_id` статьи хранятся в
+    `<root>/<student_id>/<subject>/<topic>.md`, иначе — `<root>/<subject>/<topic>.md`
+    (legacy/общее). Так мастерство и заметки не смешиваются между учениками.
+    """
+
+    def __init__(self, root_dir: Optional[Any] = None, student_id: Optional[str] = None) -> None:
+        self.base = Path(root_dir or default_settings.KNOWLEDGE_WIKI_DIR)
+        self.student_id = (student_id or "").strip()
+        self.root = self.base / self.student_id if self.student_id else self.base
         self.root.mkdir(parents=True, exist_ok=True)
+
+    def for_student(self, student_id: Optional[str]) -> "KnowledgeWiki":
+        """Новый экземпляр, привязанный к ученику (тот же базовый каталог)."""
+        return KnowledgeWiki(self.base, student_id=student_id)
 
     # --- пути ---
     def subject_dir(self, subject: str) -> Path:

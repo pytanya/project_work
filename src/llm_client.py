@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import openai
 
@@ -35,6 +35,25 @@ COMPLETION_PRICE_PER_1M = config.settings.COST_PER_1M_COMPLETION
 RETRY_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 MAX_RETRIES = 3
 BACKOFF_BASE = 1.0  # 1 → 2 → 4 сек
+
+# Кэш openai-клиентов по (base_url, api_key, timeout): создание httpx-клиента
+# дорого (~2-3с на некоторых ОС из-за инициализации TLS/прокси), а openai-клиент
+# потокобезопасен — переиспользуем его между ролями/сессиями.
+_openai_client_cache: Dict[Tuple[str, str, float], "openai.OpenAI"] = {}
+
+
+def _cached_openai_client(base_url: str, api_key: str, timeout: float) -> "openai.OpenAI":
+    key = (base_url, api_key, timeout)
+    client = _openai_client_cache.get(key)
+    if client is None:
+        client = openai.OpenAI(
+            base_url=base_url,
+            api_key=api_key,
+            timeout=timeout,
+            max_retries=0,  # retry реализуем сами
+        )
+        _openai_client_cache[key] = client
+    return client
 
 
 @dataclass
@@ -100,11 +119,8 @@ class LLMClient:
                 client_timeout = p.get("timeout") or self.settings.REQUEST_TIMEOUT
                 if role == ROLE_CHEAP:
                     client_timeout = self.settings.CHEAP_TIMEOUT_SEC
-                self._clients[p["name"]] = openai.OpenAI(
-                    base_url=p["base_url"],
-                    api_key=p["api_key"],
-                    timeout=client_timeout,
-                    max_retries=0,  # retry реализуем сами
+                self._clients[p["name"]] = _cached_openai_client(
+                    p["base_url"], p["api_key"], client_timeout
                 )
             except Exception as e:  # pragma: no cover
                 logger.warning("Не удалось создать клиент для %s: %s", p["name"], e)

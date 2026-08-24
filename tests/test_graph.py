@@ -100,8 +100,22 @@ class TestIntakeFlow:
     def test_asks_learner_type_first(self, deps):
         graph = build_graph(deps)
         res = _invoke(graph, TutorState().model_dump())
-        assert res.intake_field == "learner_type"
+        # Быстрое знакомство: вместо пошагового первого вопроса — карточка-форма
+        assert res.agent_card is not None
+        keys = [f["key"] for f in res.agent_card["fields"]]
+        assert keys[0] == "name"
         assert res.agent_question
+
+    def test_card_then_text_answer_resumes_qna(self, deps):
+        """Ученик отвечает текстом вместо карточки — пошаговый Q&A продолжается."""
+        graph = build_graph(deps)
+        res = _invoke(graph, TutorState().model_dump())
+        assert res.agent_card is not None
+        # ответ текстом → карточка сбрасывается, intake идёт по шагам
+        res = _invoke(graph, {**res.model_dump(), "pending_answer": "я ученик 6 класса"})
+        assert res.agent_card is None
+        assert res.learner_type == "schoolchild"
+        assert res.intake_field == "grade" or res.agent_question
 
     def test_full_intake_to_quiz(self, deps):
         graph = build_graph(deps)
@@ -517,7 +531,7 @@ class TestBuild:
             TutorState().model_dump(),
             config={"configurable": {"thread_id": "t1"}},
         )
-        assert res.intake_field == "learner_type"
+        assert res.agent_card is not None  # карточка знакомства (быстрый intake)
 
 
 def _minimal_scanned_pdf(tmp_path):

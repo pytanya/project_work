@@ -58,6 +58,7 @@ def client(make_settings, tmp_path):
         FGOS_REFERENCE_DIR=str(BASE_DIR / "data" / "fgos_reference"),
         TEXTBOOKS_DOWNLOADS_DIR=str(tmp_path / "downloads"),
         KNOWLEDGE_WIKI_DIR=str(tmp_path / "wiki"),
+        STUDENTS_DIR=str(tmp_path / "students"),
         MAX_INTAKE_ITERATIONS=8,
         OCR_MIN_TEXT_CHARS=20,
     )
@@ -317,9 +318,10 @@ class TestGraph:
         from src.wiki import KnowledgeWiki, WikiArticle
 
         sid = self._session_with_graph(client)
+        stu_id = client.get(f"/api/sessions/{sid}").json()["student_id"]
         # сессия создана с subject «физика»? В _session_with_graph intake «физика» —
-        # проверяем обе ветки матчинга wiki
-        wiki = KnowledgeWiki(tmp_path)
+        # проверяем обе ветки матчинга wiki. Статья пишется в персональный namespace ученика.
+        wiki = KnowledgeWiki(tmp_path, student_id=stu_id)
         wiki.upsert(WikiArticle(subject="физика", topic="Параграф 12: Атмосфера", mastery=0.9, attempts=5))
         monkeypatch.setattr("api.routes.graph.default_settings.KNOWLEDGE_WIKI_DIR", tmp_path)
 
@@ -333,7 +335,8 @@ class TestGraph:
         from src.wiki import KnowledgeWiki, WikiArticle
 
         sid = self._session_with_graph(client)
-        wiki = KnowledgeWiki(tmp_path)
+        stu_id = client.get(f"/api/sessions/{sid}").json()["student_id"]
+        wiki = KnowledgeWiki(tmp_path, student_id=stu_id)
         wiki.upsert(WikiArticle(subject="физика", topic="Параграф 12: Атмосфера", mastery=0.8, attempts=3))
         monkeypatch.setattr("api.routes.graph.default_settings.KNOWLEDGE_WIKI_DIR", tmp_path)
 
@@ -418,6 +421,89 @@ class TestEngineCircuitBreaker:
         cb.record_failure()
         cb.record_success()
         assert not cb.is_open()
+
+
+class TestStudentProfile:
+    """Профили учеников: сессия возвращает student_id, карточка сохраняет имя/тип/класс."""
+
+    def _create(self, client, **kw):
+        return client.post("/api/sessions", json=kw)
+
+    def _fill_card(self, client, sid, **over):
+        values = {"name": "Маша", "learner_type": "schoolchild", "grade": "6",
+                  "subject": "география", "topic": "Атмосфера",
+                  "has_textbook": "false", "mode": "quiz", **over}
+        return client.post(f"/api/sessions/{sid}/intake/card", json={"values": values})
+
+    def test_session_returns_student_id(self, client):
+        r = self._create(client)
+        assert r.status_code == 201
+        body = r.json()
+        assert body["session_id"]
+        assert body["student_id"].startswith("stu_")
+        # тот же student_id при повторной передаче
+        r2 = self._create(client, student_id=body["student_id"])
+        assert r2.json()["student_id"] == body["student_id"]
+
+    def test_card_completes_intake_and_saves_profile(self, client):
+        r = self._create(client, initial={"sources": [{"type": "web", "url": "x"}], "collection_id": "web"})
+        sid, stu_id = r.json()["session_id"], r.json()["student_id"]
+
+        # карточка появилась в состоянии (первый шаг графа — быстро)
+        st = client.get(f"/api/sessions/{sid}").json()
+        for _ in range(50):
+            if st.get("agent_card"):
+                break
+            st = client.get(f"/api/sessions/{sid}").json()
+        assert st["agent_card"] is not None
+        keys = [f["key"] for f in st["agent_card"]["fields"]]
+        assert "name" in keys and "grade" in keys and "mode" in keys
+
+        resp = self._fill_card(client, sid)
+        assert resp.status_code == 200
+        assert resp.json()["complete"] is True
+
+        p = client.app.state.store.student_store.get(stu_id)
+        assert p is not None
+        assert p.name == "Маша"
+        assert p.learner_type == "schoolchild"
+        assert p.grade == "6"
+
+    def test_reuse_student_id_prefills_next_session(self, client):
+        r1 = self._create(client, initial={"sources": [{"type": "web", "url": "x"}], "collection_id": "web"})
+        stu_id = r1.json()["student_id"]
+        self._fill_card(client, r1.json()["session_id"])
+
+        r2 = self._create(client, student_id=stu_id)
+        st = client.get(f"/api/sessions/{r2.json()['session_id']}").json()
+        assert st["student_id"] == stu_id
+        assert st["student_name"] == "Маша"
+        assert st["learner_type"] == "schoolchild"
+        assert st["grade"] == "6"
+
+    def test_card_blocks_profanity_name(self, client):
+        r = self._create(client)
+        resp = self._fill_card(client, r.json()["session_id"], name="хуйня")
+        assert resp.status_code == 200
+        assert resp.json()["complete"] is False
+
+
+class TestWikiPerStudent:
+    """Персональная база знаний: /api/wiki?student_id= изолирует данные учеников."""
+
+    def test_students_isolated(self, client, monkeypatch, tmp_path):
+        from src.wiki import KnowledgeWiki, WikiArticle
+
+        monkeypatch.setattr("api.routes.wiki.default_settings.KNOWLEDGE_WIKI_DIR", tmp_path)
+        # статья ученика A
+        wiki_a = KnowledgeWiki(tmp_path, student_id="stu_a")
+        wiki_a.upsert(WikiArticle(subject="География", topic="Атмосфера", mastery=0.9, attempts=3))
+
+        ra = client.get("/api/wiki?student_id=stu_a").json()
+        rb = client.get("/api/wiki?student_id=stu_b").json()
+        assert len(ra["subjects"]) == 1
+        assert ra["subjects"][0]["articles"][0]["mastery"] == 0.9
+        assert rb["subjects"] == []  # у другого ученика пусто
 
 
 class TestWebSocket:

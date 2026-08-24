@@ -1,8 +1,12 @@
-"""Knowledge Wiki (roadmap #2): GET /api/wiki — накопленная база знаний ученика."""
+"""Knowledge Wiki (roadmap #2): GET /api/wiki — накопленная база знаний ученика.
+
+База персональная: `?student_id=` определяет namespace (данные каждого ученика
+в `knowledge_wiki/<student_id>/`). Без student_id — общий/legacy каталог.
+"""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from src.config import settings as default_settings
@@ -14,13 +18,14 @@ from ..engine import SessionStore
 router = APIRouter(prefix="/api/wiki", tags=["wiki"])
 
 
-def _wiki() -> KnowledgeWiki:
-    return KnowledgeWiki(default_settings.KNOWLEDGE_WIKI_DIR)
+def _wiki(student_id: str = "") -> KnowledgeWiki:
+    return KnowledgeWiki(default_settings.KNOWLEDGE_WIKI_DIR, student_id=student_id)
 
 
 class WikiEnrichBody(BaseModel):
     subject: str
     topic: str
+    student_id: str = ""
 
 
 @router.post("/enrich")
@@ -41,7 +46,7 @@ def wiki_enrich(body: WikiEnrichBody, store: SessionStore = Depends(get_store)):
     st = TutorState(subject=body.subject)
     chunks = _rag_chunks(base.store, body.topic, st, k=4)
     context = [c.chunk.text for c in chunks]
-    wiki = _wiki()
+    wiki = _wiki(body.student_id)
     subject = body.subject or "общая тема"
     art = wiki.get(subject, body.topic)
     if not context:
@@ -64,15 +69,17 @@ def wiki_enrich(body: WikiEnrichBody, store: SessionStore = Depends(get_store)):
 
 
 @router.get("")
-def wiki_summary(_store: SessionStore = Depends(get_store)):
-    """Сводка базы знаний: предмет → темы с мастерством/попытками (между сессиями)."""
-    return {"subjects": _wiki().to_summary_dict()}
+def wiki_summary(student_id: str = Query(default="", description="персональный namespace ученика"),
+                 _store: SessionStore = Depends(get_store)):
+    """Сводка базы знаний ученика: предмет → темы с мастерством/попытками."""
+    return {"subjects": _wiki(student_id).to_summary_dict()}
 
 
 @router.get("/{subject}")
-def wiki_subject(subject: str, _store: SessionStore = Depends(get_store)):
-    """Статьи по предмету."""
-    wiki = _wiki()
+def wiki_subject(subject: str, student_id: str = Query(default=""),
+                 _store: SessionStore = Depends(get_store)):
+    """Статьи по предмету (персонально для ученика)."""
+    wiki = _wiki(student_id)
     articles = [a.to_dict() for a in wiki.list_articles(subject)]
     if not articles:
         raise HTTPException(status_code=404, detail="Предмет не найден в базе знаний")
@@ -80,9 +87,10 @@ def wiki_subject(subject: str, _store: SessionStore = Depends(get_store)):
 
 
 @router.get("/{subject}/{topic}")
-def wiki_article(subject: str, topic: str, _store: SessionStore = Depends(get_store)):
-    """Одна wiki-статья темы."""
-    art = _wiki().get(subject, topic)
+def wiki_article(subject: str, topic: str, student_id: str = Query(default=""),
+                 _store: SessionStore = Depends(get_store)):
+    """Одна wiki-статья темы (персонально для ученика)."""
+    art = _wiki(student_id).get(subject, topic)
     if art is None:
         raise HTTPException(status_code=404, detail="Тема не найдена в базе знаний")
     return art.to_dict()

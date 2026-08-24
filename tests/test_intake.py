@@ -6,9 +6,12 @@ import pytest
 
 from src.intake import (
     apply_answer,
+    apply_intake_card,
+    build_intake_card,
     compute_missing,
     emergency_min_set_met,
     extract_intake_fields,
+    maybe_start_card,
     normalize_answer,
     validate_intake,
 )
@@ -202,3 +205,61 @@ class TestValidateIntake:
         s = apply_answer(s, "subject", "не знаю")
         d = validate_intake(s, max_iterations=3)
         assert d.decision == "emergency_start"
+
+
+class TestIntakeCard:
+    def test_build_card_has_all_fields(self):
+        s = IntakeState()
+        card = build_intake_card(s)
+        keys = [f["key"] for f in card["fields"]]
+        assert keys == ["name", "learner_type", "grade", "subject", "topic", "has_textbook", "mode"]
+        assert card["title"]
+        assert card["question"]
+
+    def test_build_card_prefills_profile(self):
+        s = IntakeState(student_name="Маша", learner_type="schoolchild", grade="6",
+                        subject="география", topic="Атмосфера", mode="quiz")
+        card = build_intake_card(s)
+        by_key = {f["key"]: f["value"] for f in card["fields"]}
+        assert by_key["name"] == "Маша"
+        assert by_key["learner_type"] == "schoolchild"
+        assert by_key["grade"] == "6"
+        assert by_key["mode"] == "quiz"
+
+    def test_apply_card_fills_all(self):
+        s = IntakeState(student_id="stu_1")
+        st = apply_intake_card(s, {
+            "name": "Маша", "learner_type": "schoolchild", "grade": "6",
+            "subject": "география", "topic": "Атмосфера",
+            "has_textbook": "false", "mode": "quiz",
+        })
+        assert st.student_name == "Маша"
+        assert st.learner_type == "schoolchild"
+        assert st.grade == "6"
+        assert st.subject == "география"
+        assert st.topic == "Атмосфера"
+        assert st.has_textbook is False
+        assert st.mode == "quiz"
+        assert st.agent_card is None  # карточка сброшена
+        assert compute_missing(st) == []  # чек-лист заполнен
+
+    def test_apply_card_partial_keeps_missing(self):
+        s = IntakeState(student_name="Петя", learner_type="student")
+        st = apply_intake_card(s, {"subject": "физика"})
+        assert st.subject == "физика"
+        assert "topic" in compute_missing(st)
+
+    def test_maybe_start_card_only_fresh(self):
+        s = IntakeState()
+        st, started = maybe_start_card(s)
+        assert started is True
+        assert st.agent_card is not None
+        # повторный вызов — карточка уже есть
+        st2, started2 = maybe_start_card(st)
+        assert started2 is False
+        # после ответа (итераций > 0) — карточку не создаём
+        s3 = IntakeState()
+        s3.intake_iterations = 1
+        st3, started3 = maybe_start_card(s3)
+        assert started3 is False
+        assert st3.agent_card is None

@@ -135,6 +135,10 @@ class Settings(BaseSettings):
     # Knowledge Wiki (roadmap #2): персистентные wiki-статьи по subject/topic
     # (markdown + YAML-frontmatter OKF v0.2), накапливаются между сессиями
     KNOWLEDGE_WIKI_DIR: Path = Field(default=BASE_DIR / "data" / "knowledge_wiki")
+    # Профили учеников (студенты): data/students/<student_id>.json — персистентные
+    # сведения об ученике (имя, тип, класс), чтобы Wiki/мастерство/заметки были
+    # персональными, а не общими на всех пользователей.
+    STUDENTS_DIR: Path = Field(default=BASE_DIR / "data" / "students")
 
     # --- Qdrant векторное хранилище (roadmap #1; VECTOR_STORE=qdrant) ---
     # Режим сервера (docker-compose.yml): QDRANT_URL=http://localhost:6333.
@@ -229,7 +233,7 @@ class Settings(BaseSettings):
     @field_validator(
         "FGOS_REFERENCE_DIR", "TEXTBOOKS_DOWNLOADS_DIR", "CHROMA_PERSIST_DIR",
         "SOURCES_CACHE_DIR", "CHECKPOINT_DB", "KNOWLEDGE_GRAPH_DIR", "LOGS_DIR", "OUTPUT_DIR",
-        "QDRANT_PATH", "KNOWLEDGE_WIKI_DIR",
+        "QDRANT_PATH", "KNOWLEDGE_WIKI_DIR", "STUDENTS_DIR",
         mode="before",
     )
     @classmethod

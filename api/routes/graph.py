@@ -116,7 +116,8 @@ def get_graph(session_id: str, store: SessionStore = Depends(get_store)):
     try:
         from src.wiki import KnowledgeWiki
 
-        wiki = KnowledgeWiki(default_settings.KNOWLEDGE_WIKI_DIR)
+        wiki = KnowledgeWiki(default_settings.KNOWLEDGE_WIKI_DIR,
+                             student_id=getattr(session.state, "student_id", None) or "")
         subject = session.state.subject
         for n in nodes:
             title = n.get("title", "")
@@ -158,7 +159,8 @@ def node_wiki(session_id: str, node_id: str, store: SessionStore = Depends(get_s
     try:
         from src.wiki import KnowledgeWiki
 
-        wiki = KnowledgeWiki(default_settings.KNOWLEDGE_WIKI_DIR)
+        wiki = KnowledgeWiki(default_settings.KNOWLEDGE_WIKI_DIR,
+                             student_id=getattr(session.state, "student_id", None) or "")
         art = _match_article(wiki, session.state.subject, title) if title else None
         if art is not None:
             return {"node": node, "wiki": art.to_dict()}

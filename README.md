@@ -99,10 +99,38 @@ docker compose up -d qdrant
 
 Активный бэкенд виден в `GET /api/health` (`vector_store` + `collection`).
 
+## Профили учеников и персональная база знаний
+
+База знаний (Wiki/мастерство/заметки) **персональная**: ученики разных классов не
+смешивают свои данные. Каждый ученик получает стабильный `student_id` (хранится в
+localStorage фронта / передаётся в `POST /api/sessions`), а статьи лежат в
+`data/knowledge_wiki/<student_id>/<subject>/<topic>.md`.
+
+- **Профиль** (`data/students/<student_id>.json`): имя, тип, класс — заполняется
+  один раз и персистентно; следующие сессии того же ученика начинаются с префиллом.
+- **Быстрая карточка знакомства** (`agent_card`): вместо пошаговых вопросов агент
+  показывает форму (имя, тип, класс, предмет, тема, учебник, режим). Заполнение —
+  одним `POST /api/sessions/{id}/intake/card` (обычный текстовый `/intake` остаётся
+  как fallback). Имя/тип/класс из карточки сохраняются в профиль.
+- **Изоляция**: `/api/wiki?student_id=`, `/graph` mastery-слой и drill-down
+  (`/graph/{node}/wiki`) читают статьи только этого ученика.
+
+```bash
+# Создание сессии для конкретного ученика (вернувшийся — из localStorage)
+curl -X POST http://127.0.0.1:8000/api/sessions \
+  -H 'Content-Type: application/json' \
+  -d '{"student_id": "stu_1a2b3c"}'
+# → {"session_id": "...", "student_id": "stu_1a2b3c", "student_name": ""}
+
+# Персональная база знаний ученика
+curl 'http://127.0.0.1:8000/api/wiki?student_id=stu_1a2b3c'
+```
+
 ## База знаний (Knowledge Wiki, roadmap #2)
 
-Между сессиями накапливаются wiki-статьи по темам (`data/knowledge_wiki/<subject>/<topic>.md`,
-OKF v0.2): мастерство, попытки, правильные ответы, заметки об ошибках.
+Между сессиями накапливаются wiki-статьи по темам
+(`data/knowledge_wiki/<student_id>/<subject>/<topic>.md`, OKF v0.2): мастерство,
+попытки, правильные ответы, заметки об ошибках.
 
 ```bash
 # API

@@ -152,6 +152,40 @@ class TestKnowledgeWiki:
         assert {a.topic for a in wiki.list_articles("Философия")} == {"Кант", "Гегель"}
         assert len(wiki.list_articles()) == 3
 
+
+class TestStudentNamespacing:
+    """Персональная Wiki: статьи учеников не смешиваются (mastery/заметки изолированы)."""
+
+    def test_students_isolated(self, tmp_path):
+        wiki_masha = KnowledgeWiki(tmp_path, student_id="stu_masha")
+        wiki_petya = KnowledgeWiki(tmp_path, student_id="stu_petya")
+
+        wiki_masha.upsert(WikiArticle(subject="География", topic="Атмосфера", mastery=0.9, attempts=3))
+        wiki_petya.upsert(WikiArticle(subject="География", topic="Атмосфера", mastery=0.2, attempts=1))
+
+        # изоляция: у каждого своя статья
+        assert wiki_masha.get("География", "Атмосфера").mastery == 0.9
+        assert wiki_petya.get("География", "Атмосфера").mastery == 0.2
+        # пути: data/<root>/<student_id>/<subject>/<topic>.md
+        assert (tmp_path / "stu_masha" / "география" / "атмосфера.md").exists()
+        assert (tmp_path / "stu_petya" / "география" / "атмосфера.md").exists()
+
+    def test_global_and_student_separate(self, tmp_path):
+        wiki = KnowledgeWiki(tmp_path)
+        wiki.upsert(WikiArticle(subject="География", topic="Атмосфера", mastery=0.5))
+        wiki_stu = KnowledgeWiki(tmp_path, student_id="stu_x")
+        # глобальный каталог не видит статьи ученика и наоборот
+        assert wiki_stu.get("География", "Атмосфера") is None
+        wiki_stu.upsert(WikiArticle(subject="География", topic="Атмосфера", mastery=0.8))
+        assert wiki.get("География", "Атмосфера").mastery == 0.5
+
+    def test_for_student_binds_same_base(self, tmp_path):
+        wiki = KnowledgeWiki(tmp_path)
+        stu = wiki.for_student("stu_y")
+        stu.upsert(WikiArticle(subject="Философия", topic="Кант", mastery=0.7))
+        assert wiki.for_student("stu_y").get("Философия", "Кант").mastery == 0.7
+        assert wiki.for_student("stu_z").get("Философия", "Кант") is None
+
     def test_apply_record_and_sync_mastery(self, tmp_path):
         """apply_record (идемпотентно) + sync_mastery (без attempts++) накапливают статьи."""
         from types import SimpleNamespace

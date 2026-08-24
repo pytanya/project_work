@@ -76,7 +76,8 @@ def evaluate_and_record(
     try:
         from .wiki import KnowledgeWiki
 
-        art = KnowledgeWiki(deps.settings.KNOWLEDGE_WIKI_DIR).get(
+        art = KnowledgeWiki(deps.settings.KNOWLEDGE_WIKI_DIR,
+                            student_id=getattr(st, "student_id", None) or "").get(
             getattr(st, "subject", None) or "общая тема", topic
         )
         if art and (art.body or "").strip():
@@ -157,7 +158,8 @@ def evaluate_and_record(
     try:
         from .wiki import KnowledgeWiki
 
-        wiki = KnowledgeWiki(deps.settings.KNOWLEDGE_WIKI_DIR)
+        wiki = KnowledgeWiki(deps.settings.KNOWLEDGE_WIKI_DIR,
+                             student_id=getattr(st, "student_id", None) or "")
         if st.records and st.records[-1].get("question_id") == card.question_id:
             wiki.apply_record(st, st.records[-1])
             if card and card.topic:

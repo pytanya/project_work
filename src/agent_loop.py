@@ -261,6 +261,7 @@ def run_intake_agent(state: TutorState, deps: Any) -> Tuple[TutorState, bool]:
     if not missing or decision.decision == "emergency_start":
         st.intake_field = None
         st.agent_question = None
+        st.agent_card = None  # карточка заполнена/не нужна — переходим к источнику
         if decision.decision == "emergency_start":
             st.agent_message = decision.warning
         return st, True

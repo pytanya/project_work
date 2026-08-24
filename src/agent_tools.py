@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .intake import CHECKLIST_ORDER, INTAKE_QUESTIONS, apply_answer, compute_missing, extract_intake_fields
+from .intake import build_intake_card as _build_intake_card
 from .states import TutorState
 from . import tutor as tutor_mod
 
@@ -61,6 +62,22 @@ def interview_progress(args: Dict[str, Any], ctx: AgentToolContext) -> Tuple[str
     filled = [f for f in CHECKLIST_ORDER if f not in missing]
     next_q = INTAKE_QUESTIONS[missing[0]] if missing else ""
     return _ok(missing_fields=missing, filled_fields=filled, next_question=next_q), st
+
+
+def build_intake_card(args: Dict[str, Any], ctx: AgentToolContext) -> Tuple[str, TutorState]:
+    """Карточка знакомства: структурированная форма (имя, тип, класс, предмет, тема, режим).
+
+    Быстрее, чем пошаговое интервью: ученик заполняет поля сразу. Модель вызывает
+    инструмент, когда решает, что интервью затянется; карточка кладётся в
+    state.agent_card и показывается ученику формой.
+    """
+    st = ctx.state
+    card = _build_intake_card(st)
+    st = st.model_copy(deep=True)
+    st.agent_card = card
+    st.agent_question = card["question"]
+    st.intake_field = None
+    return _ok(card=card, fields=[f["key"] for f in card["fields"]]), st
 
 
 def set_intake(args: Dict[str, Any], ctx: AgentToolContext) -> Tuple[str, TutorState]:
@@ -271,6 +288,7 @@ AGENT_TOOLS: Dict[str, Callable[[Dict[str, Any], AgentToolContext], Tuple[str, T
     "interview_progress": interview_progress,
     "set_intake": set_intake,
     "extract_intake_fields": lambda args, ctx: (_ok(fields=extract_intake_fields(str(args.get("text") or ""))), ctx.state),
+    "build_intake_card": build_intake_card,
     "rag_search": rag_search,
     "get_knowledge_graph": get_knowledge_graph,
     "generate_lesson": generate_lesson,
@@ -305,6 +323,10 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
         "parameters": {"type": "object",
                       "properties": {"text": _param(type="string", description="ответ ученика")},
                       "required": ["text"]}}},
+    {"type": "function", "function": {
+        "name": "build_intake_card",
+        "description": "Быстрое знакомство: показать ученику карточку-форму (имя, тип, класс, предмет, тема, учебник, режим) вместо пошаговых вопросов. Вызови в начале интервью, чтобы не затягивать intake.",
+        "parameters": {"type": "object", "properties": {}, "required": []}}},
     {"type": "function", "function": {
         "name": "rag_search",
         "description": "Семантический поиск по учебнику (фильтр: предмет/класс/раздел). Вызови перед генерацией урока, вопроса, объяснения или ответом на вопрос ученика.",

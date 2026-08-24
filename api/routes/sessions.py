@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, Response
@@ -16,17 +17,37 @@ router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
 class CreateSessionBody(BaseModel):
     initial: Optional[Dict[str, Any]] = None
+    # Стабильный ID ученика (из localStorage фронта). Если не задан — создаётся новый
+    # профиль, а его ID возвращается клиенту для сохранения на устройстве.
+    student_id: Optional[str] = None
 
 
 @router.post("", status_code=201)
 async def create_session(body: Optional[CreateSessionBody] = None, store: SessionStore = Depends(get_store)):
-    initial = (body or CreateSessionBody()).initial or {}
+    b = body or CreateSessionBody()
+    initial = b.initial or {}
+
+    # Профиль ученика: по ID из запроса (вернувшийся) или новый (знакомство).
+    # Префилл стабильных полей (имя/тип/класс) — intake становится короче.
+    if b.student_id:
+        profile = store.student_store.get(b.student_id)
+        if profile is None:
+            profile = store.student_store.get_or_create(b.student_id)
+    else:
+        profile = store.student_store.get_or_create(f"stu_{uuid.uuid4().hex[:10]}")
+    for k, v in profile.prefill().items():
+        initial.setdefault(k, v)
+
     # Новая сессия — каждый POST создаёт свежую (для «Новая сессия»/открытия приложения)
     session = store.create(initial)
     # Первый шаг графа в фоне: session_id возвращаем сразу, первый вопрос
-    # чек-листа придёт через WS (intake.question). Не блокируем создание.
+    # чек-листа придёт через WS (intake.card / intake.question). Не блокируем создание.
     asyncio.create_task(run_step(session))
-    return {"session_id": session.id}
+    return {
+        "session_id": session.id,
+        "student_id": profile.student_id,
+        "student_name": profile.name,
+    }
 
 
 @router.get("/{session_id}")

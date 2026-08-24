@@ -27,7 +27,7 @@ from .config import settings as default_settings
 from .export import write_session_exports
 from .okf import emit_okf_bundle
 from .curriculum import grade_curriculum
-from .intake import INTAKE_QUESTIONS, CHECKLIST_ORDER, apply_answer, compute_missing, extract_intake_fields, validate_intake
+from .intake import INTAKE_QUESTIONS, CHECKLIST_ORDER, apply_answer, compute_missing, extract_intake_fields, maybe_start_card, validate_intake
 from .judge import judge_evaluation
 from .knowledge import (
     Embedder,
@@ -159,7 +159,8 @@ def _wiki_extract_from_graph(
         from .wiki import KnowledgeWiki
 
         kg_nodes = (st.knowledge_graph or {}).get("nodes", []) or []
-        wiki = KnowledgeWiki(deps.settings.KNOWLEDGE_WIKI_DIR)
+        wiki = KnowledgeWiki(deps.settings.KNOWLEDGE_WIKI_DIR,
+                             student_id=getattr(st, "student_id", None) or "")
         subject = st.subject or "общая тема"
         done = 0
         for n in kg_nodes:
@@ -360,6 +361,15 @@ def intake_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         # Ответ обработан: поле сбрасываем, иначе after_intake примет его за незавершённый
         # intake и остановит граф на чек-листе (validate_intake переустановит поле при «ask»)
         st.intake_field = None
+        # Ученик ответил текстом — карточка больше не нужна (переходим к Q&A)
+        st.agent_card = None
+
+    # Быстрое знакомство: на старте (ещё нет прогресса) показываем карточку-форму,
+    # а не пошаговые вопросы. Ученик заполняет поля сразу (POST /intake/card).
+    st, card_started = maybe_start_card(st)
+    if card_started:
+        _emit(deps, "intake.card", card=st.agent_card, question=st.agent_question)
+        return st.model_dump()
 
     decision = validate_intake(st, max_iterations=deps.settings.MAX_INTAKE_ITERATIONS)
     if decision.decision == "ask":
@@ -403,6 +413,16 @@ def agent_intake_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         return intake_node(state, deps)
 
     st = state.model_copy(deep=True)
+
+    # Быстрое знакомство: на старте (нет ответа, ещё нет прогресса) показываем
+    # карточку-форму (без ожидания, вызовет ли модель build_intake_card).
+    # Если ученик уже ответил текстом — карточку не показываем, обрабатываем ответ.
+    if st.pending_answer is None:
+        st, card_started = maybe_start_card(st)
+        if card_started:
+            _emit(deps, "intake.card", card=st.agent_card, question=st.agent_question)
+            return st.model_dump()
+
     st_new, proceed = run_intake_agent(st, deps)
     if proceed:
         # grade_curriculum: сверка темы с ФГОС (В-8) — как в детерминированном intake_node
@@ -416,9 +436,13 @@ def agent_intake_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
                 if not st_new.agent_message:
                     st_new.agent_message = cur.warning
         return st_new.model_dump()
-    # Агент задал вопрос — публикуем как в детерминированном intake_node
-    _emit(deps, "intake.question", question=st_new.agent_question,
-          missing_fields=st_new.missing_fields or compute_missing(st_new))
+    if st_new.agent_card:
+        # Модель сама собрала карточку (build_intake_card) — публикуем форму
+        _emit(deps, "intake.card", card=st_new.agent_card, question=st_new.agent_question)
+    else:
+        # Агент задал вопрос — публикуем как в детерминированном intake_node
+        _emit(deps, "intake.question", question=st_new.agent_question,
+              missing_fields=st_new.missing_fields or compute_missing(st_new))
     return st_new.model_dump()
 
 
@@ -527,7 +551,9 @@ def route_after_agent_tutor(state: TutorState) -> str:
 
 
 def after_intake(state: TutorState) -> str:
-    if state.intake_field:
+    # Ждём, пока ученик заполнит карточку знакомства (иначе граф уйдёт на источник
+    # с незаполненным чек-листом)
+    if state.intake_field or state.agent_card:
         return END
     return NODE_SOURCE_ENTRY
 
@@ -736,7 +762,8 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
 
         terms = [t.get("term") for t in st.lesson_key_terms if isinstance(t, dict) and t.get("term")]
         if terms:
-            KnowledgeWiki(deps.settings.KNOWLEDGE_WIKI_DIR).sync_concepts(st, topic, terms)
+            KnowledgeWiki(deps.settings.KNOWLEDGE_WIKI_DIR,
+                          student_id=getattr(st, "student_id", None) or "").sync_concepts(st, topic, terms)
     except Exception as exc:
         logger.warning("sync_concepts (ключевые понятия) не удался: %s", exc)
     _emit(deps, "tutor.lesson", **st.lesson_payload(topic))
@@ -1225,7 +1252,8 @@ def summary_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     try:
         from .wiki import KnowledgeWiki
 
-        wiki = KnowledgeWiki(deps.settings.KNOWLEDGE_WIKI_DIR)
+        wiki = KnowledgeWiki(deps.settings.KNOWLEDGE_WIKI_DIR,
+                             student_id=getattr(st, "student_id", None) or "")
         updated = wiki.sync_mastery(st)
         if updated:
             logger.info("Knowledge Wiki: синхронизировано %d статей", len(updated))

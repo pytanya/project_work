@@ -134,6 +134,7 @@ class WsEvent(BaseModel):
 
     event: Literal[
         "intake.question",
+        "intake.card",
         "source.progress",
         "source.failed",
         "quiz.card",

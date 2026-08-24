@@ -20,6 +20,10 @@ DIFFICULTY_LITERAL = Literal["easy", "medium", "hard"]
 class IntakeState(BaseModel):
     """Состояние intake-фазы — собранная информация об обучаемом (раздел 5.1)."""
 
+    # Профиль ученика (персистентный, см. src/student.py): стабильный ID из
+    # localStorage/CLI; name — имя, введённое в карточке знакомства.
+    student_id: Optional[str] = None
+    student_name: Optional[str] = None
     learner_type: Optional[Literal["student", "schoolchild"]] = None
     grade: Optional[str] = None
     curriculum: Optional[str] = None
@@ -38,6 +42,11 @@ class IntakeState(BaseModel):
     intake_progress: int = 0
     intake_no_progress_streak: int = 0
     missing_fields: List[str] = Field(default_factory=list)
+    intake_field: Optional[str] = None         # поле чек-листа, которое сейчас уточняем
+    # Карточка intake (быстрое заполнение): структурированная форма вместо
+    # пошагового Q&A. Поля: {title, question, fields: [{key, label, type, options, value}]}.
+    agent_card: Optional[Dict[str, Any]] = None
+    agent_question: Optional[str] = None   # текст вопроса агенту-пользователю
 
     # --- Сканированный учебник (3.2) ---
     textbook_scanned: bool = False
@@ -103,8 +112,6 @@ class TutorState(IntakeState):
 
     # --- Исполнение графа (ввод/вывод между итерациями) ---
     pending_answer: Optional[str] = None       # ответ пользователя на текущий вопрос
-    intake_field: Optional[str] = None         # поле чек-листа, которое сейчас уточняем
-    agent_question: Optional[str] = None       # текст вопроса агенту-пользователю
     agent_options: Optional[List[str]] = None  # варианты ответа (для квиза)
     agent_message: Optional[str] = None        # сообщение пользователю (фидбек/суммари)
     quiz_complete: bool = False

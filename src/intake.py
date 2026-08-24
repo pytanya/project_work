@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from .states import IntakeState
 
@@ -276,6 +276,123 @@ def validate_intake(
     )
 
 
+def maybe_start_card(state: IntakeState) -> Tuple[IntakeState, bool]:
+    """Если intake только начался и ещё не завершён — подготовить карточку знакомства.
+
+    Возвращает (state, started). Карточка не пересоздаётся, если уже есть или если
+    intake уже продвинулся (intake_iterations > 0 — ученик начал отвечать текстом).
+    """
+    if compute_missing(state) and state.agent_card is None and state.intake_iterations <= 0:
+        st = state.model_copy(deep=True)
+        st.agent_card = build_intake_card(st)
+        st.agent_question = st.agent_card["question"]
+        st.intake_field = None
+        return st, True
+    return state, False
+
+
 def emergency_min_set_met(state: IntakeState) -> bool:
     """Минимальный набор для экстренного старта (5.2): тема/предмет + режим + тип."""
     return bool((state.topic or state.subject) and state.mode and state.learner_type)
+
+
+# ----------------------------------------------------------------------
+# Карточка intake (быстрое заполнение вместо пошагового Q&A)
+# ----------------------------------------------------------------------
+_MODE_CARD_OPTIONS = [
+    {"value": "lesson", "label": "Урок (изучим тему)"},
+    {"value": "quiz", "label": "Квиз (проверим знания)"},
+    {"value": "explain", "label": "Объяснение конкретного вопроса"},
+    {"value": "deep_dive", "label": "Глубокий разбор"},
+]
+
+
+def build_intake_card(state: IntakeState) -> Dict[str, Any]:
+    """Структурированная карточка знакомства/плана занятия.
+
+    Поля предзаполняются из состояния/профиля (для вернувшегося ученика —
+    имя/тип/класс уже известны, осталось указать предмет/тему/режим).
+    Возвращает JSON-форму: {title, question, fields: [{key,label,type,options,value}]}.
+    """
+    def _choice(options: List[Dict[str, str]], value: Optional[str]) -> List[Dict[str, str]]:
+        return options
+
+    textbook = None
+    if state.has_textbook is not None:
+        textbook = "true" if state.has_textbook else "false"
+
+    fields: List[Dict[str, Any]] = [
+        {"key": "name", "label": "Как тебя зовут?", "type": "text", "required": True,
+         "value": getattr(state, "student_name", None) or ""},
+        {"key": "learner_type", "label": "Ты школьник или студент?", "type": "choice", "required": True,
+         "options": _choice([
+             {"value": "schoolchild", "label": "Школьник"},
+             {"value": "student", "label": "Студент"},
+         ], state.learner_type),
+         "value": state.learner_type or ""},
+        {"key": "grade", "label": "Класс (если школьник)", "type": "text", "required": False,
+         "value": state.grade or ""},
+        {"key": "subject", "label": "Предмет", "type": "text", "required": True,
+         "value": state.subject or ""},
+        {"key": "topic", "label": "Тема", "type": "text", "required": True,
+         "value": state.topic or ""},
+        {"key": "has_textbook", "label": "Есть учебник по теме?", "type": "choice", "required": True,
+         "options": _choice([
+             {"value": "true", "label": "Да"},
+             {"value": "false", "label": "Нет"},
+         ], textbook),
+         "value": textbook or ""},
+        {"key": "mode", "label": "Что делаем?", "type": "choice", "required": True,
+         "options": _choice(_MODE_CARD_OPTIONS, state.mode),
+         "value": state.mode or ""},
+    ]
+    return {
+        "title": "Знакомство и план занятия",
+        "question": "Заполни карточку — так быстрее, чем отвечать на вопросы по одному.",
+        "fields": fields,
+    }
+
+
+def apply_intake_card(state: IntakeState, values: Dict[str, Any]) -> IntakeState:
+    """Применить заполненную карточку к состоянию (все поля сразу).
+
+    Возвращает копию состояния; `agent_card` сбрасывается. Значения нормализуются
+    детерминированно (те же правила, что и в normalize_answer/extract_intake_fields).
+    """
+    st = state.model_copy(deep=True)
+    v = values or {}
+    st.agent_card = None
+
+    name = str(v.get("name") or "").strip()
+    if name:
+        st.student_name = name
+
+    if v.get("learner_type") in ("student", "schoolchild"):
+        st.learner_type = v["learner_type"]
+
+    g = re.search(r"(\d{1,2})", str(v.get("grade") or ""))
+    if g:
+        st.grade = g.group(1)
+
+    for field in ("subject", "topic"):
+        val = str(v.get(field) or "").strip()
+        if val:
+            setattr(st, field, val)
+
+    hb = v.get("has_textbook")
+    if isinstance(hb, bool):
+        st.has_textbook = hb
+    elif isinstance(hb, str):
+        st.has_textbook = hb.strip().lower() in ("true", "да", "yes", "1")
+
+    mode = str(v.get("mode") or "").strip().lower()
+    if mode in ("quiz", "lesson", "explain", "deep_dive"):
+        st.mode = mode  # type: ignore[assignment]
+    elif mode in _MODE_MAP:
+        st.mode = _MODE_MAP[mode]  # type: ignore[assignment]
+
+    st.intake_iterations += 1
+    st.intake_field = None
+    st.intake_progress = len(set(CHECKLIST_ORDER) - set(compute_missing(st)))
+    st.missing_fields = compute_missing(st)
+    return st

@@ -244,6 +244,11 @@ class SessionStore:
             cooldown_seconds=float(getattr(base_settings, "CIRCUIT_BREAKER_COOLDOWN_SEC", 30.0) or 30.0),
         )
 
+        # Персистентные профили учеников (студенты) — персональные Wiki/мастерство/заметки
+        from src.student import StudentStore
+
+        self.student_store = StudentStore(getattr(base_settings, "STUDENTS_DIR", None) if base_settings else None)
+
     def _save_state(self, sid: str, st: TutorState) -> None:
         """Сохранить состояние в SQLite после каждого шага."""
         if self._sqlite is not None:
