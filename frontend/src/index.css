@@ -773,6 +773,25 @@ body {
 .check-item.done { border-color: var(--ok); color: var(--ok); background: var(--green-soft); }
 .check-item.pending { border-color: var(--amber); color: #8a5a17; background: var(--amber-soft); }
 
+/* --- Карточка знакомства (быстрое заполнение вместо пошаговых вопросов) --- */
+.card.intake-card { border: 1px solid var(--green); }
+.intake-card__fields { display: flex; flex-direction: column; gap: 10px; margin: 12px 0 14px; }
+.intake-field { display: flex; flex-direction: column; gap: 4px; }
+.intake-field__label { font-size: 12.5px; font-weight: 700; color: var(--ink-soft); }
+.intake-field input,
+.intake-field select {
+  padding: 9px 12px; border: 1px solid var(--line); border-radius: 9px;
+  background: var(--card); color: var(--ink); font-family: var(--font-body); font-size: 14px;
+}
+.intake-field input:focus, .intake-field select:focus { outline: none; border-color: var(--green); }
+.intake-card__hint { font-size: 12px; margin-bottom: 10px; }
+.btn-primary {
+  padding: 10px 18px; border: none; border-radius: 10px; background: var(--green);
+  color: #fff; font-weight: 700; font-size: 14px; cursor: pointer; font-family: var(--font-body);
+}
+.btn-primary:disabled { opacity: 0.55; cursor: not-allowed; }
+
+
 /* --- Урок (режим lesson) --- */
 .lesson { display: flex; flex-direction: column; gap: 10px; }
 .lesson-topic { font-size: 12.5px; font-weight: 700; color: var(--green-strong); font-family: var(--font-display); }

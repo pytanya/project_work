@@ -11,7 +11,7 @@ function masteryClass(m) {
   return 'low'
 }
 
-export default function KnowledgeWikiPanel() {
+export default function KnowledgeWikiPanel({ studentId = '', studentName = '' }) {
   const [data, setData] = useState(null)
   const [error, setError] = useState(null)
   const [expandedSubject, setExpandedSubject] = useState(null)
@@ -22,12 +22,14 @@ export default function KnowledgeWikiPanel() {
 
   useEffect(() => {
     let cancelled = false
-    fetch('/api/wiki')
+    // Персональная база знаний: ?student_id= изолирует данные разных учеников
+    const q = studentId ? `?student_id=${encodeURIComponent(studentId)}` : ''
+    fetch(`/api/wiki${q}`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then((body) => !cancelled && setData(body.subjects || []))
       .catch((e) => !cancelled && setError(String(e.message || e)))
     return () => { cancelled = true }
-  }, [])
+  }, [studentId])
 
   const subjects = data || []
   const total = subjects.reduce((n, s) => n + (s.articles?.length || 0), 0)
@@ -86,7 +88,7 @@ export default function KnowledgeWikiPanel() {
       const res = await fetch('/api/wiki/enrich', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subject: reading.subject, topic: reading.article.topic || reading.article.title }),
+        body: JSON.stringify({ subject: reading.subject, topic: reading.article.topic || reading.article.title, student_id: studentId }),
       })
       if (res.ok) {
         const b = await res.json()
@@ -103,7 +105,7 @@ export default function KnowledgeWikiPanel() {
 
   return (
     <div className="card wiki-panel">
-      <h3>База знаний · {total}</h3>
+      <h3>База знаний{studentName ? ` · ${studentName}` : ''} · {total}</h3>
 
       {total === 0 && (
         <div className="wiki-empty">

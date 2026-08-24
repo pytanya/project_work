@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, wsUrl } from './api'
 import ChatStream from './components/ChatStream'
 import IntakeWizard from './components/IntakeWizard'
+import IntakeCard from './components/IntakeCard'
 import QuizCard from './components/QuizCard'
 import SourceSearchPanel from './components/SourceSearchPanel'
 import FileUpload from './components/FileUpload'
@@ -10,6 +11,7 @@ import KnowledgeWikiPanel from './components/KnowledgeWikiPanel'
 import './index.css'
 
 const STORAGE_KEY = 'edututor_settings'
+const STUDENT_KEY = 'edututor_student'
 
 function loadSettings() {
   try {
@@ -23,8 +25,21 @@ function saveSettings(s) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(s))
 }
 
+function loadStudent() {
+  try {
+    return JSON.parse(localStorage.getItem(STUDENT_KEY)) || {}
+  } catch {
+    return {}
+  }
+}
+
+function saveStudent(s) {
+  localStorage.setItem(STUDENT_KEY, JSON.stringify(s))
+}
+
 export default function App() {
   const [sessionId, setSessionId] = useState(null)
+  const [student, setStudent] = useState(() => loadStudent())
   const [feed, setFeed] = useState([])
   const [current, setCurrent] = useState(null)
   const [intake, setIntake] = useState({ missingFields: [], complete: false })
@@ -175,7 +190,7 @@ export default function App() {
       if (isWaitingForAnswer.current && !isPreparingTopic.current) {
         const answerResolvedEvents = [
           'quiz.card', 'tutor.lesson', 'tutor.explanation',
-          'tutor.summary', 'intake.question', 'source.failed', 'session.error'
+          'tutor.summary', 'intake.question', 'intake.card', 'source.failed', 'session.error'
         ]
         if (answerResolvedEvents.includes(evt.event)) {
           setChatBusy(false)
@@ -218,6 +233,11 @@ export default function App() {
         case 'intake.question':
           finalizeStream('intake', d.question)
           setCurrent({ kind: 'intake', question: d.question, missingFields: d.missing_fields })
+          break
+        case 'intake.card':
+          // Карточка знакомства: форма вместо пошаговых вопросов (быстрое заполнение)
+          finalizeStream('intake', d.question)
+          setCurrent({ kind: 'intake_card', card: d.card, question: d.question })
           break
         case 'quiz.card':
           finalizeStream('quiz', d.question)
@@ -364,8 +384,13 @@ export default function App() {
         let sessionId = null
         for (let attempt = 1; attempt <= 5; attempt++) {
           try {
-            const r = await api.createSession()
+            // Стабильный профиль ученика: сессии одного ученика делят Wiki/мастерство/заметки
+            const r = await api.createSession(student.student_id)
             sessionId = r.session_id
+            if (r.student_id !== student.student_id || r.student_name !== student.student_name) {
+              setStudent({ student_id: r.student_id, student_name: r.student_name || '' })
+              saveStudent({ student_id: r.student_id, student_name: r.student_name || '' })
+            }
             break
           } catch (e) {
             if (cancelled) return
@@ -378,7 +403,12 @@ export default function App() {
         connectWs(sessionId)
         const st = await api.intakeStatus(sessionId)
         setIntake({ missingFields: st.missing_fields, complete: st.complete })
-        if (!st.complete && st.next_question) {
+        // Карточка знакомства (agent_card) имеет приоритет: ждёт заполнения формы.
+        // getSession — авторитетный снимок (WS мог ещё не успеть прислать intake.card).
+        const sess = await api.getSession(sessionId)
+        if (sess.agent_card) {
+          setCurrent({ kind: 'intake_card', card: sess.agent_card, question: sess.agent_question })
+        } else if (!st.complete && st.next_question) {
           setCurrent({ kind: 'intake', question: st.next_question, missingFields: st.missing_fields })
           push('intake', st.next_question)
         }
@@ -407,8 +437,8 @@ export default function App() {
       const d = await api.getSession(sessionIdRef.current)
       
       // Исправление #2: защита resync от перезаписи current
-      // Если фронтенд уже показывает активный вопрос (quiz/intake), не перезаписываем current
-      const hasFrontendActiveQuestion = current && (current.kind === 'quiz' || current.kind === 'intake')
+      // Если фронтенд уже показывает активный вопрос (quiz/intake/card), не перезаписываем current
+      const hasFrontendActiveQuestion = current && (current.kind === 'quiz' || current.kind === 'intake' || current.kind === 'intake_card')
       
       // Восстанавливаем current только если бэкенд имеет неотображённый вопрос
       // И фронтенд в данный момент ничего не показывает (чтобы не потерять UI)
@@ -423,6 +453,9 @@ export default function App() {
           setQuestionNum(d.records.filter(r => r.student_answer).length)
           setQuizCount(d.num_questions || 10)
         }
+      } else if (d.agent_card && !hasFrontendActiveQuestion) {
+        // Карточка знакомства ждёт заполнения
+        setCurrent({ kind: 'intake_card', card: d.agent_card, question: d.agent_question })
       } else if (d.agent_question && !hasFrontendActiveQuestion) {
         setCurrent({ kind: 'intake', question: d.agent_question, missingFields: d.missing_fields || [] })
       }
@@ -497,7 +530,7 @@ export default function App() {
     resetBusyAfterTimeout()
     
     try {
-      const isIntakeTurn = current?.kind === 'intake'
+      const isIntakeTurn = current?.kind === 'intake' || current?.kind === 'intake_card'
       if (isIntakeTurn) {
         await api.postIntake(sessionId, text)
       } else {
@@ -520,6 +553,34 @@ export default function App() {
     } finally {
       if (answerTimeoutRef.current) clearTimeout(answerTimeoutRef.current)
       // busy сбросится при получении WS события или по timeout
+    }
+  }
+
+  async function submitIntakeCard(values) {
+    if (!sessionId) return
+    push('intake', 'Карточка знакомства заполнена ✓')
+    setChatBusy(true)
+    isWaitingForAnswer.current = true
+    resetBusyAfterTimeout()
+    try {
+      await api.postIntakeCard(sessionId, values)
+      // Профиль ученика обновляем локально (имя) — для шапки/панели
+      if (values.name) {
+        const next = { ...student, student_name: values.name }
+        setStudent(next)
+        saveStudent(next)
+      }
+      const st = await api.intakeStatus(sessionId)
+      setIntake({ missingFields: st.missing_fields, complete: st.complete })
+      if (st.complete) {
+        setCurrent(null)
+      } else if (st.next_question) {
+        setCurrent({ kind: 'intake', question: st.next_question, missingFields: st.missing_fields })
+      }
+    } catch (e) {
+      push('error', String(e.message || e))
+    } finally {
+      if (answerTimeoutRef.current) clearTimeout(answerTimeoutRef.current)
     }
   }
 
@@ -675,13 +736,12 @@ export default function App() {
           </div>
         </div>
         {sessionId && <div className="session-id">сессия: {sessionId}</div>}
-        <KnowledgeWikiPanel key={wikiReloadKey} />
+        <KnowledgeWikiPanel key={wikiReloadKey} studentId={student.student_id} studentName={student.student_name} />
         <KnowledgeGraphPanel
           nodes={graph.nodes}
           edges={graph.edges}
           activeTopic={graph.activeTopic}
           onSelect={handleSelectTopic}
-          busy={chatBusy}
           sessionId={sessionId}
         />
         <SourceSearchPanel status={source.status} note={source.note} sources={source.sources} author={source.author} onFind={handleFind} busy={uploadBusy} />
@@ -698,6 +758,13 @@ export default function App() {
               totalQuestions={quizCount}
               selectedOption={confirmedOption}
               quickAnswer={quickAnswer}
+            />
+          ) : current.kind === 'intake_card' ? (
+            <IntakeCard
+              card={current.card}
+              question={current.question}
+              onSubmit={submitIntakeCard}
+              disabled={chatBusy}
             />
           ) : (
             <IntakeWizard

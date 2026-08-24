@@ -22,8 +22,12 @@ async function jsonFetch(path, options = {}) {
 }
 
 export const api = {
-  createSession: (initial) =>
-    jsonFetch('/api/sessions', { method: 'POST', body: JSON.stringify(initial || {}) }),
+  // student_id — стабильный профиль ученика (localStorage); без него бэкенд создаёт новый
+  createSession: (studentId, initial) =>
+    jsonFetch('/api/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ student_id: studentId || undefined, initial: initial || {} }),
+    }),
 
   getSession: (id) => jsonFetch(`/api/sessions/${id}`),
 
@@ -33,6 +37,10 @@ export const api = {
 
   postIntake: (id, answer) =>
     jsonFetch(`/api/sessions/${id}/intake`, { method: 'POST', body: JSON.stringify({ answer }) }),
+
+  // Карточка знакомства: все поля чек-листа сразу (быстрое заполнение)
+  postIntakeCard: (id, values) =>
+    jsonFetch(`/api/sessions/${id}/intake/card`, { method: 'POST', body: JSON.stringify({ values }) }),
 
   postMessage: (id, text) =>
     jsonFetch(`/api/sessions/${id}/message`, { method: 'POST', body: JSON.stringify({ text }) }),
