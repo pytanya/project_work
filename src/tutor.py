@@ -403,39 +403,58 @@ def _diagram_from_data(raw: Any) -> Optional[LessonDiagram]:
     )
 
 
+def _clean_plain_field(value: Any) -> str:
+    """Поле урока должно быть обычным текстом.
+
+    Модель иногда «вкладывает» весь JSON-объект урока строкой в первое поле
+    (например, `definition` = "{...все поля...}"). Такие значения очищаем, чтобы
+    в UI не показывался сырой JSON вместо карточки урока.
+    """
+    if isinstance(value, dict) or isinstance(value, list):
+        return ""
+    text = str(value or "").strip()
+    if text.startswith("{") or text.startswith("["):
+        return ""
+    return text
+
+
 def _lesson_from_data(data: Dict[str, Any], topic: str) -> Lesson:
     """Строит структурированный Lesson из JSON-ответа LLM (нормализация типов).
 
-    Мусорные/пустые поля отбрасываются — урок никогда не содержит пустых карточек.
+    Мусорные/пустые поля отбрасываются — урок никогда не содержит пустых карточек
+    и не выводит сырой JSON (вложенный объект в поле → очищается, _clean_plain_field).
     """
     sections: List[LessonSection] = []
     raw_sections = data.get("sections") if isinstance(data.get("sections"), list) else []
     for s in raw_sections[:4]:
         if not isinstance(s, dict):
             continue
-        body = str(s.get("body") or "").strip()
+        body = _clean_plain_field(s.get("body"))
         if not body:
             continue
         sections.append(LessonSection(
-            heading=str(s.get("heading") or "").strip(),
+            heading=_clean_plain_field(s.get("heading")),
             body=body,
-            citation=str(s.get("citation") or "").strip(),
-            source=str(s.get("source") or "").strip(),
-            check_question=str(s.get("check_question") or "").strip(),
+            citation=_clean_plain_field(s.get("citation")),
+            source=_clean_plain_field(s.get("source")),
+            check_question=_clean_plain_field(s.get("check_question")),
         ))
     key_terms = []
     raw_terms = data.get("key_terms") if isinstance(data.get("key_terms"), list) else []
     for t in raw_terms[:5]:
-        if isinstance(t, dict) and str(t.get("term") or "").strip() and str(t.get("definition") or "").strip():
-            key_terms.append({"term": str(t["term"]).strip(), "definition": str(t["definition"]).strip()})
+        if isinstance(t, dict):
+            term = _clean_plain_field(t.get("term"))
+            tdef = _clean_plain_field(t.get("definition"))
+            if term and tdef:
+                key_terms.append({"term": term, "definition": tdef})
     return Lesson(
-        title=str(data.get("title") or topic).strip(),
-        hook=str(data.get("hook") or "").strip(),
-        definition=str(data.get("definition") or "").strip(),
+        title=_clean_plain_field(data.get("title")) or topic,
+        hook=_clean_plain_field(data.get("hook")),
+        definition=_clean_plain_field(data.get("definition")),
         key_terms=key_terms,
         diagram=_diagram_from_data(data.get("diagram")),
         sections=sections,
-        summary=str(data.get("summary") or "").strip(),
+        summary=_clean_plain_field(data.get("summary")),
     )
 
 
@@ -527,6 +546,8 @@ def generate_explanation(
                         role="tutor", temperature=0.3, max_tokens=700)
     data = parse_llm_json(raw)
     text = str(data.get("text") or raw or "").strip()
+    if text.startswith("{") or text.startswith("["):
+        text = ""  # модель вернула JSON вместо чистого текста — не показываем сырой JSON
     if len(text) < 40:
         text = (context[0] if context else f"Материалы по теме «{topic}» ещё пополняются.")[:1200]
     return text
@@ -562,6 +583,8 @@ def generate_deep_dive(
                         role="expert", temperature=0.2, max_tokens=900)
     data = parse_llm_json(raw)
     text = str(data.get("text") or raw or "").strip()
+    if text.startswith("{") or text.startswith("["):
+        text = ""  # модель вернула JSON вместо чистого текста — не показываем сырой JSON
     if len(text) < 40:
         text = (context[0] if context else f"Материалы по теме «{topic}» ещё пополняются.")[:1500]
     return text

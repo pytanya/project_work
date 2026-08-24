@@ -247,6 +247,46 @@ class TestEvaluateAnswer:
         assert lesson.sections[0].check_question == "Назови два главных газа."
         assert lesson.sections[1].check_question == ""  # пустые поля остаются пустыми
 
+    def test_generate_lesson_cleans_nested_json_definition(self):
+        """Модель вложила весь урок JSON строкой в «definition» — в UI не должен
+        попасть сырой JSON (баг: вместо карточки урока показывался JSON)."""
+        state = _state()
+        nested = {
+            "title": "Поэты серебряного века",
+            "hook": "Как поэты изменили литературу?",
+            "definition": "Серебряный век — расцвет поэзии.",
+            "key_terms": [{"term": "Акмеизм", "definition": "направление"}],
+            "sections": [{"heading": "Новые направления", "body": "Поэты искали новые пути."}],
+            "summary": "Итог.",
+        }
+        fake = lambda m: json.dumps({
+            "title": nested["title"],
+            "hook": nested["hook"],
+            # «вложенность»: модель дублирует весь объект строкой в первое поле
+            "definition": json.dumps(nested, ensure_ascii=False),
+            "key_terms": nested["key_terms"],
+            "sections": nested["sections"],
+            "summary": nested["summary"],
+        })
+        lesson = generate_lesson("Поэты серебряного века", ["контекст"], state, llm_call=fake)
+        assert "title" not in (lesson.definition or "").lower()  # сырой JSON вычищен
+        assert not (lesson.definition or "").startswith("{")
+        assert lesson.hook == nested["hook"]  # остальные поля корректны
+        assert lesson.sections[0].heading == "Новые направления"
+
+    def test_generate_lesson_cleans_nested_dict_definition(self):
+        """То же, но поле — настоящий dict (не строка): определение очищается."""
+        state = _state()
+        fake = lambda m: json.dumps({
+            "title": "Тема",
+            "hook": "Вопрос?",
+            "definition": {"title": "Тема", "sections": []},
+            "key_terms": [],
+            "sections": [{"heading": "Раздел", "body": "Текст раздела."}],
+        })
+        lesson = generate_lesson("Тема", ["контекст"], state, llm_call=fake)
+        assert lesson.definition == ""
+
     def test_generate_lesson_diagram_map(self):
         """Map-диаграмма с координатами и цветами течений; санитизация."""
         state = _state(grade="7")
