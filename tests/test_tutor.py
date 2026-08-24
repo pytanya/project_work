@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from src.config import BASE_DIR, Settings
@@ -214,30 +216,189 @@ class TestEvaluateAnswer:
     def test_generate_lesson_json(self):
         state = _state()
         fake = lambda m: '{"text": "Атмосфера — газовая оболочка Земли. Она защищает планету."}'
-        text = generate_lesson("Атмосфера", ["контекст"], state, llm_call=fake)
+        lesson = generate_lesson("Атмосфера", ["контекст"], state, llm_call=fake)
+        text = lesson.render_text()
         assert "газовая оболочка" in text
         assert len(text) > 30
+
+    def test_generate_lesson_structured(self):
+        """Урок генерируется по LessonSchema: hook/definition/термины/секции с цитатой."""
+        state = _state()
+        fake = lambda m: json.dumps({
+            "title": "Атмосфера",
+            "hook": "Почему небо голубое?",
+            "definition": "Атмосфера — газовая оболочка Земли.",
+            "key_terms": [{"term": "атмосфера", "definition": "воздушная оболочка планеты"}],
+            "sections": [
+                {"heading": "Состав", "body": "В атмосфере есть азот и кислород.",
+                 "citation": "§12", "check_question": "Назови два главных газа."},
+                {"heading": "Роль", "body": "Атмосфера защищает от радиации.",
+                 "citation": "", "check_question": ""},
+            ],
+            "summary": "Атмосфера — защитный слой Земли.",
+        })
+        lesson = generate_lesson("Атмосфера", ["контекст"], state, llm_call=fake)
+        assert lesson.hook == "Почему небо голубое?"
+        assert lesson.definition.startswith("Атмосфера")
+        assert lesson.key_terms == [{"term": "атмосфера", "definition": "воздушная оболочка планеты"}]
+        assert len(lesson.sections) == 2
+        assert lesson.sections[0].heading == "Состав"
+        assert lesson.sections[0].citation == "§12"
+        assert lesson.sections[0].check_question == "Назови два главных газа."
+        assert lesson.sections[1].check_question == ""  # пустые поля остаются пустыми
+
+    def test_generate_lesson_diagram_map(self):
+        """Map-диаграмма с координатами и цветами течений; санитизация."""
+        state = _state(grade="7")
+        fake = lambda m: json.dumps({
+            "title": "Теплые течения",
+            "definition": "Тёплые течения — потоки тёплой воды.",
+            "diagram": {
+                "kind": "map",
+                "title": "Гольфстрим",
+                "nodes": [
+                    {"id": "e", "label": "Европа", "x": 0.8, "y": 0.3},
+                    {"id": "a", "label": "Америка", "x": 0.2, "y": 0.4},
+                    {"id": "g", "label": "Гольфстрим", "x": 0.5, "y": 0.6},
+                    {"id": "z", "label": "", "x": 5, "y": 5},
+                ],
+                "edges": [
+                    {"source": "a", "target": "g", "label": "тёплое", "color": "warm"},
+                    {"source": "g", "target": "e", "color": "warm"},
+                    {"source": "nope", "target": "e"},  # нет такого узла — отбрасывается
+                ],
+            },
+            "sections": [{"body": "Гольфстрим тёплый."}],
+        })
+        lesson = generate_lesson("Теплые течения", ["контекст"], state, llm_call=fake)
+        diag = lesson.diagram
+        assert diag is not None
+        assert diag.kind == "map"
+        # пустой узел отброшен, координаты клампированы
+        assert {n.id for n in diag.nodes} == {"e", "a", "g"}
+        assert diag.nodes[0].x == 0.8
+        # ссылка на несуществующий узел отброшена
+        assert len(diag.edges) == 2
+        assert diag.edges[0].color == "warm"
+
+    def test_generate_lesson_diagram_bad_kind_defaults(self):
+        """Неизвестный kind → flow; битая диаграмма → None (не роняет урок)."""
+        state = _state()
+        fake = lambda m: json.dumps({
+            "definition": "Атмосфера — оболочка.",
+            "diagram": {"kind": "spider", "nodes": [{"id": "n", "label": "x"}]},
+            "sections": [{"body": "текст"}],
+        })
+        lesson = generate_lesson("Атмосфера", ["контекст"], state, llm_call=fake)
+        assert lesson.diagram.kind == "flow"
+        fake2 = lambda m: json.dumps({
+            "definition": "Атмосфера — оболочка.",
+            "diagram": {"kind": "flow", "nodes": []},  # пусто → диаграммы нет
+            "sections": [{"body": "текст"}],
+        })
+        lesson2 = generate_lesson("Атмосфера", ["контекст"], state, llm_call=fake2)
+        assert lesson2.diagram is None
+        assert lesson2.sections[0].body == "текст"
+
+    def test_generate_lesson_repair_plain_text(self):
+        """LLM вернул сплошной текст (не JSON) — repair собирает урок из секций."""
+        state = _state()
+        fake = lambda m: (
+            "Атмосфера — газовый слой планеты.\n"
+            "Она состоит из азота.\n"
+            "Кислород нужен для дыхания.\n"
+            "Итог: атмосфера защищает жизнь."
+        )
+        lesson = generate_lesson("Атмосфера", ["контекст"], state, llm_call=fake)
+        assert lesson.definition.startswith("Атмосфера")
+        assert len(lesson.sections) >= 2
+        assert any("Кислород" in s.body for s in lesson.sections)
+        assert lesson.summary
+        # контент не потерян
+        assert "защищает жизнь" in lesson.render_text()
 
     def test_generate_lesson_fallback_on_garbage(self):
         state = _state()
         fake = lambda m: "не json вообще"
-        text = generate_lesson("Атмосфера", ["Атмосфера — воздушная оболочка Земли."], state, llm_call=fake)
-        assert "воздушная оболочка" in text
+        lesson = generate_lesson("Атмосфера", ["Атмосфера — воздушная оболочка Земли."], state, llm_call=fake)
+        assert "воздушная оболочка" in lesson.render_text()
+        # фолбэк — односекционный урок, структура не ломается
+        assert len(lesson.sections) == 1
+        assert "воздушная оболочка" in lesson.sections[0].body
 
     def test_generate_lesson_with_on_token_mock(self):
-        """on_token (стриминг) + мок-llm_call: токены НЕ вызываются (мок), текст корректен."""
+        """on_token (стриминг) + мок-llm_call: при on_token используется chat_stream (токены уходят в callback)."""
         state = _state()
         seen = []
-        fake = lambda m: '{"text": "Атмосфера — газовая оболочка Земли. Она защищает планету от радиации и метеоритов."}'
-        text = generate_lesson("Атмосфера", ["контекст"], state, llm_call=fake, on_token=lambda t: seen.append(t))
-        assert "газовая оболочка" in text
-        assert seen == []  # при мок-llm_call стриминг не запускается
+        # При заданном on_token всегда используется chat_stream, llm_call игнорируется
+        lesson = generate_lesson("Атмосфера", ["контекст"], state, on_token=lambda t: seen.append(t))
+        # Текста из мок-LLM не будет — fallback на контекст
+        assert len(lesson.render_text()) > 0
 
     def test_generate_text_returns_llm_output(self):
         from src.tutor import generate_text
 
         text = generate_text([{"role": "user", "content": "x"}], llm_call=lambda m: "ответ")
         assert text == "ответ"
+
+
+class TestOfflineFallback:
+    """Офлайн-сценарии (нет интернета/AI-сервиса): LLM недоступен → template-fallback."""
+
+    def _boom(self, *a, **k):
+        raise RuntimeError("Все провайдеры и модели недоступны: offline")
+
+    def _patch_llm_offline(self, monkeypatch):
+        from src.llm_client import LLMClient
+
+        monkeypatch.setattr(LLMClient, "chat", self._boom)
+        monkeypatch.setattr(LLMClient, "chat_stream", self._boom)
+
+    def test_generate_lesson_llm_offline_template(self, monkeypatch):
+        self._patch_llm_offline(monkeypatch)
+        state = _state(grade="6")
+        lesson = generate_lesson(
+            "Атмосфера",
+            ["Атмосфера — воздушная оболочка Земли, состоит из азота (78%) и кислорода (21%)."],
+            state,
+        )
+        text = lesson.render_text()
+        assert len(text) > 40
+        assert "Атмосфера" in text
+
+    def test_generate_question_llm_offline_template(self, monkeypatch):
+        self._patch_llm_offline(monkeypatch)
+        state = _state()
+        card = generate_question("Атмосфера", ["Атмосфера — воздушная оболочка."], "medium", state)
+        assert card.answer_type == "open"
+        assert "Атмосфера" in card.question
+
+    def test_evaluate_answer_llm_offline_heuristic(self, monkeypatch):
+        from src.llm_client import LLMClient
+
+        state = _state(grade="6")
+        generate_question(
+            "Атмосфера", ["Атмосфера — воздушная оболочка Земли."], "easy", state,
+            llm_call=lambda m: '{"question": "Что такое атмосфера?", "options": null, '
+                               '"answer_type": "open", "topic": "Атмосфера", '
+                               '"correct_answers": ["воздушная оболочка"]}',
+        )
+        monkeypatch.setattr(LLMClient, "chat", self._boom)
+        graded = evaluate_answer(
+            state.current_question.question,
+            "Атмосфера — воздушная оболочка Земли",
+            ["Атмосфера — воздушная оболочка Земли."],
+            state,
+        )
+        assert graded.model_used == "rule-based"
+        assert graded.correct is True
+        assert graded.score == 0.7
+
+    def test_explain_error_llm_offline_template(self, monkeypatch):
+        self._patch_llm_offline(monkeypatch)
+        expl = explain_error("Вопрос", "неверный ответ", ["контекст"], _state())
+        assert expl["text"]
+        assert isinstance(expl["citation"], dict)
 
 
 class TestAdjustDifficulty:

@@ -25,6 +25,7 @@ import openai
 
 from . import config
 from .config import ROLE_CHEAP, ROLE_EXPERT, ROLE_JUDGE, ROLE_TUTOR
+from .guardrails import BudgetExceededError, BudgetGuard
 
 logger = logging.getLogger("edututor.llm")
 
@@ -77,12 +78,14 @@ class LLMClient:
         settings: Optional[config.Settings] = None,
         role: str = ROLE_TUTOR,
         metrics: Any = None,
+        budget: Optional[BudgetGuard] = None,
     ):
         self.settings = settings or config.settings
         self.role = role
         if role not in (ROLE_TUTOR, ROLE_EXPERT, ROLE_CHEAP, ROLE_JUDGE):
             raise ValueError(f"Неизвестная роль: {role!r}")
         self.metrics = metrics
+        self.budget = budget  # BudgetGuard сессии: enforce MAX_COST_USD / MAX_LLM_CALLS_PER_SESSION
 
         self.providers = self.settings.provider_configs(role)
         if not self.providers:
@@ -225,10 +228,19 @@ class LLMClient:
             raise ConnectionError(f"Клиент {name} не инициализирован")
 
         last_error: Optional[Exception] = None
+        stream_started = False  # чанки уже показаны в UI — ретрай не должен их дублировать
         for attempt in range(1, MAX_RETRIES + 1):
+            emitted = False
+
+            def _emit_chunk(text: str) -> None:
+                nonlocal emitted
+                emitted = True
+                if on_chunk is not None and not stream_started:
+                    on_chunk(text)
+
             try:
                 if stream_fn is not None:
-                    resp = stream_fn(client, name, model, messages, on_chunk, max_tokens, temperature)
+                    resp = stream_fn(client, name, model, messages, _emit_chunk, max_tokens, temperature)
                 else:
                     resp = self._make_request(
                         client, name, model, messages, tools, tool_choice, max_tokens, temperature
@@ -255,6 +267,9 @@ class LLMClient:
             except Exception as e:
                 logger.error("LLM %s: необработанная ошибка: %s", name, e)
                 raise
+
+            if emitted:
+                stream_started = True
 
             if attempt < MAX_RETRIES:
                 delay = BACKOFF_BASE * (2 ** (attempt - 1))
@@ -285,6 +300,11 @@ class LLMClient:
         (В-2: доля отказов дешёвой роли), затем пробрасывает исключение — вызывающий
         слой принимает решение о fallback на TUTOR_MODEL.
         """
+        if self.budget is not None and not self.budget.allowed(self.role):
+            logger.warning("Бюджет роли %s исчерпан (стоимость/число вызовов)", self.role)
+            raise BudgetExceededError(
+                f"Бюджет роли {self.role} исчерпан (лимит стоимости или числа LLM-вызовов сессии)"
+            )
         errors: List[str] = []
         providers = list(self.providers)
         for idx, provider in enumerate(providers):
@@ -301,6 +321,8 @@ class LLMClient:
                         cost_usd=resp.cost_usd,
                         provider=resp.provider,
                     )
+                    if self.budget is not None:
+                        self.budget.record(self.role, resp.cost_usd)
                     return resp
                 except openai.APIStatusError as e:
                     errors.append(f"{provider['name']}/{model}: {e}")
@@ -390,6 +412,11 @@ class LLMClient:
 
         on_chunk(text) вызывается по мере генерации — именно так токены попадают в браузер.
         """
+        if self.budget is not None and not self.budget.allowed(self.role):
+            logger.warning("Бюджет роли %s исчерпан (стоимость/число вызовов)", self.role)
+            raise BudgetExceededError(
+                f"Бюджет роли {self.role} исчерпан (лимит стоимости или числа LLM-вызовов сессии)"
+            )
         errors: List[str] = []
         for provider in self.providers:
             models = self._model_list(provider)
@@ -411,6 +438,8 @@ class LLMClient:
                         cost_usd=resp.cost_usd,
                         provider=resp.provider,
                     )
+                    if self.budget is not None:
+                        self.budget.record(self.role, resp.cost_usd)
                     return resp
                 except openai.APIStatusError as e:
                     errors.append(f"{name}/{model}: {e}")

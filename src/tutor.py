@@ -21,7 +21,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
-from api.schemas import QuizCard
+from api.schemas import DiagramEdge, DiagramNode, Lesson, LessonDiagram, LessonSection, QuizCard
 from .states import TutorState
 
 logger = logging.getLogger("edututor.tutor")
@@ -77,20 +77,32 @@ def generate_text(
 ) -> str:
     """Вызов LLM: реальный стриминг токенов (on_token) или обычный вызов.
 
-    - llm_call задан (мок в тестах) → обычный вызов без стриминга;
-    - on_token задан → LLMClient.chat_stream(stream=True), токены уходят в браузер;
+    - llm_call задан (мок в тестах / инъекция) → текст берём из него, on_token
+      лишь ретранслирует результат в UI (реальное стриминговое качество только
+      в продакшене, где llm_call=None);
+    - llm_call не задан + on_token → LLMClient.chat_stream(stream=True), токены
+      уходят в браузер;
     - иначе → обычный LLMClient.chat.
     """
     if llm_call is not None:
-        return llm_call(messages)
+        text = llm_call(messages)
+        if on_token is not None:
+            on_token(text)
+        return text
     from .llm_client import LLMClient
 
     client = LLMClient(role=role)
-    if on_token is not None:
-        resp = client.chat_stream(messages, on_chunk=on_token,
-                                  temperature=temperature, max_tokens=max_tokens)
-        return resp.content or ""
-    return client.chat(messages, temperature=temperature, max_tokens=max_tokens).content or ""
+    try:
+        if on_token is not None:
+            resp = client.chat_stream(messages, on_chunk=on_token,
+                                      temperature=temperature, max_tokens=max_tokens)
+            return resp.content or ""
+        return client.chat(messages, temperature=temperature, max_tokens=max_tokens).content or ""
+    except Exception as exc:
+        # Офлайн / недоступен LLM: возвращаем пустую строку — каждый вызывающий
+        # (lesson/explain/deep_dive) имеет template-fallback из RAG-контекста.
+        logger.warning("generate_text: LLM недоступен (%s) — template-fallback", exc)
+        return ""
 
 
 # ----------------------------------------------------------------------
@@ -131,6 +143,21 @@ def difficulty_for_grade(grade: Optional[str]) -> str:
     if g and g <= 9:
         return "medium"
     return "hard"
+
+
+def _diagram_grade_hint(grade: Optional[str]) -> str:
+    """Ограничение сложности схемы по классу (dual-coding без противоречий с уровнем)."""
+    try:
+        g = int(grade)
+    except (TypeError, ValueError):
+        g = 0
+    if g and g <= 6:
+        return "Схема для ученика 5-6 класса: 2-3 узла, очень простые подписи."
+    if g and g <= 9:
+        return "Схема для ученика 7-9 класса: 3-4 узла, короткие подписи-термины."
+    if g and g <= 11:
+        return "Схема для ученика 10-11 класса: 4-6 узлов, допустимы аналитические связи."
+    return "Схема для студента: 4-6 узлов, допустимы аналитические связи."
 
 
 # ----------------------------------------------------------------------
@@ -186,21 +213,37 @@ def generate_question(
     difficulty: str,
     state: TutorState,
     llm_call: Optional[Callable[[List[Dict[str, str]]], str]] = None,
+    on_token: Optional[Callable[[str], None]] = None,
     question_id: Optional[str] = None,
 ) -> QuizCard:
-    """Генерация вопроса по RAG-контексту (дешёвая/тьютор-модель решается вызывающим)."""
-    from .llm_client import LLMClient
+    """Генерация вопроса по RAG-контексту (дешёвая/тьютор-модель решается вызывающим).
 
-    if llm_call is None:
-        client = LLMClient(role="tutor")
-        llm_call = lambda msgs: client.chat(msgs, temperature=0.3, max_tokens=512).content or ""
-
+    llm_call — инъекция (мок в тестах); on_token — стриминг токенов в UI. При
+    llm_call=None в продакшене используется chat_stream (реальный стриминг).
+    """
     simple = difficulty == "easy"
     messages = _question_prompt(
         topic, context, difficulty, state.grade, state.curriculum, simple=simple,
         asked=list(state.asked_questions),
     )
-    raw = llm_call(messages)
+    if llm_call is not None:
+        raw = llm_call(messages)
+        if on_token is not None:
+            on_token(raw)
+    else:
+        from .llm_client import LLMClient
+
+        client = LLMClient(role="tutor")
+        try:
+            if on_token is not None:
+                resp = client.chat_stream(messages, on_chunk=on_token, temperature=0.3, max_tokens=512)
+                raw = resp.content or ""
+            else:
+                raw = client.chat(messages, temperature=0.3, max_tokens=512).content or ""
+        except Exception as exc:
+            # Офлайн: шаблонный вопрос из контекста (fallback ниже в этой функции).
+            logger.warning("generate_question: LLM недоступен (%s) — шаблонный вопрос", exc)
+            raw = ""
     data = parse_llm_json(raw)
     if not data or not data.get("question"):
         # Fallback: шаблонный вопрос из контекста
@@ -260,26 +303,163 @@ def is_duplicate_question(
 
 
 # ----------------------------------------------------------------------
-# Урок: объяснение темы перед квизом (режим lesson)
+# Урок: структурированное объяснение темы перед квизом (режим lesson)
 # ----------------------------------------------------------------------
 def _lesson_prompt(topic: str, context: List[str], grade: Optional[str], curriculum: Optional[str]) -> List[Dict[str, str]]:
     system = (
-        "Ты — тьютор EduTutor. Составь короткий понятный УРОК по теме ученика "
-        "только на основе контекста учебника. "
+        "Ты — тьютор EduTutor. Составь структурированный УРОК по теме ученика "
+        "ТОЛЬКО на основе контекста учебника. "
         + grade_prompt(grade)
         + (
             f" Учебная программа: {curriculum}." if curriculum else ""
         )
         + (
-            " Структура: 3-5 абзацев — что это такое, главные факты, пример, "
-            "итог одним предложением. Пиши своими словами, связно, без списков-перечислений "
-            "из канцелярита, без заголовков-эмодзи. Не выдумывай факты за пределами контекста. "
-            "Отвечай ЧИСТЫМ ТЕКСТОМ урока — без JSON, без кавычек-обёрток, без форматирования."
+            " Построй урок как хороший учебник: 1) hook — короткий вопрос-зацепка "
+            "в 1 предложении, который вызывает интерес; 2) definition — определение темы "
+            "в 1-2 простых предложениях; 3) key_terms — 2-4 ключевых термина с краткими "
+            "определениями; 4) 2-3 секции, каждая — ОДИН под-вопрос темы: заголовок + "
+            "короткое объяснение простыми словами (2-4 предложения) + check_question — один "
+            "вопрос «Проверь себя» на понимание этой секции; 5) summary — итог в 1-2 предложения. "
+            "Предложения короткие, без канцелярита, без заголовков-эмодзи. "
+            "НЕ выдумывай факты за пределами контекста. "
+            "Верни строго JSON: {\"title\": \"...\", \"hook\": \"...\", \"definition\": \"...\", "
+            "\"key_terms\": [{\"term\": \"...\", \"definition\": \"...\"}], "
+            "\"diagram\": {..., см. ниже}, "
+            "\"sections\": [{\"heading\": \"...\", \"body\": \"...\", \"citation\": \"§N или ''\", "
+            "\"check_question\": \"...\"}], \"summary\": \"...\"}. "
+            "citation — номер параграфа/страницы из контекста, если он виден в источнике, иначе пустая строка."
+        )
+        + _diagram_grade_hint(grade)
+        + (
+            " Обязательно добавь diagram — схему-иллюстрацию к теме. "
+            "Диаграмма отражает ТОЛЬКО те же факты и термины, что и секции/ключевые термины урока — "
+            "никаких новых понятий, чтобы не было противоречий с текстом. "
+            "kind: 'flow' (этапы / причина→следствие) | 'cycle' (цикл/круговорот) | "
+            "'map' (пространственная схема по координатам). "
+            "Формат diagram: {\"kind\": \"flow\"|\"cycle\"|\"map\", \"title\": \"короткий заголовок\", "
+            "\"nodes\": [{\"id\": \"n1\", \"label\": \"подпись 1-3 слова\"}], "
+            "\"edges\": [{\"source\": \"n1\", \"target\": \"n2\", \"label\": \"подпись стрелки\"}]}. "
+            "Для kind='map' каждый узел — объект с координатами на схеме (0..1, лево-верх → право-низ): "
+            "{\"id\": \"n1\", \"label\": \"Точка A\", \"x\": 0.7, \"y\": 0.35}. "
+            "Для противопоставленных ролей стрелок (тёплое/холодное, причина/следствие и т.п.) "
+            "укажи цвет: \"color\": \"warm\" или \"cold\". "
+            "2-5 узлов, не больше 6 связей."
         )
     )
     ctx = "\n---\n".join(context)[:MAX_EXPLANATION_CHARS]
     user = f"Тема: {topic}\nКонтекст учебника:\n{ctx}"
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def _diagram_from_data(raw: Any) -> Optional[LessonDiagram]:
+    """Строит LessonDiagram из JSON-ответа LLM с санитизацией.
+
+    Отбрасываются: неизвестные kind, узлы без id/label, связи к несуществующим узлам;
+    координаты карты клампируются в 0..1; размеры ограничены (5 узлов / 6 связей).
+    """
+    if not isinstance(raw, dict):
+        return None
+    kind = raw.get("kind") if raw.get("kind") in ("flow", "cycle", "map") else "flow"
+    nodes: List[DiagramNode] = []
+    raw_nodes = raw.get("nodes") if isinstance(raw.get("nodes"), list) else []
+    for n in raw_nodes[:5]:
+        if not isinstance(n, dict):
+            continue
+        nid = str(n.get("id") or "").strip()
+        label = str(n.get("label") or "").strip()
+        if not nid or not label:
+            continue
+        node = DiagramNode(id=nid[:40], label=label[:80])
+        if kind == "map":
+            try:
+                node.x = max(0.0, min(1.0, float(n.get("x"))))
+                node.y = max(0.0, min(1.0, float(n.get("y"))))
+            except (TypeError, ValueError):
+                node.x, node.y = None, None
+        nodes.append(node)
+    if not nodes:
+        return None
+    ids = {n.id for n in nodes}
+    edges: List[DiagramEdge] = []
+    raw_edges = raw.get("edges") if isinstance(raw.get("edges"), list) else []
+    for e in raw_edges[:6]:
+        if not isinstance(e, dict):
+            continue
+        src = str(e.get("source") or "").strip()
+        tgt = str(e.get("target") or "").strip()
+        if src not in ids or tgt not in ids:
+            continue
+        color = e.get("color") if e.get("color") in ("warm", "cold") else "neutral"
+        edges.append(DiagramEdge(
+            source=src, target=tgt,
+            label=str(e.get("label") or "").strip()[:40],
+            color=color,
+        ))
+    return LessonDiagram(
+        kind=kind,
+        title=str(raw.get("title") or "").strip()[:80],
+        nodes=nodes,
+        edges=edges,
+    )
+
+
+def _lesson_from_data(data: Dict[str, Any], topic: str) -> Lesson:
+    """Строит структурированный Lesson из JSON-ответа LLM (нормализация типов).
+
+    Мусорные/пустые поля отбрасываются — урок никогда не содержит пустых карточек.
+    """
+    sections: List[LessonSection] = []
+    raw_sections = data.get("sections") if isinstance(data.get("sections"), list) else []
+    for s in raw_sections[:4]:
+        if not isinstance(s, dict):
+            continue
+        body = str(s.get("body") or "").strip()
+        if not body:
+            continue
+        sections.append(LessonSection(
+            heading=str(s.get("heading") or "").strip(),
+            body=body,
+            citation=str(s.get("citation") or "").strip(),
+            source=str(s.get("source") or "").strip(),
+            check_question=str(s.get("check_question") or "").strip(),
+        ))
+    key_terms = []
+    raw_terms = data.get("key_terms") if isinstance(data.get("key_terms"), list) else []
+    for t in raw_terms[:5]:
+        if isinstance(t, dict) and str(t.get("term") or "").strip() and str(t.get("definition") or "").strip():
+            key_terms.append({"term": str(t["term"]).strip(), "definition": str(t["definition"]).strip()})
+    return Lesson(
+        title=str(data.get("title") or topic).strip(),
+        hook=str(data.get("hook") or "").strip(),
+        definition=str(data.get("definition") or "").strip(),
+        key_terms=key_terms,
+        diagram=_diagram_from_data(data.get("diagram")),
+        sections=sections,
+        summary=str(data.get("summary") or "").strip(),
+    )
+
+
+def _repair_lesson_from_text(text: str, topic: str) -> Lesson:
+    """Собирает Lesson из сплошного текста (LLM проигнорировал JSON).
+
+    Параграфы (по переводам строк) становятся секциями; первый абзац — определение,
+    последний — итог (при 4+ абзацах). Консервативно: не выдумываем заголовки.
+    """
+    paragraphs = [p.strip() for p in re.split(r"\n+", (text or "").strip()) if p.strip()]
+    if len(paragraphs) >= 4:
+        return Lesson(
+            title=topic,
+            definition=paragraphs[0],
+            sections=[LessonSection(body=p) for p in paragraphs[1:-1]],
+            summary=paragraphs[-1],
+        )
+    if len(paragraphs) >= 2:
+        return Lesson(
+            title=topic,
+            definition=paragraphs[0],
+            sections=[LessonSection(body=p) for p in paragraphs[1:]],
+        )
+    return Lesson(title=topic, sections=[LessonSection(body=text or "")])
 
 
 def generate_lesson(
@@ -288,17 +468,28 @@ def generate_lesson(
     state: TutorState,
     llm_call: Optional[Callable[[List[Dict[str, str]]], str]] = None,
     on_token: Optional[Callable[[str], None]] = None,
-) -> str:
-    """Синтез урока по RAG-контексту (тьютор-модель). on_token — стриминг токенов в браузер."""
+) -> Lesson:
+    """Синтез структурированного урока по RAG-контексту (тьютор-модель).
+
+    Возвращает Lesson (карточки/секции/термины). Если модель не вернула валидную
+    структуру — repair: сплошной текст разбивается на секции (не теряется контент).
+    on_token — стриминг токенов в браузер.
+    """
     messages = _lesson_prompt(topic, context, state.grade, state.curriculum)
     raw = generate_text(messages, llm_call=llm_call, on_token=on_token,
-                        role="tutor", temperature=0.4, max_tokens=700)
+                        role="tutor", temperature=0.4, max_tokens=1200)
     data = parse_llm_json(raw)
-    text = str(data.get("text") or raw or "").strip()
-    if len(text) < 40:
-        # Fallback: даём первый абзац контекста как урок
-        text = (context[0] if context else f"Материалы по теме «{topic}» ещё пополняются.")[:1200]
-    return text
+    lesson = _lesson_from_data(data, topic)
+    # Repair: модель вернула не-JSON / JSON без структуры — собираем из сплошного текста.
+    if not lesson.sections and not lesson.definition and not lesson.hook:
+        text = str(data.get("text") or "").strip()
+        if not text and not data:
+            # LLM вернул сплошной текст (не JSON) — используем его напрямую
+            text = (raw or "").strip()
+        if len(text) < 40:
+            text = (context[0] if context else f"Материалы по теме «{topic}» ещё пополняются.")[:1200]
+        lesson = _repair_lesson_from_text(text, topic)
+    return lesson
 
 
 # ----------------------------------------------------------------------
@@ -450,6 +641,20 @@ def _ref_match(answer: str, refs: List[str]) -> bool:
     return False
 
 
+def _answer_context_overlap(answer: str, context: List[str]) -> bool:
+    """Эвристика офлайн-проверки открытого ответа: ключевые слова ответа в контексте.
+
+    Не требует LLM (fallback, когда AI-сервис недоступен). Не строгий судья —
+    лишь грубая проверка «ответ не пустой и по теме».
+    """
+    words = re.findall(r"[а-яёa-z]{4,}", (answer or "").lower())
+    if not words:
+        return False
+    hay = " ".join(context).lower()
+    hits = sum(1 for w in set(words) if w in hay)
+    return hits >= 2 or (len(set(words)) == 1 and hits == 1)
+
+
 @dataclass
 class GradedAnswer:
     score: float  # 0..1
@@ -500,11 +705,29 @@ def evaluate_answer(
             )
 
     role = _decide_eval_model(state, answer)  # Ж-8
+    prompt = _eval_prompt(question, answer, context, correct_answers=refs or None)
     if llm_call is None:
         client = LLMClient(role=role)
-        llm_call = lambda msgs: client.chat(msgs, temperature=0.0, max_tokens=300).content or ""
-
-    raw = llm_call(_eval_prompt(question, answer, context, correct_answers=refs or None))
+        try:
+            raw = client.chat(prompt, temperature=0.0, max_tokens=300).content or ""
+        except Exception as exc:
+            # Офлайн: эвристическая проверка по ключевым словам (не роняем квиз).
+            logger.warning("evaluate_answer: LLM недоступен (%s) — rule-based fallback", exc)
+            overlap = _answer_context_overlap(answer, context)
+            if overlap:
+                return GradedAnswer(
+                    score=0.7, correct=True,
+                    feedback="Ответ принят (проверка по ключевым словам — AI недоступен).",
+                    citation_ok=False, model_used="rule-based", precheck_passed=True,
+                )
+            return GradedAnswer(
+                score=0.3, correct=False,
+                feedback="Не удалось проверить ответ автоматически: нет доступа к AI. "
+                         "Повторите позже или ответьте по тексту учебника.",
+                citation_ok=False, model_used="rule-based", precheck_passed=True,
+            )
+    else:
+        raw = llm_call(prompt)
     data = parse_llm_json(raw)
     score01 = _score01(data.get("score", 5.0))
     correct = bool(data.get("correct", score01 >= 0.7))
@@ -569,15 +792,29 @@ def explain_error(
     context: List[str],
     state: TutorState,
     llm_call: Optional[Callable[[List[Dict[str, str]]], str]] = None,
+    on_token: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     """Объяснение ошибки с цитатой (EXPERT_MODEL — deep dive, раздел 4.2.2)."""
     from .llm_client import LLMClient
 
-    if llm_call is None:
-        client = LLMClient(role="expert")
-        llm_call = lambda msgs: client.chat(msgs, temperature=0.2, max_tokens=500).content or ""
+    messages = _explain_prompt(question, answer, None, context)
 
-    raw = llm_call(_explain_prompt(question, answer, None, context))
+    if llm_call is not None:
+        raw = llm_call(messages)
+        if on_token is not None:
+            on_token(raw)
+    else:
+        client = LLMClient(role="expert")
+        try:
+            if on_token is not None:
+                resp = client.chat_stream(messages, on_chunk=on_token, temperature=0.2, max_tokens=500)
+                raw = resp.content or ""
+            else:
+                raw = client.chat(messages, temperature=0.2, max_tokens=500).content or ""
+        except Exception as exc:
+            # Офлайн: шаблонное объяснение (fallback ниже — «Разберём ошибку подробнее»).
+            logger.warning("explain_error: LLM недоступен (%s) — шаблон", exc)
+            raw = ""
     data = parse_llm_json(raw)
     citation = data.get("citation") if isinstance(data.get("citation"), dict) else {}
     return {

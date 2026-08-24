@@ -44,8 +44,73 @@ def _now_iso() -> str:
     return datetime.datetime.now().isoformat(timespec="seconds")
 
 
+class WikiNote:
+    """Структурированная запись об ошибке/результате по теме.
+
+    Поля question, student_answer, correct_answer — опциональны.
+    Если контекст диалога недоступен, сохраняется только feedback.
+    """
+
+    __slots__ = ("date", "question", "student_answer", "feedback", "correct_answer")
+
+    def __init__(
+        self,
+        date: str,
+        feedback: str,
+        question: Optional[str] = None,
+        student_answer: Optional[str] = None,
+        correct_answer: Optional[str] = None,
+    ) -> None:
+        self.date = date
+        self.question = question
+        self.student_answer = student_answer
+        self.feedback = feedback
+        self.correct_answer = correct_answer
+
+    def to_dict(self) -> Dict[str, Any]:
+        d: Dict[str, Any] = {"date": self.date, "feedback": self.feedback}
+        if self.question:
+            d["question"] = self.question
+        if self.student_answer:
+            d["student_answer"] = self.student_answer
+        if self.correct_answer:
+            d["correct_answer"] = self.correct_answer
+        return d
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "WikiNote":
+        """Создать WikiNote из dict. Поддерживает как новый формат, так и парсинг старой строки."""
+        # Новый формат — есть поля даты
+        date = data.get("date", "")
+        feedback = data.get("feedback", "")
+        question = data.get("question")
+        student_answer = data.get("student_answer")
+        correct_answer = data.get("correct_answer")
+        return cls(
+            date=date,
+            feedback=feedback,
+            question=question,
+            student_answer=student_answer,
+            correct_answer=correct_answer,
+        )
+
+    @classmethod
+    def from_legacy_string(cls, note_str: str) -> "WikiNote":
+        """Парсинг старой строковой заметки формата "{дата}: {feedback}"."""
+        parts = note_str.split(": ", 1)
+        date = parts[0].strip() if parts else ""
+        feedback = parts[1].strip() if len(parts) > 1 else note_str
+        return cls(date=date, feedback=feedback)
+
+
 class WikiArticle:
-    """Одна wiki-статья темы: frontmatter (OKF v0.2) + тело markdown."""
+    """Одна wiki-статья темы: frontmatter (OKF v0.2) + тело markdown.
+
+    notes — список структурированных записей WikiNote (dict в JSON).
+    Каждая запись содержит: date, feedback, и опционально question, student_answer, correct_answer.
+    """
+
+    MAX_NOTES = 10  # максимальное количество заметок
 
     def __init__(
         self,
@@ -60,7 +125,9 @@ class WikiArticle:
         last_studied: Optional[str] = None,
         weak_areas: Optional[List[str]] = None,
         relations: Optional[List[Dict[str, str]]] = None,
-        notes: Optional[List[str]] = None,
+        notes: Optional[List[Any]] = None,
+        concepts: Optional[List[str]] = None,
+        source: str = "",
         body: str = "",
         section_number: Optional[str] = None,
     ) -> None:
@@ -75,7 +142,20 @@ class WikiArticle:
         self.last_studied = last_studied or _now_iso()
         self.weak_areas = weak_areas or []
         self.relations = relations or []
-        self.notes = notes or []
+        self._notes: List[WikiNote] = []
+        # Нормализуем notes: принимаём List[str], List[Dict], или List[WikiNote]
+        if notes:
+            for n in notes:
+                if isinstance(n, WikiNote):
+                    self._notes.append(n)
+                elif isinstance(n, dict):
+                    self._notes.append(WikiNote.from_dict(n))
+                elif isinstance(n, str):
+                    # backwards compatibility: парсим старую строку
+                    self._notes.append(WikiNote.from_legacy_string(n))
+        self.concepts = concepts or []
+        # Источник информации (URL страницы / имя учебника) — из RAG-чанков
+        self.source = source or ""
         self.body = body
         self.section_number = section_number
 
@@ -107,6 +187,10 @@ class WikiArticle:
             data["relations"] = self.relations
         if self.notes:
             data["notes"] = self.notes
+        if self.concepts:
+            data["concepts"] = self.concepts
+        if self.source:
+            data["source"] = self.source
         return data
 
     def to_markdown(self) -> str:
@@ -115,31 +199,106 @@ class WikiArticle:
         if not body:
             body = f"Материал по теме «{self.title}» накапливается по мере прохождения квизов.\n"
         return front + f"# {self.title}\n\n{body}\n"
-    def to_dict(self) -> Dict[str, Any]:
-        d = self.frontmatter()
-        d["body"] = self.body
-        d["accuracy"] = self.accuracy
-        return d
+    @property
+    def notes(self) -> List[Dict[str, Any]]:
+        """Сериализованные заметки (List[Dict]) — для frontmatter/API."""
+        return [n.to_dict() for n in self._notes]
 
-    # --- обновление по результатам сессии ---
-    def apply_result(self, topic: str, score01: float, correct: bool, feedback: str = "") -> None:
-        """Экспоненциальное сглаживание мастерства (как в TutorState.update_knowledge)."""
+    def _normalize_feedback(self, feedback: str) -> str:
+        """Ограничение длины feedback для дедупликации."""
+        return feedback[:180]
+
+    def _find_or_merge_note(self, feedback_key: str) -> Optional[WikiNote]:
+        """Найти существующую заметку с таким же feedback_key для группировки ошибок."""
+        for note in self._notes:
+            if note.feedback == feedback_key:
+                return note
+        return None
+
+    def add_note(
+        self,
+        feedback: str,
+        question: Optional[str] = None,
+        student_answer: Optional[str] = None,
+        correct_answer: Optional[str] = None,
+    ) -> None:
+        """Добавить структурированную заметку с дедупликацией и ограничением.
+
+        - Дедупликация: если такая же ошибка уже есть — не добавляем.
+        - Ограничение: храним только последние MAX_NOTES заметок.
+        - Группировка: одинаковые feedback (без даты) группируются через счётчик в комментарии.
+        """
+        if not feedback:
+            return
+
+        normalized_fb = self._normalize_feedback(feedback)
+        date = self.last_studied[:10] if self.last_studied else _now_iso()[:10]
+
+        # Проверяем дедупликацию по feedback (игнорируя дату в сравнении)
+        existing = self._find_or_merge_note(normalized_fb)
+        if existing:
+            # Уже есть такая ошибка — обновляем дату на самую свежую
+            existing.date = date
+            if not existing.student_answer and student_answer:
+                existing.student_answer = student_answer
+            if not existing.correct_answer and correct_answer:
+                existing.correct_answer = correct_answer
+            return
+
+        note = WikiNote(
+            date=date,
+            feedback=normalized_fb,
+            question=question,
+            student_answer=student_answer,
+            correct_answer=correct_answer,
+        )
+        self._notes.append(note)
+
+        # Ограничиваем количество заметок — оставляем последние MAX_NOTES
+        if len(self._notes) > self.MAX_NOTES:
+            self._notes = self._notes[-self.MAX_NOTES:]
+
+    def apply_result(
+        self,
+        topic: str,
+        score01: float,
+        correct: bool,
+        feedback: str = "",
+        question: Optional[str] = None,
+        student_answer: Optional[str] = None,
+        correct_answer: Optional[str] = None,
+    ) -> None:
+        """Экспоненциальное сглаживание мастерства + добавление структурированной заметки.
+
+        При ошибке (correct=False) создаёт dict-запись с полными полями контекста:
+        question, student_answer, feedback, correct_answer.
+        """
         self.mastery = round(0.7 * self.mastery + 0.3 * float(score01), 4)
         self.attempts += 1
         if correct:
             self.correct += 1
         self.last_studied = _now_iso()
         if not correct and feedback:
-            # копим пояснения по ошибкам (не больше 5, самые свежие)
-            note = f"{self.last_studied[:10]}: {feedback[:180]}"
-            if note not in self.notes:
-                self.notes.append(note)
-                self.notes = self.notes[-5:]
+            self.add_note(
+                feedback=feedback,
+                question=question,
+                student_answer=student_answer,
+                correct_answer=correct_answer,
+            )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Полная сериализация статьи для API (frontmatter + body)."""
+        d = self.frontmatter()
+        d["body"] = self.body
+        d["accuracy"] = self.accuracy
+        return d
 
     @classmethod
     def from_dict(cls, subject: str, topic: str, data: Dict[str, Any]) -> "WikiArticle":
+        raw_notes = data.get("notes")
+        # Передаём raw_notes — __init__ сам нормализует (включая backwards compatibility)
         return cls(
-            subject=subject,
+            subject=str(data.get("subject") or subject),  # human-имя из frontmatter, не slug каталога
             topic=topic,
             title=data.get("title"),
             grade=data.get("grade"),
@@ -150,7 +309,9 @@ class WikiArticle:
             last_studied=data.get("last_studied"),
             weak_areas=data.get("weak_areas"),
             relations=data.get("relations"),
-            notes=data.get("notes"),
+            notes=raw_notes,
+            concepts=data.get("concepts"),
+            source=data.get("source") or "",
             body=data.get("body", ""),
             section_number=data.get("section_number"),
         )
@@ -252,6 +413,9 @@ class KnowledgeWiki:
 
         Вызывается из evaluate_answer_node для текущего ответа — НЕ пересчитывает
         все records заново (иначе attempts растут квадратично).
+        
+        Record может содержать дополнительные поля: question, student_answer,
+        correct_answer — они сохраняются в структурированных заметках.
         """
         subject = getattr(state, "subject", None) or "общая тема"
         topic = record.get("topic") or getattr(state, "topic", None)
@@ -270,7 +434,15 @@ class KnowledgeWiki:
                 grade=getattr(state, "grade", None),
                 curriculum=getattr(state, "curriculum", None),
             )
-        art.apply_result(topic, float(score), bool(correct), record.get("feedback") or "")
+        art.apply_result(
+            topic,
+            float(score),
+            bool(correct),
+            record.get("feedback") or "",
+            question=record.get("question"),
+            student_answer=record.get("student_answer"),
+            correct_answer=record.get("correct_answer"),
+        )
         self.upsert(art)
         return art
 
@@ -352,10 +524,44 @@ class KnowledgeWiki:
             return art  # LLM недоступен — не роняем поток
         return art
 
+    def set_source(self, state: Any, topic: str, source: str) -> Optional[WikiArticle]:
+        """Источник информации (URL/учебник) для темы — из RAG-чанков, если ещё не задан."""
+        source = (source or "").strip()
+        if not source:
+            return None
+        subject = getattr(state, "subject", None) or "общая тема"
+        art = self.get(subject, topic)
+        if art is None:
+            return None
+        if not art.source:
+            art.source = source
+            self.upsert(art)
+        return art
+
+    def sync_concepts(self, state: Any, topic: str, concepts: List[str]) -> Optional[WikiArticle]:
+        """Roadmap #3 (drill-down): ключевые понятия темы (словарик урока) → статья.
+
+        Идемпотентно: понятия перезаписываются последним уроком; статья создаётся
+        при необходимости (тема может быть изучена, но ещё не пройден квиз).
+        """
+        concepts = [str(c).strip() for c in (concepts or []) if str(c).strip()]
+        if not concepts:
+            return None
+        subject = getattr(state, "subject", None) or "общая тема"
+        art = self.get(subject, topic)
+        if art is None:
+            art = WikiArticle(subject=subject, topic=topic, title=topic,
+                              grade=getattr(state, "grade", None))
+        art.concepts = concepts
+        art.last_studied = _now_iso()
+        self.upsert(art)
+        return art
+
     def to_summary_dict(self) -> List[Dict[str, Any]]:
-        """Сводка для API: предмет → темы с мастерством/датой."""
+        """Сводка для API: предмет (человеческое имя из статей) → темы с мастерством/датой."""
         out: List[Dict[str, Any]] = []
         for subject in self.list_subjects():
-            items = [a.to_dict() for a in self.list_articles(subject)]
-            out.append({"subject": subject, "articles": items})
+            items = self.list_articles(subject)
+            display = items[0].subject if items else subject
+            out.append({"subject": display, "articles": [a.to_dict() for a in items]})
         return out

@@ -115,6 +115,12 @@ curl http://127.0.0.1:8000/api/wiki/философия/Кант        # ста�
 заметки). Обновляется при каждом ответе (`apply_record`) и завершении квиза
 (`sync_mastery`). Тело статьи генерируется Wiki-LLM из RAG-контекста (`enrich_body`).
 
+### Автоматическая обработка форматов заметок
+
+Компоненты фронтенда (`NoteItem`, `TopicModal`) принимают notes массив, содержащий
+смесь объектов и legacy-строк. Парсинг выполняется внутри `NoteItem` через
+`normalizeNote()`, поэтому родительским компонентам не нужно разделять форматы.
+
 ### Граф знаний (roadmap #3)
 
 - **Mastery overlay** — цвет узла = уровень усвоения (зелёный/жёлтый/красный) из wiki
@@ -141,10 +147,48 @@ curl http://127.0.0.1:8000/api/wiki/философия/Кант        # ста�
 - `урок` — перед квизом тьютор объясняет тему по RAG-контексту, спрашивает «готов к квизу?» (да/нет).
 - `объяснение`, `глубокий разбор` — пояснения и экспертные разборы.
 
+## Наблюдаемость, ограничения и SOP
+
+### Наблюдаемость (JSONL-трассировка запроса)
+
+Каждый запрос трассируется по этапам с уникальным `request_id`:
+`logs/run_<timestamp>.jsonl` (CLI) и `logs/session_<sid>.jsonl` (API). Записи:
+`node:*` (вход/выход узлов графа с длительностью), `agent.action` (вызов инструмента
+модели: status/args/reason), `user_request` (начало/конец обработки сообщения).
+Чувствительные данные (ключи, email) маскируются (`mask_sensitive`).
+
+### Guardrails и лимиты
+
+- **Входной фильтр** (`guard_user_input`): prompt-injection + контент-фильтр на
+  `POST /api/sessions/{id}/message`, `POST /intake` и в CLI — заблокированный текст
+  не передаётся агенту (возвращается `error`/предупреждение).
+- **Circuit breaker**: серия сбоев шага графа (`CIRCUIT_BREAKER_THRESHOLD`, по умолч. 3)
+  → защитная пауза `CIRCUIT_BREAKER_COOLDOWN_SEC` (fail closed); состояние видно в
+  `GET /api/health` (`circuit_breaker`).
+- **Бюджеты** (`BudgetGuard`, В-7): `MAX_COST_USD`, `CHEAP/TUTOR/JUDGE_ALLOWANCE_USD`,
+  `MAX_LLM_CALLS_PER_SESSION` — `LLMClient` блокирует вызовы при превышении
+  (`BudgetExceededError` → понятное сообщение пользователю).
+- Плюс retry с backoff (429/5xx), таймауты шага/запроса, лимиты итераций intake и OCR,
+  антидубликат вопросов.
+
+### SOP: когда и как агент использует инструменты
+
+- **Интервью (intake)** — `interview_progress`, `extract_intake_fields`, `set_intake`:
+  модель ведёт чек-лист, после каждого ответа извлекает поля и подтверждает прогресс;
+  при достаточности данных вызывает `route_to_source`. Поверх — детерминированный
+  слой-страховка (поля из ответа применяются всегда, даже если модель не вызвала инструмент).
+- **Retrieval** — `rag_search`: модель решает, нужен ли поиск, формулирует запрос и
+  при пустом результате может повторить или завершить; фильтры — subject/grade/раздел.
+- **Тьюторинг** — `generate_lesson/quiz`, `evaluate_answer`, `explain_error`,
+  `deep_dive`, `finish_session`: RAG-first — без контекста контент не генерируется
+  (`generate_lesson`/`generate_quiz` вернут `{ok:false, required_action}`).
+- **Ошибки инструмента** возвращаются модели как `{ok:false}` — модель сама решает,
+  что дальше (повторить, сменить инструмент или завершить).
+
 ## Тесты и eval
 
 ```bash
-python -m pytest tests/ -v              # 341 тестов (юнит + интеграционные RouterAI)
+python -m pytest tests/ -v              # 550 тестов (юнит + интеграционные RouterAI)
 python evals/edututor_eval.py --runs 3  # EduTutorEval: intake/find_textbook/judge + intent accuracy
 python evals/edututor_eval.py --mock    # офлайн-режим
 ```
@@ -172,7 +216,7 @@ src/           config, llm_client, guardrails, nlp, intake, curriculum (ФГОС
                knowledge (RAG), qdrant_store (Qdrant backend), adaptive (LinUCB),
                source_finder (crawl4ai), tutor, judge, graph, metrics
 api/           Pydantic-схемы (IntakeStatusResponse, QuizCard, MessageResponse, WsEvent)
-tests/         350+ тест
+tests/         550+ тест
 evals/         golden_set.json, intent_dataset.json, edututor_eval.py
 main.py        CLI-демо
 docker-compose.yml  Qdrant + backend + frontend (roadmap #1)

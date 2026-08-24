@@ -799,6 +799,74 @@ OBSERVE │ Результат инструмента → history → модел
   (менеджер → воркеры по секциям → валидатор цитат), не затрагивая основной цикл.
 - `route_after_topic_gate` (2.2) получает ветки для обоих режимов до перехода в квиз.
 
+#### 7.3.5. Поток урока и квиза (исправление «агент пропускает выдачу материалов»)
+
+При `USE_AGENT_TUTOR=True` агент-тьютор должен сначала выдать материал урока, а затем предложить квиз.
+
+**Инструменты:**
+
+| Инструмент | Описание | Порядок вызова |
+|------------|----------|----------------|
+| `generate_lesson(topic)` | Подготовка и выдача учебного материала по теме через RAG-контекст. Устанавливает `lesson_text` и `lesson_done=True`. | Сначала — один раз при входе в режим занятия |
+| `generate_quiz(topic, difficulty)` | Генерация следующего вопроса квиза с антидубликатом. Записывает вопрос в `records`, устанавливает `current_question`. | После урока (`lesson_done=True`) |
+
+**Порядок действий агента:**
+
+```
+1. ВХОД: mode="lesson", lesson_done=False, lesson_text=None
+   → ПРОВЕРКА: ОБЯЗАТЕЛЬНО вызвать generate_lesson
+   
+2. generate_lesson(topic)
+   → RAG-поиск по topic (k=5)
+   → Синтез объяснения через tutor_mod.generate_lesson()
+   → Становится: lesson_text=<текст>, lesson_done=True
+   
+3. Выдача ученику: tutor.lesson событие с текстом урока
+   
+4. ПРОВЕРКА: lesson_done=True, нет активного вопроса
+   → Вызвать generate_quiz(topic, difficulty)
+   
+5. generate_quiz(topic, difficulty)
+   → Guard: если mode="lesson" и lesson_done=False → ОШИБКА + required_action="generate_lesson"
+   → RAG-поиск по topic (k=3)
+   → Генерация вопроса с антидубликатом
+   → Запись в records
+   → Установка current_question
+   
+6. Выдача ученику: quiz.card событие с вопросом
+   
+7. Ожидание ответа ученика → evaluate_answer → ... (далее стандартный цикл квиза)
+```
+
+**Страховые механизмы:**
+
+1. **Правило 0 в TUTOR_AGENT_PROMPT** ([`src/agent_loop.py`](src/agent_loop.py:237)): агенту явно указано, что при `lesson_done=False` и пустом `lesson_text` он обязан сначала вызвать `generate_lesson`.
+
+2. **Guard в generate_quiz** ([`src/agent_tools.py`](src/agent_tools.py:151)): если `mode="lesson"` и `lesson_done=False`, инструмент возвращает ошибку с `required_action="generate_lesson"`.
+
+3. **Авто-генерация в agent_tutor_node** ([`src/graph.py`](src/graph.py:348)): перед запуском агента автоматически генерирует урок, если `mode="lesson"`, `lesson_done=False`, `lesson_text=None`. Использует ту же логику RAG, что и [`content_node()`](src/graph.py:503).
+
+4. **generate_lesson в TUTOR_TOOL_SCHEMAS**: инструмент добавлен в разрешённый список инструментов тьютора (`TUTOR_TOOL_NAMES`).
+
+#### 7.3.6. Поля записи вопроса (record)
+
+При завершении вопроса (`evaluate_answer`) в `st.records[-1]` записываются следующие поля:
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `question_id` | str | UUID вопроса |
+| `topic` | str | Тема квиза |
+| `student_answer` | str | Ответ ученика |
+| `score01` | float | Балл оценки (0.0–1.0) |
+| `correct` | bool | Верный ли ответ (True/False) |
+| `feedback` | str | Комментарий тьютора |
+| `judge_score` | float | Оценка LLM-as-Judge |
+| `question` | str | Текст вопроса |
+| `correct_answer` | str | Ожидаемый правильный ответ |
+| `model_used` | str | Модель, выполненная оценка |
+
+Реализация: [`src/evaluation.py:140-149`](src/evaluation.py:140) — метод `update()` словаря `st.records[-1]`.
+
 ---
 
 ## 8. API (FastAPI)
@@ -956,6 +1024,37 @@ store = SessionStore(sqlite_store=SessionSQLiteStore(data/session_persist.db))
 ```
 
 > **Ж-6 (сохранение прогресса между сессиями):** до реализации `knowledge_map`, `records`, `correct_count` жили только в памяти. Теперь каждый шаг графа пишется в БД — прогресс ученика переживает перезагрузку сервера. Функция `write_session_exports()` вызывается из CLI-демо (`main.py`) после завершения — CSV-отчёты учителя доступны в `output/<session_id>_questions.csv` и `output/<session_id>_summary.csv`.
+
+### 8.6. Заметки (Notes) Wiki
+
+Заметки могут быть в двух форматах:
+
+1. **Структурированный объект** (новый формат):
+   ```json
+   {
+     "date": "2026-08-19",
+     "feedback": "Неверно",
+     "question": "Что такое уставная грамота?",
+     "student_answer": "Документ города",
+     "correct_answer": "Уставные грамоты"
+   }
+   ```
+
+2. **Legacy-строка** (старый формат, backwards compatibility):
+   `"YYYY-MM-DD: feedback. Правильный ответ: answer."`
+   Пример: `"2026-08-19: Неверно. Правильный ответ: Уставные грамоты."`
+
+Парсер `parseLegacyNote()` (в [`frontend/src/utils/parseNote.js`](frontend/src/utils/parseNote.js:13)) унифицирует оба формата в структурированный объект. Функция `normalizeNote()` (там же, [`строка 105`](frontend/src/utils/parseNote.js:105)) проверяет тип: если note уже объект — возвращает как есть, если строка — вызывает `parseLegacyNote()`.
+
+### 8.7. Логика отображения заметок
+
+Компонент `NoteItem.jsx` ([`frontend/src/components/NoteItem.jsx`](frontend/src/components/NoteItem.jsx:10)) классифицирует заметки по трём типам:
+
+- **Error (🔴)** — feedback содержит ключевые слова ошибки ("неверно", "ошибка", "wrong", "incorrect")
+- **Clarification (🟡)** — присутствуют поля вопроса/ответа ученика (quiz-контекст)
+- **Info (🟢)** — стандартные информационные заметки
+
+Для error-заметок с `correct_answer`: UI показывает блок "Правильный ответ:" зелёным цветом вместо feedback (строки 61–65 NoteItem.jsx).
 
 ---
 

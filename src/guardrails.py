@@ -16,6 +16,42 @@ from typing import Any, Dict, List, Optional
 
 from .config import ROLE_CHEAP, ROLE_EXPERT, ROLE_JUDGE, ROLE_TUTOR
 
+
+class BudgetExceededError(RuntimeError):
+    """Бюджет сессии/роли исчерпан: MAX_COST_USD, ролевой allowance или
+    MAX_LLM_CALLS_PER_SESSION. Вызывающий слой решает, как сообщить пользователю.
+    """
+
+
+def guard_user_input(text: str) -> Dict[str, Any]:
+    """Комбинированная проверка входа: prompt-injection + контент-фильтр.
+
+    Возвращает {blocked, reasons, message, injection, content}. Вызывается на
+    границе ввода (API /message и /intake, CLI) до передачи текста агенту.
+    """
+    injection = check_prompt_injection(text)
+    content = check_inappropriate_content(text)
+    reasons: List[str] = []
+    if injection["injection"]:
+        reasons.append("prompt_injection")
+    if content["blocked"]:
+        reasons.append("content_filter")
+    if reasons:
+        message = (
+            "Сообщение содержит недопустимое содержимое. Пожалуйста, задайте учебный вопрос по теме."
+            if content["blocked"]
+            else "Сообщение заблокировано как подозрительное — не пытайтесь изменять инструкции агенту."
+        )
+    else:
+        message = ""
+    return {
+        "blocked": bool(reasons),
+        "reasons": reasons,
+        "message": message,
+        "injection": injection,
+        "content": content,
+    }
+
 # --- Эвристики prompt-injection (регистронезависимые) ---
 INJECTION_PATTERNS: List[str] = [
     r"ignore\s+(all\s+)?previous\s+instructions",
@@ -247,6 +283,8 @@ class BudgetGuard:
 
         self.settings = settings or cfg.settings
         self._spent: Dict[str, float] = {r: 0.0 for r in self.ROLE_ALLOWANCE_FIELDS}
+        self._calls: Dict[str, int] = {r: 0 for r in self.ROLE_ALLOWANCE_FIELDS}
+        self._calls_total: int = 0
 
     def _allowance(self, role: str) -> float:
         field = self.ROLE_ALLOWANCE_FIELDS.get(role)
@@ -265,6 +303,9 @@ class BudgetGuard:
     def record(self, role: str, cost_usd: float) -> None:
         self._spent.setdefault(role, 0.0)
         self._spent[role] += cost_usd
+        self._calls.setdefault(role, 0)
+        self._calls[role] += 1
+        self._calls_total += 1
 
     def spent(self, role: str) -> float:
         return self._spent.get(role, 0.0)
@@ -272,11 +313,20 @@ class BudgetGuard:
     def spent_total(self) -> float:
         return round(sum(self._spent.values()), 6)
 
+    @property
+    def calls_total(self) -> int:
+        return self._calls_total
+
     def exceeded(self, role: str) -> bool:
-        """Превышен ли бюджет роли (общая корзина ролей) или общий MAX_COST_USD."""
+        """Превышен ли бюджет роли (общая корзина ролей), общий MAX_COST_USD
+        или лимит числа LLM-вызовов сессии MAX_LLM_CALLS_PER_SESSION."""
         if self._bucket_spent(role) > self._allowance(role):
             return True
-        return self.spent_total() > self.settings.MAX_COST_USD
+        if self.spent_total() > self.settings.MAX_COST_USD:
+            return True
+        if self._calls_total >= self.settings.MAX_LLM_CALLS_PER_SESSION:
+            return True
+        return False
 
     def allowed(self, role: str) -> bool:
         """Можно ли ещё делать вызовы роли (не превышен бюджет)."""
@@ -285,6 +335,8 @@ class BudgetGuard:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "spent_by_role": {k: round(v, 6) for k, v in self._spent.items()},
+            "calls_by_role": dict(self._calls),
             "spent_total_usd": self.spent_total(),
             "max_cost_usd": self.settings.MAX_COST_USD,
+            "max_calls_per_session": self.settings.MAX_LLM_CALLS_PER_SESSION,
         }

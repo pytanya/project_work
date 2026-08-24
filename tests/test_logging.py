@@ -66,6 +66,73 @@ class TestJsonlStepLogger:
         record = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
         assert "***masked***" in record["extra"]["api_key"]
 
+    def test_auto_step_num(self, tmp_path: Path):
+        """Без явного step_num — автонумерация (фоновые шаги графа/агента)."""
+        path = tmp_path / "run.jsonl"
+        logger = JsonlStepLogger(path, request_id="req_x", session_id="sess_x")
+        logger.log_step(agent_action="node:intake_node")
+        logger.log_step(agent_action="agent.action", tool="rag_search", status="ok")
+        logger.log_step(agent_action="node:summary")
+        logger.close()
+        records = [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines()]
+        assert [r["step_num"] for r in records] == [1, 2, 3]
+        assert all(r["request_id"] == "req_x" for r in records)
+        assert records[1]["agent_action"] == "agent.action"
+
+
+class TestGraphTracing:
+    """JSONL-трассировка: проход узлов графа и действия агента пишутся с request_id."""
+
+    def test_graph_nodes_traced(self, tmp_path: Path):
+        from src.agent_loop import _log_tool_action
+        from src.config import Settings
+        from src.graph import GraphDeps, build_graph
+        from src.knowledge import NumpyVectorStore
+        from src.logging_setup import JsonlStepLogger
+        from src.states import TutorState
+
+        class Emb:
+            def encode(self, texts):
+                return [[0.0] * 4] * len(texts)
+
+            def encode_query(self, text):
+                return [0.0] * 4
+
+        path = tmp_path / "trace.jsonl"
+        sl = JsonlStepLogger(path, request_id="req_trace", session_id="sess_trace")
+        deps = GraphDeps(
+            embedder=Emb(), store=NumpyVectorStore("t", Emb()),
+            settings=Settings(_env_file=None, MAX_INTAKE_ITERATIONS=8),
+            tutor_llm=lambda m: '{"question": "Что?", "answer_type": "open", "topic": "Т"}',
+            step_logger=sl,
+        )
+        graph = build_graph(deps)
+        res = TutorState.model_validate(graph.invoke(TutorState(num_questions=2).model_dump()))
+        # агентного цикла нет (tutor_llm — Callable) → детерминированный intake задал вопрос
+        assert res.agent_question
+        sl.close()
+
+        records = [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines()]
+        node_actions = [r["agent_action"] for r in records if r["agent_action"].startswith("node:")]
+        assert node_actions, "граф должен логировать проходы узлов"
+        assert all(r["request_id"] == "req_trace" for r in records)
+        assert all(r["session_id"] == "sess_trace" for r in records)
+
+    def test_agent_tool_writes_jsonl(self, tmp_path: Path):
+        from src.agent_loop import _log_tool_action
+        from src.logging_setup import JsonlStepLogger
+
+        path = tmp_path / "tool.jsonl"
+        sl = JsonlStepLogger(path, request_id="req_t")
+        _log_tool_action("rag_search", {"query": "Атмосфера"}, '{"ok": true, "topic": "Атмосфера"}', 42,
+                         step_logger=sl)
+        sl.close()
+        record = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+        assert record["agent_action"] == "agent.action"
+        assert record["tool"] == "rag_search"
+        assert record["status"] == "ok"
+        assert record["request_id"] == "req_t"
+
 
 class TestSetupLogging:
     def test_returns_expected_keys(self, tmp_path: Path):

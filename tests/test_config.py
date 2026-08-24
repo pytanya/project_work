@@ -112,18 +112,25 @@ class TestSearchEngines:
 
     def test_yandex_when_configured(self, make_settings):
         s = make_settings(YANDEX_API_KEY="k", YANDEX_FOLDER_ID="f", SEARCH_PRIMARY="yandex")
-        assert s.search_engines == ["yandex", "ddgs"]
+        assert s.search_engines == ["yandex", "stepik", "ddgs"]
 
     def test_tavily_between(self, make_settings):
         s = make_settings(
             YANDEX_API_KEY="k", YANDEX_FOLDER_ID="f", TAVILY_API_KEY="t",
             SEARCH_PRIMARY="yandex",
         )
-        assert s.search_engines == ["yandex", "tavily", "ddgs"]
+        assert s.search_engines == ["yandex", "tavily", "stepik", "ddgs"]
 
     def test_primary_not_configured_promotes_available(self, make_settings):
         s = make_settings(SEARCH_PRIMARY="tavily", YANDEX_API_KEY="k", YANDEX_FOLDER_ID="f")
-        assert s.search_engines == ["yandex", "ddgs"]
+        assert s.search_engines == ["yandex", "stepik", "ddgs"]
+
+    def test_lesson_edu_opt_in(self, make_settings):
+        s = make_settings()
+        assert "lesson_edu" not in s.search_engines
+        s2 = make_settings(ENABLE_LESSON_EDU=True)
+        assert "lesson_edu" in s2.search_engines
+        assert s2.search_engines[-1] == "ddgs"
 
 
 class TestModelLists:

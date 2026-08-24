@@ -30,6 +30,89 @@ class QuizCard(BaseModel):
     topic: str
 
 
+class LessonSection(BaseModel):
+    """Секция урока: заголовок + тело + цитата-источник + микро-проверка «Проверь себя»."""
+
+    heading: str = ""
+    body: str = ""
+    citation: str = ""          # «§N» / страница / название источника
+    source: str = ""            # URL/имя источника, из которого взят материал
+    check_question: str = ""    # короткий вопрос на понимание после секции
+
+
+class DiagramNode(BaseModel):
+    """Узел схемы: короткая подпись + (для kind='map') позиция x,y в нормализованных координатах 0..1."""
+
+    id: str = ""
+    label: str = ""
+    x: Optional[float] = None
+    y: Optional[float] = None
+
+
+class DiagramEdge(BaseModel):
+    """Связь схемы: от → к. color — семантическое противопоставление
+    (warm/cold — контрастные роли рёбер: тёплое/холодное, причина/следствие, сильное/слабое)."""
+
+    source: str = ""
+    target: str = ""
+    label: str = ""
+    color: Literal["warm", "cold", "neutral"] = "neutral"
+
+
+class LessonDiagram(BaseModel):
+    """Схема-иллюстрация к уроку (dual-coding).
+
+    kind:
+      - flow  — этапы / причина→следствие (боксы и стрелки);
+      - cycle — круговорот (расположение по кругу);
+      - map   — пространственная схема (узлы с координатами 0..1, стрелки по направлениям).
+
+    Инвариант: узлы и связи отражают ТОЛЬКО те же факты и термины, что и секции урока —
+    диаграмма не вводит новых понятий (нет противоречий с текстом).
+    """
+
+    kind: Literal["flow", "cycle", "map"] = "flow"
+    title: str = ""
+    nodes: List[DiagramNode] = Field(default_factory=list)
+    edges: List[DiagramEdge] = Field(default_factory=list)
+
+
+class Lesson(BaseModel):
+    """Структурированный урок (вместо стены текста).
+
+    - hook — зацепка-вопрос в начале (активация внимания);
+    - definition — короткое определение темы;
+    - key_terms — ключевые термины с краткими определениями (глоссарий);
+    - diagram — схема-иллюстрация (dual-coding, не противоречит секциям);
+    - sections — 2-3 секции по одному под-вопросу, каждая с цитатой и «Проверь себя»;
+    - summary — итог в 1-2 предложения.
+    """
+
+    title: str = ""
+    hook: str = ""
+    definition: str = ""
+    key_terms: List[Dict[str, str]] = Field(default_factory=list)
+    diagram: Optional[LessonDiagram] = None
+    sections: List[LessonSection] = Field(default_factory=list)
+    summary: str = ""
+
+    def render_text(self) -> str:
+        """Полный текст урока (для lesson_text / стриминга / dedupe / resync)."""
+        parts = []
+        if self.hook:
+            parts.append(self.hook)
+        if self.definition:
+            parts.append(self.definition)
+        for s in self.sections:
+            if s.heading:
+                parts.append(s.heading)
+            if s.body:
+                parts.append(s.body)
+        if self.summary:
+            parts.append(self.summary)
+        return "\n\n".join(p for p in parts if p)
+
+
 class MessageResponse(BaseModel):
     """Единая схема ответа POST /message — тип + полезная нагрузка."""
 

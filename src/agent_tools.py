@@ -39,6 +39,7 @@ class AgentToolContext:
     state: TutorState
     deps: Any = None  # GraphDeps: store, embedder, settings, tutor_llm/expert_llm
     llm_call: Optional[Callable[[List[Dict[str, str]]], str]] = None
+    on_token: Optional[Callable[[str], None]] = None
 
 
 def _ok(**data: Any) -> str:
@@ -139,20 +140,38 @@ def get_knowledge_graph(args: Dict[str, Any], ctx: AgentToolContext) -> Tuple[st
 # Инструменты тьюторинга (7.3)
 # ----------------------------------------------------------------------
 def generate_lesson(args: Dict[str, Any], ctx: AgentToolContext) -> Tuple[str, TutorState]:
-    """Урок: синтез объяснения темы по RAG-контексту."""
+    """Урок: синтез структурированного объяснения темы по RAG-контексту."""
     st = ctx.state
     topic = str(args.get("topic") or _active_topic_title(st) or st.topic or st.subject or "общая тема")
-    context = [r.chunk.text for r in _rag_results(ctx, topic, k=5)] or ["Нет контекста по теме."]
-    text = tutor_mod.generate_lesson(topic, context, st, llm_call=ctx.llm_call)
-    st = st.model_copy(update={"lesson_text": text, "lesson_done": True})
-    return _ok(topic=topic, text=text), st
+    results = _rag_results(ctx, topic, k=5)
+    # RAG-first гейт: без контекста урок не выдумываем — агенту нужно собрать материалы
+    if not results:
+        return _err(
+            "Контекста по теме нет. Сначала соберите материалы (route_to_source), "
+            "затем повторите generate_lesson.",
+            required_action="route_to_source"
+        ), st
+    context = [r.chunk.text for r in results]
+    # Урок — структурированный JSON: без on_token (не стримим сырой JSON)
+    lesson = tutor_mod.generate_lesson(topic, context, st, llm_call=ctx.llm_call)
+    st = st.model_copy(deep=True)
+    st.set_lesson(lesson)
+    st.lesson_done = True
+    return _ok(topic=topic, text=st.lesson_text, lesson=st.lesson_payload(topic)), st
 
 
 def generate_quiz(args: Dict[str, Any], ctx: AgentToolContext) -> Tuple[str, TutorState]:
     """Следующий вопрос квиза (с антидубликатом 7.3.2 и записью в records)."""
+    # Страховка: если mode="lesson" и урок не показан — запретить квиз
+    st = ctx.state
+    if (st.mode == "lesson" and not st.lesson_done):
+        return _err(
+            "Сначала сгенерируйте урок (generate_lesson), чтобы ученик изучил материал. Только после этого — generate_quiz.",
+            required_action="generate_lesson"
+        ), st
     from datetime import datetime
 
-    st = ctx.state
+    st = st.model_copy(deep=True)
     topic = str(args.get("topic") or _active_topic_title(st) or st.topic or st.subject or "общая тема")
     difficulty = str(args.get("difficulty") or st.difficulty or "medium")
     context = [r.chunk.text for r in _rag_results(ctx, topic, k=3)] or ["Нет контекста по теме."]
@@ -161,7 +180,7 @@ def generate_quiz(args: Dict[str, Any], ctx: AgentToolContext) -> Tuple[str, Tut
     threshold = getattr(getattr(ctx.deps, "settings", None), "QUESTION_DEDUPE_THRESHOLD", 0.85)
     card = None
     for _ in range(retries + 1):
-        card = tutor_mod.generate_question(topic, context, difficulty, st, llm_call=ctx.llm_call)
+        card = tutor_mod.generate_question(topic, context, difficulty, st, llm_call=ctx.llm_call, on_token=ctx.on_token)
         if not prev_asked or not tutor_mod.is_duplicate_question(
             getattr(ctx.deps, "embedder", None), card.question, prev_asked, threshold
         ):
@@ -196,7 +215,7 @@ def explain_error(args: Dict[str, Any], ctx: AgentToolContext) -> Tuple[str, Tut
     question = str(args.get("question") or "")
     answer = str(args.get("answer") or "")
     context = [r.chunk.text for r in _rag_results(ctx, question, k=3)] or ["Нет контекста по теме."]
-    result = tutor_mod.explain_error(question, answer, context, st, llm_call=ctx.llm_call)
+    result = tutor_mod.explain_error(question, answer, context, st, llm_call=ctx.llm_call, on_token=ctx.on_token)
     return _ok(text=result["text"], citation=result["citation"]), st
 
 
@@ -227,7 +246,7 @@ def deep_dive(args: Dict[str, Any], ctx: AgentToolContext) -> Tuple[str, TutorSt
     st = ctx.state
     topic = str(args.get("topic") or _active_topic_title(st) or st.topic or st.subject or "общая тема")
     context = [r.chunk.text for r in _rag_results(ctx, topic, k=8)] or ["Нет контекста по теме."]
-    text = tutor_mod.generate_deep_dive(topic, context, st, llm_call=ctx.llm_call)
+    text = tutor_mod.generate_deep_dive(topic, context, st, llm_call=ctx.llm_call, on_token=ctx.on_token)
     st = st.model_copy(update={"lesson_text": text, "lesson_done": True})
     return _ok(topic=topic, text=text), st
 
@@ -282,7 +301,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
                       "required": ["field", "value"]}}},
     {"type": "function", "function": {
         "name": "extract_intake_fields",
-        "description": "Извлечь несколько полей чек-листа из свободного ответа ученика (например: 'я в 7 классе, география, учебника нет, хочу квиз').",
+        "description": "Извлечь несколько полей чек-листа из свободного ответа ученика (например: 'хочу урок по дробям, учебника нет').",
         "parameters": {"type": "object",
                       "properties": {"text": _param(type="string", description="ответ ученика")},
                       "required": ["text"]}}},

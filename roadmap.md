@@ -48,9 +48,11 @@ docker-compose.yml
 - [x] **UI** — панель «База знаний» (предмет → темы, цвет = уровень мастерства)
 - [x] **OKF auto-export** — при завершении квиза → бандл знаний + mastery scores (`emit_okf_bundle`)
 - [x] **Session persistence (SQLite)** — сессии сохраняются между запусками
+- [x] **Сверка ответа с wiki** (2026-08-22) — `evaluate_and_record` добавляет накопленную
+      wiki-статью темы к контексту оценки (межсессионные знания дополняют RAG-чанки;
+      при пустом RAG — статья единственный эталон)
 - [ ] **Wiki-LLM** — LLM-агент, который:
   - [ ] При индексации нового учебника: извлекает факты → пишет/обновляет wiki-статьи
-  - [ ] При оценке ответа: сверяет с wiki (а не только с RAG-чанками)
   - [ ] При ошибке ученика: обновляет статью пояснениями (сейчас — rule-based заметки из feedback)
 
 **Формат wiki-статьи (OKF):**
@@ -103,11 +105,36 @@ relations:
       (для веб-графа); учебник → параграфы/уроки (для PDF)
 
 **Открытое (опционально):** подключение cytoscape/vis-network для physics-layout
-на очень больших графах; drill-down до ключевых понятий внутри темы.
+на очень больших графах.
+
+**Сделано (2026-08-22):**
+- [x] **Drill-down до ключевых понятий** — `WikiArticle.concepts` (из словарика урока,
+      `sync_concepts` в content_node); карточка узла графа показывает понятия
+      (`graph-wiki-concepts`), база знаний отражает понятия темы сразу после урока
+- [x] **Онтология строится моделью** — `build_model_graph` (knowledge_graph.py): модель
+      решает, что станет вершинами (темы/понятия) и рёбрами (part_of/prerequisite/related)
+      из контента; валидация (типы/рёбра/дедуп/§N→section_number); эвристический каркас
+      (structure/TOC) — fallback при недоступности/мусоре LLM; подключено в
+      `process_document_node`, OCR-путь и веб-путь (объединённый контент темы); кэш v5
 
 ---
 
 ## 4. Легальные источники школьных/студенческих знаний в России
+
+**Статус: 🟡 Частично реализовано (2026-08-22), live-проверено на wifi:**
+
+- [x] **Stepik** — провайдер `_search_stepik` (публичный REST API `api.stepik.org/api/courses?query=`) +
+      `_fetch_stepik_text` (course → sections → units → lessons → steps/text-блоки) с **HTML-fallback**
+      на `stepik.org/course/N` (server-rendered), когда api.stepik.org заблокирован DNS-фильтром; dispatch в `fetch_url`
+- [x] **lesson.edu.ru** (Минпросвещения) — провайдер есть, но **требует авторизации (HTTP 401)**, выдаёт
+      только логотипы → **opt-in** (`ENABLE_LESSON_EDU`), фильтр мусорных asset-URL; не входит в движки по умолчанию
+- [x] Порядок движков: `primary → yandex → tavily → stepik → [lesson_edu] → [fipi] → ddgs` (`config.search_engines`)
+- [x] **Live-проверка на wifi:** ddgs-каталог работает и возвращает материалы (yaklass.ru, lc.rt.ru, obrazavr.ru);
+      `collect_source_materials("география","Атмосфера",grade=6)` → `ready`, 5 источников;
+      Wikipedia/wikibooks → 403 (заблокированы), api.stepik.org → DNS-block, stepik.org/duckduckgo/yandex.ru → 200
+- [x] **ФИПИ** — opt-in (`ENABLE_FIPI`): `_search_fipi` → страницы демоверсий/спецификаций ОГЭ/ЕГЭ
+      (банк заданий ФИПИ закрыт антиботом 403, капчу не обходим — К-2)
+- [x] **РЭШ** — НЕ реализован: антибот (HTTP 503), капчу не обходим (К-2) → переходим на другие источники Plan A
 
 ### Открытые и легальные источники
 
@@ -189,4 +216,6 @@ function calling вызывает инструменты (интервью, retr
 - [x] **4. agent_loop для intake** — `src/agent_loop.py`: ReAct-цикл, модель ведёт интервью через `interview_progress`/`set_intake`/`extract_intake_fields`/`route_to_source`; фолбэк на детерминированный `intake_node` при недоступности агентной LLM (в тестах с Callable-моками)
 - [x] **5. Подключение TOOL_SCHEMAS** к `LLMClient.chat(tools=...)` — агентный intake вызывает модель с tools и обрабатывает `tool_calls`
 - [x] **6. Агент в квизе (опция `USE_AGENT_TUTOR`)** — `src/evaluation.py` (единая логика оценки для узла и инструмента), инструменты `evaluate_answer`/`generate_quiz`/`explain_error`/`deep_dive`/`finish_session`, `agent_tutor_node` + ReAct-цикл `run_tutor_agent`; по умолчанию выключен (детерминированный квиз быстрее: ход агента ~60с из-за 2-3 LLM-вызовов)
-- [ ] **7. Наблюдаемость** — логирование `action`/`reason_summary`/`status` по каждому инструменту (10.2)
+- [x] **7. Наблюдаемость** (2026-08-22) — `_log_tool_action` в `agent_loop.py`: структурированный лог
+      `agent.action tool=… ok=… elapsed_ms=… args=… reason=…` по каждому инструменту
+      (intake- и tutor-циклы, 10.2)

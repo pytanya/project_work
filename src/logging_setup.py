@@ -86,11 +86,12 @@ class JsonlStepLogger:
         self.session_id = session_id
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._f = open(path, "a", encoding="utf-8")
+        self._counter = 0
 
     def log_step(
         self,
         *,
-        step_num: int,
+        step_num: Optional[int] = None,
         agent_action: str,
         tool: Optional[str] = None,
         duration: Optional[float] = None,
@@ -99,6 +100,10 @@ class JsonlStepLogger:
         cost: Optional[float] = None,
         extra: Optional[Dict[str, Any]] = None,
     ) -> None:
+        # Шаг без явного номера — автонумерация (удобно для фоновой трассировки графа)
+        if step_num is None:
+            self._counter += 1
+            step_num = self._counter
         record: Dict[str, Any] = {
             "request_id": self.request_id,
             "session_id": self.session_id,

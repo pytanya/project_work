@@ -12,6 +12,9 @@ import types
 from src.config import Settings
 from src.source_finder import (
     SearchResult,
+    _fetch_stepik_text,
+    _search_lesson_edu,
+    _search_stepik,
     collect_source_materials,
     crawl_page_js,
     download_file,
@@ -369,3 +372,177 @@ class TestCollectSourceMaterials:
         col = collect_source_materials("физика", "кванты", settings=s)
         assert col.status == "failed"
         assert col.failed_reason == "license_blocked"
+
+
+class TestLegalRUSources:
+    """Провайдеры легальных источников РФ (roadmap #4): Stepik API + lesson.edu.ru.
+
+    Тестируются с мок-клиентами/мок-краулом — без реальной сети.
+    """
+
+    def _fake_client(self, responses):
+        class FakeResp:
+            def __init__(self, data):
+                self._d = data
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return self._d
+
+        class FakeClient:
+            def __init__(self, *a, **k):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                pass
+
+            def get(self, url, **k):
+                for path, data in responses.items():
+                    if url.endswith(path):
+                        return FakeResp(data)
+                return FakeResp({})
+
+        return FakeClient
+
+    def test_search_stepik_returns_courses(self, make_settings, monkeypatch):
+        s = make_settings()
+        fake = self._fake_client({
+            "courses": {"courses": [
+                {"id": 1, "title": "Алгебра 7 класс", "summary": "<p>Курс по алгебре</p>"},
+            ]},
+        })
+        monkeypatch.setattr("src.source_finder.httpx.Client", fake)
+        res = _search_stepik("алгебра", s)
+        assert len(res) == 1
+        assert res[0].url == "https://stepik.org/course/1"
+        assert "Stepik" in res[0].title
+        assert "алгебре" in res[0].snippet.lower()
+
+    def test_search_stepik_offline_empty(self, make_settings, monkeypatch):
+        s = make_settings()
+
+        class BoomClient:
+            def __init__(self, *a, **k):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                pass
+
+            def get(self, url, **k):
+                raise httpx.ConnectError("offline")
+
+        monkeypatch.setattr("src.source_finder.httpx.Client", BoomClient)
+        assert _search_stepik("алгебра", s) == []
+
+    def test_fetch_stepik_text_assembles(self, make_settings):
+        responses = {
+            "courses/1": {"courses": [{"id": 1, "title": "Алгебра", "summary": "<p>sum</p>", "sections": [10]}]},
+            "sections/10": {"sections": [{"units": [20]}]},
+            "units/20": {"units": [{"lesson": 30}]},
+            "lessons/30": {"lessons": [{"steps": [40]}]},
+            "steps/40": {"steps": [{"block": {"name": "text", "text": "<p>Дроби — это числа, обозначающие части целого. Основное свойство дроби.</p>"}}]},
+        }
+        client = self._fake_client(responses)()
+        text, status = _fetch_stepik_text("https://stepik.org/course/1", client)
+        assert status == "OK"
+        assert "Основное свойство дроби" in text
+        assert "# Алгебра" in text
+
+    def test_fetch_url_dispatches_stepik(self, make_settings):
+        responses = {
+            "courses/7": {"courses": [{"id": 7, "title": "Физика", "summary": "", "sections": [50]}]},
+            "sections/50": {"sections": [{"units": [51]}]},
+            "units/51": {"units": [{"lesson": 52}]},
+            "lessons/52": {"lessons": [{"steps": [53]}]},
+            "steps/53": {"steps": [{"block": {"name": "text", "text": "<p>Кинематика — раздел механики о движении тел без учёта причин.</p>"}}]},
+        }
+        client = self._fake_client(responses)()
+        text, status = fetch_url("https://stepik.org/course/7", client=client)
+        assert status == "OK"
+        assert "# Физика" in text
+        assert "Кинематика" in text
+
+    def test_fetch_stepik_html_fallback_when_api_blocked(self, make_settings):
+        """api.stepik.org DNS-блок → fallback на server-rendered HTML страницы курса."""
+        class HtmlResp:
+            is_redirect = False
+            status_code = 200
+            headers = {}
+            content = "<html><body><h1>Алгебра 7 класс</h1><p>Курс по алгебре: уроки, задачи, тесты.</p></body></html>".encode("utf-8")
+
+            def raise_for_status(self):
+                pass
+
+        class ApiBoomClient:
+            def __init__(self, *a, **k):
+                pass
+
+            def get(self, url, **k):
+                if "api.stepik.org" in url:
+                    raise httpx.ConnectError("api.stepik.org DNS-blocked")
+                return HtmlResp()
+
+        text, status = _fetch_stepik_text("https://stepik.org/course/1", ApiBoomClient())
+        assert status == "OK"
+        assert "Алгебра 7 класс" in text
+
+    def test_search_lesson_edu_parses_links(self, make_settings, monkeypatch):
+        s = make_settings()
+        monkeypatch.setattr("src.source_finder._host_reachable", lambda *a, **k: True)
+        monkeypatch.setattr(
+            "src.source_finder._crawl_sync",
+            lambda *a, **k: {"ok": True, "markdown": "[Урок про дроби](https://lesson.edu.ru/lesson/1)\n[Проценты](/lesson/2)"},
+        )
+        res = _search_lesson_edu("дроби", s)
+        assert len(res) == 2
+        assert res[0].url == "https://lesson.edu.ru/lesson/1"
+        assert res[1].url == "https://lesson.edu.ru/lesson/2"
+
+    def test_search_lesson_edu_offline_empty(self, make_settings, monkeypatch):
+        s = make_settings()
+        monkeypatch.setattr("src.source_finder._host_reachable", lambda *a, **k: False)
+        monkeypatch.setattr("src.source_finder._crawl_sync", lambda *a, **k: {"ok": True, "markdown": ""})
+        assert _search_lesson_edu("дроби", s) == []
+
+    def test_search_engines_include_legal_rf(self, make_settings):
+        s = make_settings()
+        engines = s.search_engines
+        assert "stepik" in engines
+        assert "lesson_edu" not in engines  # opt-in (каталог требует авторизации)
+        assert engines[-1] == "ddgs"  # ddgs всегда финальный fallback
+        s2 = make_settings(ENABLE_LESSON_EDU=True)
+        assert "lesson_edu" in s2.search_engines
+
+    def test_fipi_opt_in_and_oge_ege(self, make_settings):
+        from src.source_finder import _search_fipi
+
+        s = make_settings()
+        assert "fipi" not in s.search_engines
+        assert "fipi" in make_settings(ENABLE_FIPI=True).search_engines
+        res = _search_fipi("дроби оге 9 класс", s)
+        assert res and "oge" in res[0].url
+        res2 = _search_fipi("алгебра 11 класс", s)
+        assert res2 and "ege" in res2[0].url
+
+    def test_search_lesson_edu_filters_assets(self, make_settings, monkeypatch):
+        """Фильтр мусорных URL (логотипы/ассеты) в выдаче lesson.edu.ru."""
+        s = make_settings()
+        monkeypatch.setattr("src.source_finder._host_reachable", lambda *a, **k: True)
+        monkeypatch.setattr(
+            "src.source_finder._crawl_sync",
+            lambda *a, **k: {"ok": True, "markdown": (
+                "[Лого](https://lesson.edu.ru/_next/static/media/logo_icon.8da1ddde.svg)\n"
+                "[Урок про дроби](https://lesson.edu.ru/lesson/1)\n"
+            )},
+        )
+        res = _search_lesson_edu("дроби", s)
+        assert len(res) == 1
+        assert res[0].url == "https://lesson.edu.ru/lesson/1"

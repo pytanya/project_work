@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from api.schemas import QuizCard
+from api.schemas import Lesson, QuizCard
 
 MODE_LITERAL = Literal["quiz", "explain", "deep_dive", "lesson"]
 DIFFICULTY_LITERAL = Literal["easy", "medium", "hard"]
@@ -67,6 +67,19 @@ class TutorState(IntakeState):
     lesson_text: Optional[str] = None
     lesson_done: bool = False      # урок по теме показан
     lesson_confirmed: bool = False # ученик подтвердил переход к квизу
+    # Структурированный урок (LessonSchema): рендерится карточками вместо стены текста.
+    # lesson_text — полный текст (render_text) для dedupe/resync/обратной совместимости.
+    lesson_title: Optional[str] = None
+    lesson_hook: Optional[str] = None
+    lesson_definition: Optional[str] = None
+    lesson_key_terms: List[Dict[str, str]] = Field(default_factory=list)
+    lesson_diagram: Optional[Dict[str, Any]] = None   # LessonDiagram (dual-coding)
+    lesson_sections: List[Dict[str, Any]] = Field(default_factory=list)
+    lesson_summary: Optional[str] = None
+    # LessonEval: детерминированный судья-lite (0 LLM, не блокирует) + результат
+    # фонового LLM-судьи groundedness (заполняется асинхронно, без задержки выдачи).
+    lesson_eval: Optional[Dict[str, Any]] = None
+    lesson_judge: Optional[Dict[str, Any]] = None
 
     # --- Тьюторинг (Ж-6) ---
     knowledge_map: Dict[str, float] = Field(default_factory=dict)
@@ -105,3 +118,65 @@ class TutorState(IntakeState):
         """Экспоненциальное сглаживание мастерства (Ж-6): 0.7*текущее + 0.3*результат."""
         current = self.knowledge_map.get(topic, 0.5)
         self.knowledge_map[topic] = round(0.7 * current + 0.3 * score01, 4)
+
+    # --- Структурированный урок (LessonSchema) ---
+
+    def set_lesson(self, lesson: Lesson) -> None:
+        """Записать структурированный урок: полный текст + все поля для карточек.
+
+        Детерминированный судья-lite (eval_lesson) вычисляется здесь же — это чистый
+        Python без LLM, пользователь не ждёт ни миллисекунды.
+        """
+        self.lesson_text = lesson.render_text()
+        self.lesson_title = lesson.title or None
+        self.lesson_hook = lesson.hook or None
+        self.lesson_definition = lesson.definition or None
+        self.lesson_key_terms = [dict(t) for t in lesson.key_terms if isinstance(t, dict)]
+        self.lesson_diagram = lesson.diagram.model_dump() if lesson.diagram else None
+        self.lesson_sections = [s.model_dump() for s in lesson.sections]
+        self.lesson_summary = lesson.summary or None
+        from .lesson_eval import eval_lesson
+        self.lesson_eval = eval_lesson(lesson, self.grade).to_dict()
+        self.lesson_judge = None  # фоновый LLM-судья перезапускается для нового урока
+
+    def set_plain_lesson(self, text: str) -> None:
+        """Режимы explain/deep_dive: обычный текст без структуры (поля карточек очищаются)."""
+        self.lesson_text = text
+        self.lesson_title = None
+        self.lesson_hook = None
+        self.lesson_definition = None
+        self.lesson_key_terms = []
+        self.lesson_diagram = None
+        self.lesson_sections = []
+        self.lesson_summary = None
+        self.lesson_eval = None
+        self.lesson_judge = None
+
+    def clear_lesson(self) -> None:
+        self.lesson_text = None
+        self.lesson_title = None
+        self.lesson_hook = None
+        self.lesson_definition = None
+        self.lesson_key_terms = []
+        self.lesson_diagram = None
+        self.lesson_sections = []
+        self.lesson_summary = None
+        self.lesson_eval = None
+        self.lesson_judge = None
+
+    def lesson_payload(self, topic: str = "") -> Dict[str, Any]:
+        """Полезная нагрузка события tutor.lesson / MessageResponse для фронтенда."""
+        return {
+            "text": self.lesson_text or "",
+            "topic": topic or self.lesson_title or self.topic or "",
+            "lesson": {
+                "title": self.lesson_title,
+                "hook": self.lesson_hook,
+                "definition": self.lesson_definition,
+                "key_terms": self.lesson_key_terms,
+                "diagram": self.lesson_diagram,
+                "sections": self.lesson_sections,
+                "summary": self.lesson_summary,
+                "eval": self.lesson_eval,
+            },
+        }

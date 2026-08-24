@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .agent_tools import TOOL_SCHEMAS, AgentToolContext, execute_agent_tool
@@ -29,6 +30,42 @@ logger = logging.getLogger("edututor.agent")
 
 MAX_AGENT_STEPS = 6
 MAX_AGENT_TIME_SEC = 150  # жёсткий бюджет на один ход агента (стоп-кран при зависании)
+
+
+def _log_tool_action(tool: str, args: Dict[str, Any], result: str, elapsed_ms: int,
+                     step_logger: Any = None) -> None:
+    """Наблюдаемость (roadmap #5.7, 10.2): action/reason/status по каждому инструменту.
+
+    step_logger — JsonlStepLogger (JSONL-трассировка запроса с request_id); None — пропуск.
+    """
+    head = (result or "")[:200]
+    ok = False
+    reason = ""
+    try:
+        parsed = json.loads(result)
+        if isinstance(parsed, dict):
+            ok = parsed.get("ok") is True
+            if parsed.get("ok") is False:
+                reason = str(parsed.get("error") or "")[:160]
+            else:
+                reason = str(parsed.get("topic") or parsed.get("note") or "")[:160]
+    except json.JSONDecodeError:
+        # Результат не JSON или обрезан (MAX_TOOL_RESULT_CHARS) — эвристика по префиксу
+        ok = '"ok": true' in head and '"ok": false' not in head[:80]
+    logger.info(
+        "agent.action tool=%s ok=%s elapsed_ms=%d args=%s reason=%s",
+        tool, ok, elapsed_ms, json.dumps(args, ensure_ascii=False)[:200], reason,
+    )
+    if step_logger is not None:
+        try:
+            step_logger.log_step(
+                agent_action="agent.action", tool=tool,
+                status="ok" if ok else "error",
+                duration=elapsed_ms / 1000.0,
+                extra={"args": args, "reason": reason},
+            )
+        except Exception:
+            logger.warning("agent_loop: JSONL-запись шага не удалась", exc_info=True)
 
 INTAKE_AGENT_PROMPT = (
     "Ты — тьютор EduTutor. Ты ведёшь короткое интервью, чтобы собрать данные для учебного "
@@ -181,10 +218,13 @@ def run_intake_agent(state: TutorState, deps: Any) -> Tuple[TutorState, bool]:
     tutor_llm_fn = getattr(deps, "tutor_llm", None)
     if callable(tutor_llm_fn):
         ctx.llm_call = tutor_llm_fn
+    on_token_fn = getattr(deps, "on_token", None)
+    if callable(on_token_fn):
+        ctx.on_token = on_token_fn
 
-    _t0 = __import__("time").time()
+    _t0 = time.time()
     for _step in range(MAX_AGENT_STEPS):
-        if __import__("time").time() - _t0 > MAX_AGENT_TIME_SEC:
+        if time.time() - _t0 > MAX_AGENT_TIME_SEC:
             logger.warning("run_intake_agent: исчерпан бюджет %ss (шаг %d)", MAX_AGENT_TIME_SEC, _step)
             break
         # Актуальное состояние чек-листа — в промпт каждый ход (анти-повтор/путаница subject/topic).
@@ -202,12 +242,14 @@ def run_intake_agent(state: TutorState, deps: Any) -> Tuple[TutorState, bool]:
         tools_used = True
         for tc in resp.tool_calls:
             name = (tc.get("function") or {}).get("name", "")
-            logger.info("run_intake_agent: инструмент %s", name)
             try:
                 args = json.loads((tc.get("function") or {}).get("arguments") or "{}")
             except json.JSONDecodeError:
                 args = {}
+            _t_tool = time.time()
             result, st = execute_agent_tool(name, args, ctx)
+            _log_tool_action(name, args, result, int((time.time() - _t_tool) * 1000),
+                             step_logger=getattr(ctx.deps, "step_logger", None))
             ctx.state = st
             messages.append({"role": "assistant", "tool_calls": [tc]})
             messages.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": result})
@@ -239,6 +281,9 @@ TUTOR_AGENT_PROMPT = (
     "может задавать свободные вопросы по теме. Ты сам выбираешь следующее действие через "
     "инструменты.\n\n"
     "Правила:\n"
+    "0. ПРОВЕРКА: Если lesson_done=False и lesson_text пуст — ОБЯЗАТЕЛЬНО сначала вызови "
+    "generate_lesson для подготовки материала урока. Только ПОСЛЕ урока вызывай generate_quiz "
+    "для следующего вопроса.\n"
     "1. Если есть активный вопрос и ученик прислал ответ — сначала вызови evaluate_answer, "
     "чтобы оценить ответ (это обновит записи, мастерство и сложность).\n"
     "2. После оценки: если ответ неверный и уместно — вызови explain_error (объяснение с "
@@ -248,7 +293,7 @@ TUTOR_AGENT_PROMPT = (
     "4. Если ученик просит объяснить подробнее/глубже — вызови deep_dive.\n"
     "5. Если ученик хочет закончить, либо вопросов больше нет (quiz_complete) — вызови "
     "finish_session.\n"
-    "6. Если активного вопроса нет — вызови generate_quiz, чтобы дать следующий вопрос.\n"
+    "6. Если активного вопроса нет и lesson_done=True — вызови generate_quiz, чтобы дать следующий вопрос.\n"
     "7. Финальное сообщение — твой ответ ученику: короткий фидбек и/или следующий вопрос "
     "(заканчивай вопросительным знаком). Не выдумывай ответы ученика."
 )
@@ -256,7 +301,7 @@ TUTOR_AGENT_PROMPT = (
 
 # Подмножество инструментов для режима занятия (без инструментов интервью)
 TUTOR_TOOL_NAMES = {
-    "evaluate_answer", "generate_quiz", "explain_error", "deep_dive", "rag_search", "finish_session",
+    "evaluate_answer", "generate_quiz", "generate_lesson", "explain_error", "deep_dive", "rag_search", "finish_session",
 }
 TUTOR_TOOL_SCHEMAS = [s for s in TOOL_SCHEMAS if s.get("function", {}).get("name") in TUTOR_TOOL_NAMES]
 
@@ -305,10 +350,13 @@ def run_tutor_agent(state: TutorState, deps: Any) -> Tuple[TutorState, Optional[
     tutor_llm_fn = getattr(deps, "tutor_llm", None)
     if callable(tutor_llm_fn):
         ctx.llm_call = tutor_llm_fn
+    on_token_fn = getattr(deps, "on_token", None)
+    if callable(on_token_fn):
+        ctx.on_token = on_token_fn
 
-    _t0 = __import__("time").time()
+    _t0 = time.time()
     for _step in range(MAX_AGENT_STEPS):
-        if __import__("time").time() - _t0 > MAX_AGENT_TIME_SEC:
+        if time.time() - _t0 > MAX_AGENT_TIME_SEC:
             logger.warning("run_tutor_agent: исчерпан бюджет %ss (шаг %d)", MAX_AGENT_TIME_SEC, _step)
             break
         call_messages = [
@@ -329,8 +377,10 @@ def run_tutor_agent(state: TutorState, deps: Any) -> Tuple[TutorState, Optional[
                 args = json.loads((tc.get("function") or {}).get("arguments") or "{}")
             except json.JSONDecodeError:
                 args = {}
-            logger.info("run_tutor_agent: инструмент %s args=%s", name, json.dumps(args, ensure_ascii=False)[:120])
+            _t_tool = time.time()
             result, st = execute_agent_tool(name, args, ctx)
+            _log_tool_action(name, args, result, int((time.time() - _t_tool) * 1000),
+                             step_logger=getattr(ctx.deps, "step_logger", None))
             ctx.state = st
             messages.append({"role": "assistant", "tool_calls": [tc]})
             messages.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": result})

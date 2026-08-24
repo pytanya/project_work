@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import queue as std_queue
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
@@ -10,8 +11,12 @@ from pydantic import BaseModel
 
 from api.schemas import MessageResponse, WsEvent
 
+from src.guardrails import guard_user_input
+
 from ..deps import get_session, get_store, get_store_ws
 from ..engine import SessionStore, WS_IDLE_TIMEOUT_SEC, message_response, run_step
+
+logger = logging.getLogger("edututor.api")
 
 router = APIRouter(prefix="/api/sessions/{session_id}", tags=["messages"])
 
@@ -23,6 +28,14 @@ class MessageBody(BaseModel):
 @router.post("/message", response_model=MessageResponse)
 async def post_message(session_id: str, body: MessageBody, store: SessionStore = Depends(get_store)):
     session = get_session(store, session_id)
+    guard = guard_user_input(body.text)
+    if guard["blocked"]:
+        # Защита от некорректных действий: не передаём текст агенту (prompt-injection/мат)
+        session.history.append({"role": "user", "text": body.text, "blocked": True})
+        logger.info("post_message blocked: reasons=%s", guard["reasons"])
+        # WS-событие, чтобы фронтенд сразу показал баннер (он ждёт WS, а не тело HTTP)
+        session.queue.put(WsEvent(event="session.error", data={"message": guard["message"]}))
+        return MessageResponse(type="error", payload={"message": guard["message"]})
     session.history.append({"role": "user", "text": body.text})
     await run_step(session, answer=body.text)
     return message_response(session.state)

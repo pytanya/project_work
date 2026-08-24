@@ -187,6 +187,52 @@ sqlite3 data/session_persist.db ".tables"
 sqlite3 data/session_persist.db "SELECT * FROM sessions LIMIT 5;"
 ```
 
+## Проверка и перезапуск бэкенда
+
+### Проверка, что бэкенд запущен
+
+```bash
+# Порт 8000 слушается (выведет PID)
+netstat -ano | findstr :8000 | findstr LISTENING
+
+# Какой именно процесс (командная строка uvicorn)
+wmic process where "ProcessId=<PID>" get CommandLine /format:list
+
+# Health-check (ожидаем {"status":"ok", ...})
+curl http://localhost:8000/api/health
+```
+
+### Перезапуск (Windows)
+
+```bash
+# 1. Убить старый процесс (PID из netstat)
+taskkill /PID <PID> /F
+
+# 2. Запустить заново (терминал 1, из каталога проекта)
+cd C:\otus\project_work
+.venv\Scripts\Activate.ps1
+uvicorn api.app:app --reload --host 0.0.0.0 --port 8000
+
+# Альтернатива запуску вручную:
+python run_server.py
+```
+
+> **Важно:** `--reload` подхватывает изменения кода автоматически, но после
+> правок `api/engine.py` / `api/routes/*.py` / `src/graph.py` надёжнее сделать
+> полный перезапуск (некоторые изменения состояния — например, fire-and-forget
+> задачи в модульном сете `_bg_tasks` — применяются только при чистом старте).
+
+### Проверка после перезапуска
+
+```bash
+# 1. Health
+curl http://localhost:8000/api/health
+# 2. Swagger-документация
+start http://localhost:8000/docs
+# 3. Фронтенд (если ещё не запущен)
+cd frontend && npm run dev
+```
+
 ---
 
 ## Следующие шаги

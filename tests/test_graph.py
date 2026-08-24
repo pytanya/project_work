@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sys
 from pathlib import Path
 
@@ -241,12 +242,57 @@ class TestQuizFlow:
         assert art.attempts >= 1
         assert art.subject  # предмет из сессии сохранён
 
-    def test_lesson_mode_before_quiz(self, deps):
-        """Режим «урок»: объяснение темы → подтверждение → квиз."""
+    def test_lesson_syncs_concepts_to_wiki(self, deps):
+        """Roadmap #3: ключевые понятия урока попадают в wiki-статью темы (drill-down)."""
+        from src.wiki import KnowledgeWiki
+
         def llm(messages):
             user = messages[-1]["content"] if messages else ""
             if "Контекст учебника" in user:
-                return '{"text": "Атмосфера — газовая оболочка Земли. Она защищает планету. Азот и кислород — её основа."}'
+                return json.dumps({
+                    "title": "Атмосфера",
+                    "definition": "Атмосфера — газовая оболочка Земли.",
+                    "key_terms": [{"term": "азот", "definition": "главный газ атмосферы"},
+                                  {"term": "кислород", "definition": "21%"}],
+                    "sections": [{"heading": "Состав", "body": "Азот и кислород — её основа."}],
+                    "summary": "Итог.",
+                })
+            return _GEN
+
+        deps.tutor_llm = llm
+        graph = build_graph(deps)
+        state = TutorState(num_questions=1, sources=[{"type": "web", "url": "x"}], collection_id="web")
+        _feed(graph, state, ["студент", "география", "Атмосфера", "нет", "урок"])
+        wiki = KnowledgeWiki(deps.settings.KNOWLEDGE_WIKI_DIR)
+        art = wiki.get("география", "Атмосфера")
+        assert art is not None
+        assert art.concepts == ["азот", "кислород"]
+
+    def test_lesson_mode_before_quiz(self, deps):
+        """Режим «урок»: структурированное объяснение темы → подтверждение → квиз."""
+        def llm(messages):
+            user = messages[-1]["content"] if messages else ""
+            if "Контекст учебника" in user:
+                return json.dumps({
+                    "title": "Атмосфера",
+                    "hook": "Почему самолёты летают в атмосфере?",
+                    "definition": "Атмосфера — газовая оболочка Земли.",
+                    "key_terms": [{"term": "азот", "definition": "главный газ атмосферы"}],
+                    "diagram": {
+                        "kind": "flow",
+                        "title": "Состав атмосферы",
+                        "nodes": [
+                            {"id": "n1", "label": "Азот 78%"},
+                            {"id": "n2", "label": "Кислород 21%"},
+                        ],
+                        "edges": [{"source": "n1", "target": "n2", "label": "смесь"}],
+                    },
+                    "sections": [
+                        {"heading": "Состав", "body": "Азот и кислород — её основа.",
+                         "citation": "§12", "check_question": "Какой газ преобладает?"},
+                    ],
+                    "summary": "Атмосфера защищает жизнь на Земле.",
+                })
             return _GEN
 
         deps.tutor_llm = llm
@@ -256,16 +302,52 @@ class TestQuizFlow:
         assert res.mode == "lesson"
         assert res.lesson_done is True
         assert res.lesson_text and "газовая оболочка" in res.lesson_text
+        # Структурированный урок: карточки вместо стены текста
+        assert res.lesson_title == "Атмосфера"
+        assert res.lesson_hook == "Почему самолёты летают в атмосфере?"
+        assert res.lesson_sections and res.lesson_sections[0]["citation"] == "§12"
+        assert res.lesson_sections[0]["check_question"] == "Какой газ преобладает?"
+        assert res.lesson_key_terms == [{"term": "азот", "definition": "главный газ атмосферы"}]
+        # Dual-coding: схема-иллюстрация к уроку (не противоречит секциям)
+        assert res.lesson_diagram is not None
+        assert res.lesson_diagram["kind"] == "flow"
+        assert len(res.lesson_diagram["nodes"]) == 2
+        assert res.lesson_diagram["edges"][0]["source"] == "n1"
+        # LessonEval: детерминированный судья-lite посчитан без задержки
+        assert res.lesson_eval is not None
+        assert res.lesson_eval["verdict"] in ("pass", "fail")
+        assert set(res.lesson_eval["criteria"]) == {"structure", "citations", "diagram", "readability", "length"}
+        assert 0.0 <= res.lesson_eval["avg_score"] <= 1.0
+        assert res.lesson_summary
         assert res.current_question is None  # квиз ещё не начался
         # «нет» → повтор урока (перегенерируется сразу, квиз не стартует)
         res = _invoke(graph, {**res.model_dump(), "pending_answer": "нет"})
         assert res.lesson_done is True
         assert res.lesson_confirmed is False
         assert res.current_question is None
+        assert res.lesson_text  # урок перегенерирован
         # «да» → переход к квизу
         res = _invoke(graph, {**res.model_dump(), "pending_answer": "да"})
         assert res.lesson_confirmed is True
         assert res.current_question is not None
+
+    def test_lesson_rag_gate_blocks_ungrounded_generation(self, deps):
+        """RAG-first гейт: пустой контекст по теме → урок НЕ выдумывается из параметрических знаний."""
+        deps.store.reset()  # коллекция пуста — релевантного контекста нет
+        def llm(messages):
+            user = messages[-1]["content"] if messages else ""
+            if "Контекст учебника" in user:
+                return json.dumps({"title": "Теплые течения", "sections": [{"body": "выдуманный контент"}]})
+            return _GEN
+        deps.tutor_llm = llm
+        graph = build_graph(deps)
+        state = TutorState(num_questions=1, sources=[{"type": "web", "url": "x"}], collection_id="web")
+        res = _feed(graph, state, ["студент", "география", "Теплые течения", "нет", "урок"])
+        assert res.lesson_text is None  # урок не сгенерирован
+        assert res.lesson_done is False
+        assert "нет материала" in (res.agent_message or "")
+        # agent_question выставлен — CLI/веб не зацикливается на «внутреннем шаге»
+        assert res.agent_question and "нет материала" in res.agent_question
 
     def test_explain_mode_shows_explanation(self, deps):
         """Режим «объяснение» (7.3.4): генерируется объяснение темы, затем подтверждение к квизу."""
@@ -307,6 +389,26 @@ class TestQuizFlow:
         assert res.current_question is not None
 
 
+class TestRagFilterFallback:
+    """Прогрессивное ослабление RAG-фильтра: класс не блокирует урок при пустом результате."""
+
+    def test_grade_filter_relaxed_when_empty(self, deps):
+        from src.graph import _rag_chunks
+
+        # чанк в коллекции имеет grade="6", обучаемый — 7 класс → строгий фильтр пуст
+        st = TutorState(subject="география", grade="7", topic="Атмосфера")
+        chunks = _rag_chunks(deps.store, "Атмосфера", st, k=3)
+        assert chunks
+        assert "оболочка" in chunks[0].chunk.text  # fallback без grade вернул чанк
+
+    def test_no_relaxation_when_filtered_match_exists(self, deps):
+        from src.graph import _rag_chunks
+
+        st = TutorState(subject="география", grade="6", topic="Атмосфера")
+        chunks = _rag_chunks(deps.store, "Атмосфера", st, k=3)
+        assert chunks and "оболочка" in chunks[0].chunk.text
+
+
 class TestSourceFlow:
     def test_source_failed_path(self, deps, monkeypatch):
         class Failed:
@@ -325,6 +427,32 @@ class TestSourceFlow:
         assert res.session_status == "failed"
         assert res.source_status == "failed"
         assert res.agent_message
+
+    def test_source_failed_clears_stale_lesson(self, deps, monkeypatch):
+        """Провал поиска не должен «всплывать» рядом с устаревшим уроком предыдущего запуска:
+        session_status=failed + урок/оценка очищаются, чтобы в ленте не было противоречия."""
+        class Failed:
+            status = "failed"
+            failed_reason = "empty_result"
+            message = "Материалы по теме не найдены"
+            sources = []
+            texts = []
+
+        monkeypatch.setattr(
+            "src.graph.source_finder.collect_source_materials", lambda **kw: Failed()
+        )
+        graph = build_graph(deps)
+        state = TutorState(
+            num_questions=1, lesson_text="старый урок", lesson_title="Старая тема",
+            lesson_eval={"verdict": "pass", "criteria": {}},
+            lesson_judge=None,
+        )
+        res = _feed(graph, state, ["студент", "физика", "Атомы", "нет", "квиз"])
+        assert res.session_status == "failed"
+        assert res.lesson_text is None
+        assert res.lesson_title is None
+        assert res.lesson_eval is None
+        assert res.lesson_judge is None
 
     def test_textbook_file_path(self, deps, tmp_path):
         doc = tmp_path / "doc.txt"
@@ -560,6 +688,39 @@ class TestWebSourceFlow:
         node_types = {n["type"] for n in kg.get("nodes", [])}
         assert "book" in node_types
 
+    def test_upload_recovers_from_failed_search(self, deps, tmp_path):
+        """После провала поиска (session_status=failed) загрузка учебника перезапускает квиз
+        (без этого route_tutor_agent уводит в сводку вместо квиза)."""
+        doc = tmp_path / "doc.txt"
+        doc.write_text(
+            "Параграф 12: Атмосфера\nСтроение атмосферы.\n\nПараграф 13: Погода\nПогода меняется.",
+            encoding="utf-8",
+        )
+        graph = build_graph(deps)
+        state = TutorState(
+            num_questions=1, textbook_file=str(doc), has_textbook=True,
+            learner_type="student", subject="география", topic="Атмосфера", mode="quiz",
+            session_status="failed", source_status=None,
+        )
+        res = _invoke(graph, state.model_dump())
+        assert res.session_status != "failed"
+        assert res.source_status == "ready"
+        assert res.current_question is not None
+
+    def test_web_topics_get_parent_id(self, web_deps):
+        """Иерархия веб-графа: подтемы страницы → parent_id=страница (для группировки чипов)."""
+        graph = build_graph(web_deps)
+        state = TutorState(num_questions=3)
+        res = _feed(graph, state, ["студент", "философия", "Кант", "нет", "квиз"])
+        kg = res.knowledge_graph or {}
+        nodes = {n["id"]: n for n in kg.get("nodes", [])}
+        pages = [n for n in nodes.values() if str(n.get("parent_id", "")).startswith("book:")]
+        assert pages, "узлы-источники должны иметь parent_id=root"
+        page_id = pages[0]["id"]
+        children = [n for n in nodes.values() if n.get("parent_id") == page_id]
+        assert children, "подтемы страницы должны иметь parent_id=страница"
+        assert all(n["type"] == "topic" for n in children)
+
     def test_student_no_textbook_concrete_topic_skips_gate(self, web_deps):
         """Уровень 1: конкретная тема в intake → после сбора материалов гейт не нужен."""
         graph = build_graph(web_deps)
@@ -592,3 +753,114 @@ class TestWebSourceFlow:
         intents = [d.get("message") for ev, d in events if ev == "system" and d.get("kind") == "intent"]
         assert intents, "intent-сообщение не отправлено"
         assert any("квиз" in m and "Кант" in m for m in intents)
+
+
+class TestTopicKeyConsistency:
+    """Единый ключ темы (title узла) между графом, knowledge_map и wiki:
+    иначе мастерство не окрашивает узлы графа (см. KnowledgeGraphPanel)."""
+
+    def _kg(self):
+        from src.knowledge_graph import KnowledgeGraph
+
+        kg = KnowledgeGraph()
+        kg.add_topic("book:g", "Учебник «география»", node_type="book")
+        kg.add_topic("sec:g:12", "Урок 12: Атмосфера", node_type="lesson")
+        kg.add_edge("book:g", "sec:g:12", "part_of")
+        return kg
+
+    def test_topic_gate_sets_topic_to_node_title(self, deps):
+        """Выбор темы текстом в topic_gate → st.topic = название узла (не широкий ввод)."""
+        graph = build_graph(deps)
+        state = TutorState(
+            num_questions=1, learner_type="student", subject="география",
+            topic="Атмосфера", mode="quiz", has_textbook=False,
+            knowledge_graph=self._kg().to_dict(), awaiting_topic=True,
+            source_status="ready",
+        )
+        res = _invoke(graph, {**state.model_dump(), "pending_answer": "Урок 12"})
+        assert res.active_topic == "sec:g:12"
+        assert res.topic == "Урок 12: Атмосфера"
+
+    def test_generate_question_uses_active_topic_title(self, deps):
+        """Вопрос по активному узлу генерится по title узла (а не широкой теме)."""
+        from src.graph import generate_question_node
+
+        events = []
+        deps.on_event = lambda event, data: events.append((event, data))
+        state = TutorState(
+            num_questions=1, learner_type="student", subject="география",
+            topic="география", mode="quiz",
+            knowledge_graph=self._kg().to_dict(), active_topic="sec:g:12",
+        )
+        res = TutorState.model_validate(generate_question_node(state, deps))
+        progress = [d.get("message") for ev, d in events if ev == "source.progress"]
+        assert any("Урок 12: Атмосфера" in m for m in progress), progress
+        assert res.current_question is not None
+
+    def test_record_has_correct_answer_for_note(self, deps):
+        """Record сохраняет эталонные ответы (correct_answer) — для полной заметки об ошибке."""
+        from src.graph import generate_question_node
+
+        deps.tutor_llm = lambda m: ('{"question": "Что такое атмосфера?", "options": null, '
+                                    '"answer_type": "open", "topic": "Атмосфера", '
+                                    '"correct_answers": ["Атмосфера — газовый слой"]}')
+        state = TutorState(num_questions=1, learner_type="student", subject="география",
+                           topic="Атмосфера", mode="quiz")
+        res = TutorState.model_validate(generate_question_node(state, deps))
+        assert res.records and res.records[-1]["correct_answer"] == "Атмосфера — газовый слой"
+        assert res.records[-1]["question"] == "Что такое атмосфера?"
+
+
+class TestWikiIndexExtraction:
+    """Roadmap #2 (Wiki-LLM): индекс-время извлечение фактов в wiki-статьи из графа."""
+
+    def _kg(self):
+        from src.knowledge_graph import KnowledgeGraph
+
+        kg = KnowledgeGraph()
+        kg.add_topic("book:g", "Учебник «география»", node_type="book")
+        kg.add_topic("sec:g:12", "Урок 12: Атмосфера", node_type="section", section_number="12")
+        kg.add_edge("book:g", "sec:g:12", "part_of")
+        return kg
+
+    def test_extract_creates_articles_and_emits(self, deps):
+        from src.graph import _wiki_extract_from_graph
+        from src.wiki import KnowledgeWiki
+
+        st = TutorState(learner_type="student", subject="география", grade="6",
+                        knowledge_graph=self._kg().to_dict())
+        llm_call = lambda msgs: "Атмосфера — воздушная оболочка Земли, состоит из азота и кислорода."
+        events = []
+        deps.on_event = lambda event, data: events.append((event, data))
+        _wiki_extract_from_graph(st, deps, limit=5, llm_call=llm_call)
+
+        wiki = KnowledgeWiki(deps.settings.KNOWLEDGE_WIKI_DIR)
+        art = wiki.get("география", "Урок 12: Атмосфера")
+        assert art is not None
+        assert "воздушная оболочка" in art.body
+        assert any(ev == "wiki.updated" for ev, _ in events)
+
+        # идемпотентность: повторный вызов не перезаписывает статью
+        _wiki_extract_from_graph(st, deps, limit=5, llm_call=llm_call)
+        art2 = wiki.get("география", "Урок 12: Атмосфера")
+        assert art2.body == art.body
+
+    def test_extract_caps_batch(self, deps):
+        from src.graph import _wiki_extract_from_graph
+        from src.knowledge_graph import KnowledgeGraph
+
+        kg = KnowledgeGraph()
+        kg.add_topic("book:g", "Учебник «география»", node_type="book")
+        for i in range(6):
+            kg.add_topic(f"sec:g:{i}", f"Тема {i}", node_type="topic", section_number=str(i))
+            kg.add_edge("book:g", f"sec:g:{i}", "part_of")
+        st = TutorState(learner_type="student", subject="география",
+                        knowledge_graph=kg.to_dict())
+        calls = {"n": 0}
+
+        def llm_call(msgs):
+            calls["n"] += 1
+            return "Текст конспекта темы по контексту учебника, достаточно длинный."
+
+        _wiki_extract_from_graph(st, deps, limit=3, llm_call=llm_call)
+        assert calls["n"] == 3  # кап сработал

@@ -39,6 +39,7 @@ def create_app(store: Optional[SessionStore] = None) -> FastAPI:
             "status": "ok",
             "vector_store": backend,
             "collection": getattr(store, "collection_name", None),
+            "circuit_breaker": getattr(st, "_circuit", None).to_dict() if getattr(st, "_circuit", None) else None,
         }
 
     @app.get("/api/metrics", tags=["monitoring"])

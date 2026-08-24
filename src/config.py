@@ -96,6 +96,10 @@ class Settings(BaseSettings):
     YANDEX_FOLDER_ID: str = Field(default="")
     TAVILY_API_KEY: str = Field(default="")
     SEARCH_PRIMARY: str = Field(default="yandex")
+    # lesson.edu.ru (Минпросвещения) требует авторизацию (401): только opt-in.
+    ENABLE_LESSON_EDU: bool = Field(default=False)
+    # ФИПИ (демоверсии ОГЭ/ЕГЭ): банк заданий — антибот (403), доступны демо-страницы. opt-in.
+    ENABLE_FIPI: bool = Field(default=False)
 
     # --- Сбор учебных материалов (crawl4ai) ---
     CRAWL4AI_RESPECT_ROBOTS: bool = Field(default=True)
@@ -146,6 +150,10 @@ class Settings(BaseSettings):
     TUTOR_ALLOWANCE_USD: float = Field(default=0.5, ge=0.0)
     JUDGE_ALLOWANCE_USD: float = Field(default=0.5, ge=0.0)
     MAX_QUESTIONS_PER_SESSION: int = Field(default=15, ge=1)
+    # Circuit breaker (guardrails.py): N подряд идущих сбоев шага графа → защитная
+    # пауза (fail closed) на cooldown, чтобы не долбить недоступный AI-сервис.
+    CIRCUIT_BREAKER_THRESHOLD: int = Field(default=3, ge=1)
+    CIRCUIT_BREAKER_COOLDOWN_SEC: float = Field(default=30.0, ge=1.0)
     # Агентный intake (спека 5.4): true — intake ведёт agent_loop с function calling
     # (детерминированный фолбэк сохраняется); false — классический пошаговый чек-лист.
     USE_AGENT_INTAKE: bool = Field(default=True)
@@ -251,18 +259,28 @@ class Settings(BaseSettings):
 
     @property
     def search_engines(self) -> List[str]:
-        """Поисковики по приоритету: yandex → tavily → ddgs (всегда fallback)."""
+        """Поисковики по приоритету: primary → yandex/tavily → stepik → lesson_edu → ddgs.
+
+        stepik — легальный источник РФ без ключей (API или HTML-fallback);
+        lesson_edu — opt-in (каталог Минпросвещения требует авторизации, ENABLE_LESSON_EDU);
+        ddgs — всегда финальный fallback.
+        """
         available = []
         if self.YANDEX_API_KEY and self.YANDEX_FOLDER_ID:
             available.append("yandex")
         if self.TAVILY_API_KEY:
             available.append("tavily")
+        available.append("stepik")
+        if self.ENABLE_LESSON_EDU:
+            available.append("lesson_edu")
+        if self.ENABLE_FIPI:
+            available.append("fipi")
         primary = self.SEARCH_PRIMARY.strip().lower()
         ordered = []
         if primary in available:
             ordered.append(primary)
-        for name in sorted(available):
-            if name not in ordered:
+        for name in ("yandex", "tavily", "stepik", "lesson_edu", "fipi"):
+            if name in available and name not in ordered:
                 ordered.append(name)
         if "ddgs" not in ordered:
             ordered.append("ddgs")

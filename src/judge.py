@@ -26,6 +26,7 @@ PASS_THRESHOLD = 7.0
 QUESTION_CRITERIA = ["relevance", "grade_fit", "clarity", "factual_ok"]
 EXPLANATION_CRITERIA = ["accuracy", "comprehensibility", "citation_ok"]
 EVALUATION_CRITERIA = ["grade_correct", "feedback_ok", "difficulty_fit"]
+LESSON_CRITERIA = ["groundedness", "coherence", "grade_fit", "no_contradiction"]
 
 
 @dataclass
@@ -57,11 +58,20 @@ def _judge(
 ) -> JudgeResult:
     from .llm_client import LLMClient
 
+    prompt = _build_prompt(contract, criteria, subject)
     if judge_call is None:
         client = LLMClient(role=ROLE_JUDGE)
-        judge_call = lambda msgs: client.chat(msgs, temperature=0.0, max_tokens=200).content or ""
-
-    raw = judge_call(_build_prompt(contract, criteria, subject))
+        try:
+            raw = client.chat(prompt, temperature=0.0, max_tokens=200).content or ""
+        except Exception as exc:
+            # Офлайн/недоступен LLM: нейтральный вердикт, не роняем поток
+            # (судья — не блокирующий слой, см. section 4.2.3).
+            logger.warning("Судья %s: LLM недоступен (%s) — нейтральный вердикт", contract, exc)
+            neutral = {c: 5.0 for c in criteria}
+            return JudgeResult(contract=contract, criteria=neutral, avg_score=5.0,
+                               verdict="fail", raw="")
+    else:
+        raw = judge_call(prompt)
     data = parse_llm_json(raw)
     raw_criteria = data.get("criteria") if isinstance(data.get("criteria"), dict) else {}
 
@@ -141,3 +151,67 @@ def judge_evaluation(
         },
         judge_call=judge_call,
     )
+
+
+def _citation_groundedness_cap(citations01: Any) -> Optional[float]:
+    """Потолок groundedness по детерминированной оценке цитат (0..1 из eval_lesson).
+
+    Урок без цитат (§N/источник) не может быть «подтверждён контекстом»:
+    groundedness ≥ 7 при цитатах 0 невозможно — это и был скрытый дефект
+    («цитаты: 0/10» при «groundedness: 7/10»).
+    """
+    try:
+        v = float(citations01)
+    except (TypeError, ValueError):
+        return None
+    if v >= 1.0:
+        return None
+    # 0 цитат → groundedness ≈ 1 (урок не демонстрирует опору на источник → fail
+    # даже при высоких прочих критериях); 1.0 → без капа.
+    return round(max(1.0, v * 10.0), 1)
+
+
+def judge_lesson(
+    lesson_text: str,
+    context: List[str],
+    grade: Optional[str],
+    judge_call: Optional[Callable[[List[Dict[str, str]]], str]] = None,
+    eval_criteria: Optional[Dict[str, float]] = None,
+) -> JudgeResult:
+    """Контракт «урок» (LLM, фоновый): groundedness, coherence, grade_fit, no_contradiction.
+
+    eval_criteria — детерминированные критерии eval_lesson (lesson_eval.criteria):
+    groundedness жёстко ограничивается сверху цитатами, чтобы судья не «прощал»
+    урок без ссылок на источник.
+
+    Запускается ТОЛЬКО асинхронно (api/engine.py) после выдачи урока ученику —
+    никогда не блокирует переход к квизу.
+    """
+    ctx = "\n---\n".join(context)[:6000]
+    result = _judge(
+        "lesson",
+        LESSON_CRITERIA,
+        {
+            "lesson": lesson_text[:4000],
+            "context": ctx or "контекст пуст",
+            "grade": grade or "не указан",
+            "grade_guidance": grade_prompt(grade),
+            "auto_eval": eval_criteria or {},
+            "instructions": (
+                "Оцени: groundedness — каждый факт урока подтверждён контекстом; "
+                "coherence — связность структуры; grade_fit — сложность соответствует классу; "
+                "no_contradiction — в уроке и его схеме нет фактов, противоречащих "
+                "контексту или друг другу. auto_eval.citations — доля секций с цитатой "
+                "(§N/источник): чем меньше цитат, тем ниже groundedness — урок обязан "
+                "демонстрировать опору на источник."
+            ),
+        },
+        judge_call=judge_call,
+    )
+    if eval_criteria:
+        cap = _citation_groundedness_cap(eval_criteria.get("citations"))
+        if cap is not None and result.criteria.get("groundedness", 0.0) > cap:
+            result.criteria["groundedness"] = cap
+            result.avg_score = round(sum(result.criteria.values()) / len(result.criteria), 2)
+            result.verdict = "pass" if result.avg_score >= PASS_THRESHOLD else "fail"
+    return result

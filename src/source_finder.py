@@ -1,7 +1,9 @@
 """
 EduTutor — сбор учебных материалов (разделы 6.1–6.3).
 
-- search_web: каскад yandex → tavily → ddgs (только настроенные).
+- search_web: каскад primary → yandex/tavily → stepik → lesson_edu → ddgs.
+  stepik (публичный REST API) и lesson.edu.ru (Минпросвещения, JS-каталог) —
+  легальные источники РФ (roadmap #4), работают по белому списку без ключей.
 - fetch_url / fetch_html: безопасная загрузка (SSRF-защита is_url_blocked, К-2).
 - license_check: проверка лицензионной чистоты источника (К-2, 6.3).
 - find_local_textbooks: локальные PDF-учебники из TEXTBOOKS_DOWNLOADS_DIR (Plan B, В-2).
@@ -26,7 +28,7 @@ import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 import httpx
 
@@ -320,6 +322,11 @@ def fetch_url(url: str, client: Optional[httpx.Client] = None) -> Tuple[str, str
         client = httpx.Client(timeout=default_settings.REQUEST_TIMEOUT)
         close = True
     try:
+        # Провайдеры с API/JS-рендерингом: обычный HTML-fetch не даст контент.
+        if "stepik.org/course/" in url:
+            return _fetch_stepik_text(url, client)
+        if _LESSON_EDU_HOST in url:
+            return _fetch_lesson_edu_text(url, default_settings)
         raw, status = _get_text(url, client, max_chars=default_settings.MAX_FETCH_CHARS)
         if status != "OK":
             return raw, status
@@ -434,9 +441,200 @@ def _search_ddgs(query: str, settings: Any) -> List[SearchResult]:
     return results
 
 
+# ----------------------------------------------------------------------
+# Провайдеры легальных источников РФ (roadmap #4): Stepik (публичный REST API)
+# и lesson.edu.ru (Минпросвещения, JS-каталог через crawl4ai). Работают по
+# белому списку/без API-ключей — веб-каталог функционирует там, где
+# Wikipedia/ddgs/Yandex недоступны. Капчу/аутентификацию НЕ обходим (К-2).
+# ----------------------------------------------------------------------
+STEPIK_API = "https://api.stepik.org/api"
+_LESSON_EDU_HOST = "lesson.edu.ru"
+
+
+def _search_stepik(query: str, settings: Any) -> List[SearchResult]:
+    """Stepik: поиск курсов по публичному REST API (api.stepik.org/api/courses?query=...).
+
+    Бесплатно и без ключей; курс → материалы (текст-степы) забираем через
+    _fetch_stepik_text при fetch_url.
+    """
+    results: List[SearchResult] = []
+    try:
+        with httpx.Client(
+            timeout=min(settings.REQUEST_TIMEOUT, 15.0),
+            headers={"User-Agent": USER_AGENT, "Accept-Language": "ru,en;q=0.8"},
+        ) as client:
+            resp = client.get(f"{STEPIK_API}/courses", params={"query": query})
+            resp.raise_for_status()
+            courses = (resp.json().get("courses") or [])[:SEARCH_RESULTS]
+    except Exception as exc:
+        logger.warning("Stepik: поиск курсов недоступен (%s)", exc)
+        return []
+    for c in courses:
+        cid = c.get("id")
+        title = (c.get("title") or "").strip()
+        if not cid or not title:
+            continue
+        summary = re.sub(r"<[^>]+>", "", c.get("summary") or "").strip()
+        results.append(SearchResult(
+            title=f"Stepik: {title}",
+            url=f"https://stepik.org/course/{cid}",
+            snippet=summary[:300],
+        ))
+    return results
+
+
+def _fetch_stepik_text(url: str, client: httpx.Client) -> Tuple[str, str]:
+    """Stepik-курс через REST API: course → sections → units → lessons → steps (text-блоки)."""
+    m = re.search(r"stepik\.org/course/(\d+)", url)
+    if not m:
+        return "Ошибка: не URL курса Stepik", "ERROR"
+    cid = m.group(1)
+
+    def _api(path: str) -> Dict[str, Any]:
+        resp = client.get(
+            f"{STEPIK_API}/{path}",
+            headers={"User-Agent": USER_AGENT, "Accept-Language": "ru,en;q=0.8"},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    try:
+        course = (_api(f"courses/{cid}").get("courses") or [{}])[0]
+    except Exception as exc:
+        # api.stepik.org может быть недоступен (DNS-фильтр), но stepik.org отдаёт
+        # server-rendered HTML курса — берём конспект оттуда.
+        logger.warning("Stepik: API недоступен (%s) — fallback на HTML-страницу курса", exc)
+        try:
+            raw, status = _get_text(url, client, max_chars=default_settings.MAX_FETCH_CHARS)
+            if status != "OK":
+                return f"Stepik: курс недоступен ({raw})", "ERROR"
+            text = _strip_html(raw)
+            if len(text) < 40:
+                return "Stepik: страница курса не содержит текстовых материалов", "ERROR"
+            return text[: default_settings.MAX_FETCH_CHARS], "OK"
+        except Exception as exc2:
+            return f"Stepik: курс недоступен ({exc2})", "ERROR"
+    parts = [f"# {course.get('title') or 'Курс'}"]
+    if course.get("summary"):
+        parts.append(re.sub(r"<[^>]+>", "", course["summary"]).strip())
+    try:
+        for sid in (course.get("sections") or [])[:2]:
+            units = (_api(f"sections/{sid}").get("sections") or [{}])[0].get("units") or []
+            for uid in units[:2]:
+                lesson = (_api(f"units/{uid}").get("units") or [{}])[0].get("lesson")
+                if not lesson:
+                    continue
+                steps = (_api(f"lessons/{lesson}").get("lessons") or [{}])[0].get("steps") or []
+                for step_id in steps[:6]:
+                    block = (_api(f"steps/{step_id}").get("steps") or [{}])[0].get("block") or {}
+                    if block.get("name") == "text" and block.get("text"):
+                        parts.append(_strip_html(block["text"]).strip())
+                    if sum(len(p) for p in parts) >= default_settings.MAX_FETCH_CHARS:
+                        break
+    except Exception as exc:
+        logger.warning("Stepik: структура курса недоступна (%s)", exc)
+    text = "\n\n".join(p for p in parts if p and p.strip())
+    if len(text) < 40:
+        return "Stepik: курс не содержит текстовых материалов", "ERROR"
+    return text[: default_settings.MAX_FETCH_CHARS], "OK"
+
+
+def _host_reachable(host: str, settings: Any, timeout: float = 4.0) -> bool:
+    """Быстрый probe доступности хоста (белый список/офлайн) перед тяжёлым JS-краулом."""
+    try:
+        with httpx.Client(timeout=timeout, follow_redirects=True,
+                          headers={"User-Agent": USER_AGENT}) as client:
+            return client.get(f"https://{host}/").status_code < 500
+    except Exception:
+        return False
+
+
+def _crawl_sync(url: str, settings: Any, timeout: float = 25.0) -> Dict[str, Any]:
+    """Синхронная обёртка над async crawl_page_js (в потоке, с таймаутом)."""
+    result: Dict[str, Any] = {}
+
+    def _run() -> None:
+        try:
+            import asyncio
+
+            result.update(asyncio.run(crawl_page_js(url, settings)))
+        except Exception as exc:
+            result["ok"] = False
+            result["error"] = str(exc)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        return {"ok": False, "error": "timeout"}
+    return result
+
+
+def _search_lesson_edu(query: str, settings: Any) -> List[SearchResult]:
+    """lesson.edu.ru (Минпросвещения): JS-каталог через crawl4ai (best-effort, К-2).
+
+    Капчу/аутентификацию не обходим; при недоступности — тихо пустой результат.
+    """
+    if not _host_reachable(_LESSON_EDU_HOST, settings):
+        return []
+    q = quote(re.sub(r"[^\w\s-]", "", query)[:60])
+    data = _crawl_sync(f"https://{_LESSON_EDU_HOST}/catalog?search={q}", settings)
+    md = data.get("markdown") or ""
+    results: List[SearchResult] = []
+    # Отсекаем ассеты (логотипы/стили) — каталог требует авторизации (401), поэтому
+    # в крауле приходят только статические файлы шапки; фильтр защищает от мусора.
+    _ASSET_RE = re.compile(r"\.(?:svg|png|jpe?g|gif|webp|css|js|ico|woff2?)(?:\?|$)", re.I)
+    for title, href in re.findall(r"\[([^\]]+)\]\(([^)\s]+)\)", md):
+        title = re.sub(r"[#*|]", "", title).strip()
+        if not title or len(title) < 3:
+            continue
+        href = href.strip()
+        if href.startswith("//"):
+            href = "https:" + href
+        elif href.startswith("/"):
+            href = f"https://{_LESSON_EDU_HOST}{href}"
+        elif not href.startswith("http"):
+            continue
+        if _LESSON_EDU_HOST not in href or _ASSET_RE.search(href):
+            continue
+        results.append(SearchResult(title=f"lesson.edu.ru: {title}", url=href))
+        if len(results) >= SEARCH_RESULTS:
+            break
+    return results
+
+
+def _fetch_lesson_edu_text(url: str, settings: Any) -> Tuple[str, str]:
+    """lesson.edu.ru: JS-страница урока → markdown (crawl4ai), best-effort."""
+    data = _crawl_sync(url, settings)
+    md = (data.get("markdown") or "").strip()
+    if not md:
+        return "lesson.edu.ru: страница недоступна (капча/авторизация?)", "ERROR"
+    return md[: default_settings.MAX_FETCH_CHARS], "OK"
+
+
+def _search_fipi(query: str, settings: Any) -> List[SearchResult]:
+    """ФИПИ: демоверсии/спецификации ОГЭ-ЕГЭ (серверный HTML, HTTP 200).
+
+    Банк заданий ФИПИ закрыт антиботом (403, капчу не обходим — К-2). Лучшее, что
+    отдаёт fipi.ru без капчи: страницы демоверсий/кодификаторов по экзамену
+    (ОГЭ для 9 класса, иначе ЕГЭ). Opt-in через ENABLE_FIPI.
+    """
+    low = (query or "").lower()
+    exam = "oge" if any(k in low for k in ("оге", "огэ", "9 класс")) else "ege"
+    url = f"https://fipi.ru/{exam}/demoversii-specifikacii-kodifikatory"
+    return [SearchResult(
+        title=f"ФИПИ: демоверсии и спецификации ({exam.upper()})",
+        url=url,
+        snippet="Официальные демоверсии, спецификации и кодификаторы экзамена по предмету",
+    )]
+
+
 _ENGINES: Dict[str, Callable[[str, Any], List[SearchResult]]] = {
     "yandex": _search_yandex,
     "tavily": _search_tavily,
+    "stepik": _search_stepik,
+    "lesson_edu": _search_lesson_edu,
+    "fipi": _search_fipi,
     "ddgs": _search_ddgs,
 }
 

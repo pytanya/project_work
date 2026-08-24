@@ -180,6 +180,19 @@ class TestGraphAgentIntake:
                 return [0.0] * 4
 
         deps.store = NumpyVectorStore("g", Emb())
+
+        class _Col:
+            def __init__(self, status, sources, texts, message="", failed_reason=""):
+                self.status = status
+                self.sources = sources
+                self.texts = texts
+                self.message = message
+                self.failed_reason = failed_reason
+
+        # Герметичность: не ходим в реальный поиск/LLM-онтологию за пределами агента.
+        # Тест проверяет только intake-цикл агента — источник не нужен.
+        deps.source_collector = lambda **kw: _Col("failed", [], [],
+                                                  message="mock: пусто", failed_reason="empty_result")
         graph = build_graph(deps)
         res = TutorState.model_validate(graph.invoke({**TutorState(num_questions=3).model_dump(), "pending_answer": answer}))
         # агент заполнил intake → граф пошёл на источник (source_status=None → ждёт источника нет → failed?)
@@ -320,3 +333,23 @@ class TestGraphAgentTutor:
         res = TutorState.model_validate(graph.invoke(st.model_dump()))
         assert res.lesson_confirmed is True
         assert res.current_question is not None  # квиз начался
+
+
+class TestObservability:
+    """Roadmap #5.7 (10.2): структурированное логирование действий агента."""
+
+    def test_log_tool_action_ok(self, caplog):
+        from src.agent_loop import _log_tool_action
+
+        with caplog.at_level("INFO", logger="edututor.agent"):
+            _log_tool_action("rag_search", {"query": "Атмосфера"}, '{"ok": true, "topic": "Атмосфера"}', 42)
+        assert any("agent.action tool=rag_search ok=True elapsed_ms=42" in r.message for r in caplog.records)
+        assert any("reason=Атмосфера" in r.message for r in caplog.records)
+
+    def test_log_tool_action_error(self, caplog):
+        from src.agent_loop import _log_tool_action
+
+        with caplog.at_level("INFO", logger="edututor.agent"):
+            _log_tool_action("route_to_source", {}, '{"ok": false, "error": "нет источника"}', 7)
+        assert any("tool=route_to_source ok=False" in r.message for r in caplog.records)
+        assert any("reason=нет источника" in r.message for r in caplog.records)

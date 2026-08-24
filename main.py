@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from src.config import settings as default_settings  # noqa: E402
 from src.graph import GraphDeps, build_graph  # noqa: E402
+from src.guardrails import BudgetGuard, guard_user_input  # noqa: E402
 from src.logging_setup import print_panel, setup_logging  # noqa: E402
 from src.metrics import MetricsCollector  # noqa: E402
 from src.states import TutorState  # noqa: E402
@@ -38,19 +39,24 @@ def _load_scenario(scenario_id: str) -> Dict:
                      + ", ".join(s["id"] for s in data["scenarios"]))
 
 
-def _build_deps(metrics: MetricsCollector, mock: bool) -> GraphDeps:
+def _build_deps(metrics: MetricsCollector, mock: bool, step_logger=None) -> GraphDeps:
     if mock:
         from evals.edututor_eval import build_mock_deps
 
-        return build_mock_deps(default_settings)
+        deps = build_mock_deps(default_settings)
+        if step_logger is not None:
+            deps.step_logger = step_logger
+        return deps
     from src.llm_client import LLMClient
 
+    budget = BudgetGuard(default_settings)
     embedder, store = _make_live_store()
-    tutor = LLMClient(role="tutor", metrics=metrics)
-    cheap = LLMClient(role="cheap", metrics=metrics)
-    expert = LLMClient(role="expert", metrics=metrics)
-    judge = LLMClient(role="judge", metrics=metrics)
-    return GraphDeps(
+    tutor = LLMClient(role="tutor", metrics=metrics, budget=budget)
+    cheap = LLMClient(role="cheap", metrics=metrics, budget=budget)
+    expert = LLMClient(role="expert", metrics=metrics, budget=budget)
+    judge = LLMClient(role="judge", metrics=metrics, budget=budget)
+    agent_tutor = LLMClient(role="tutor", metrics=metrics, budget=budget)
+    deps = GraphDeps(
         embedder=embedder,
         store=store,
         settings=default_settings,
@@ -58,7 +64,12 @@ def _build_deps(metrics: MetricsCollector, mock: bool) -> GraphDeps:
         eval_llm=lambda m: cheap.chat(m, temperature=0.0, max_tokens=300).content or "",
         expert_llm=lambda m: expert.chat(m, temperature=0.2, max_tokens=500).content or "",
         judge_llm=lambda m: judge.chat(m, temperature=0.0, max_tokens=200).content or "",
+        # Агентный цикл (function calling): модель выбирает действие через TOOL_SCHEMAS
+        agent_llm=lambda msgs, tools=None: agent_tutor.chat(msgs, tools=tools, max_tokens=500, temperature=0.2),
     )
+    if step_logger is not None:
+        deps.step_logger = step_logger
+    return deps
 
 
 def _make_live_store():
@@ -103,7 +114,7 @@ def run(cli_args) -> int:
     run_info = setup_logging(BASE_DIR / "output" / "run_cli", session_id=f"sess_{scenario['id']}")
     metrics = MetricsCollector()
     metrics.start()
-    deps = _build_deps(metrics, mock=cli_args.mock)
+    deps = _build_deps(metrics, mock=cli_args.mock, step_logger=run_info["step_logger"])
     graph = build_graph(deps)
 
     state = TutorState(
@@ -135,6 +146,7 @@ def run(cli_args) -> int:
     auto = cli_args.auto
     res = _invoke(graph, state.model_dump())
     last_message = ""
+    last_lesson = ""
 
     while True:
         # Завершение — выводим финальное сообщение один раз
@@ -143,6 +155,11 @@ def run(cli_args) -> int:
                 style = "ok" if "Квиз завершён" in res.agent_message else "err"
                 print_panel("Итог", res.agent_message, style)
             break
+
+        # урок/разбор показываем (CLI — без WS; структура остаётся в JSON-экспорте)
+        if res.lesson_text and res.lesson_text != last_lesson:
+            print_panel("Урок", res.lesson_text, "ok")
+            last_lesson = res.lesson_text
 
         # выводим новые сообщения агента
         if res.agent_message and res.agent_message != last_message:
@@ -163,6 +180,10 @@ def run(cli_args) -> int:
             print(">", answer)
         else:
             answer = input("Вы: ").strip()
+            guard = guard_user_input(answer)
+            if guard["blocked"]:
+                print_panel("Блокировка", guard["message"], "err")
+                continue
         res = _invoke(graph, {**res.model_dump(), "pending_answer": answer})
 
     # Финальный вывод (завершающее сообщение уже выведено в цикле)

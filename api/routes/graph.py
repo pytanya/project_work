@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Optional
@@ -21,6 +22,37 @@ from ..deps import get_session, get_store
 from ..engine import SessionStore, run_step
 
 router = APIRouter(prefix="/api/sessions/{session_id}", tags=["graph"])
+
+# Узлы графа вида «Урок 3: Атмосфера» / «Параграф 5. Погода» должны матчиться
+# с wiki-статьями по теме «Атмосфера» / «Погода» (иначе мастерство не окрашивает узлы).
+_PREFIX_RE = re.compile(
+    r"^(?:урок|параграф|lesson|section|module|unit|тема|раздел)\s*\d+[.:\s—–-]*\s*",
+    re.IGNORECASE,
+)
+
+
+def _norm_topic(title: str) -> str:
+    t = _PREFIX_RE.sub("", title or "").strip()
+    return re.sub(r"\s+", " ", t).lower()
+
+
+def _match_article(wiki, subject: str, title: str):
+    """Точный матч, затем нормализованный («Урок 3: Атмосфера» → «атмосфера»)."""
+    if not title:
+        return None
+    art = wiki.get(subject, title) if subject else None
+    if art is not None:
+        return art
+    nt = _norm_topic(title)
+    if not nt:
+        return None
+    art = wiki.get(subject, nt) if subject else None
+    if art is not None:
+        return art
+    for a in wiki.list_articles():
+        if _norm_topic(a.title) == nt:
+            return a
+    return None
 
 # Фоновые шаги графа (fire-and-forget): держим ссылку, чтобы задача не была
 # собрана GC до завершения (asyncio.create_task). Завершённые задачи удаляются
@@ -79,7 +111,8 @@ def get_graph(session_id: str, store: SessionStore = Depends(get_store)):
     edges = kg.to_dict()["edges"]
 
     # Mastery overlay (roadmap #3): цвет узла = уровень усвоения из Knowledge Wiki.
-    # Матчим по названию темы/раздела (case-insensitive), subject сессии — фильтр.
+    # Матчим по названию темы/раздела (с нормализацией «Урок N: Тема» ≈ «Тема»),
+    # subject сессии — фильтр.
     try:
         from src.wiki import KnowledgeWiki
 
@@ -87,12 +120,7 @@ def get_graph(session_id: str, store: SessionStore = Depends(get_store)):
         subject = session.state.subject
         for n in nodes:
             title = n.get("title", "")
-            art = wiki.get(subject, title) if subject and title else None
-            if art is None and title:
-                for a in wiki.list_articles():
-                    if a.title.lower() == title.lower():
-                        art = a
-                        break
+            art = _match_article(wiki, subject, title) if title else None
             if art is not None:
                 n["mastery"] = art.mastery
                 n["attempts"] = art.attempts
@@ -131,12 +159,7 @@ def node_wiki(session_id: str, node_id: str, store: SessionStore = Depends(get_s
         from src.wiki import KnowledgeWiki
 
         wiki = KnowledgeWiki(default_settings.KNOWLEDGE_WIKI_DIR)
-        art = wiki.get(session.state.subject, title) if session.state.subject and title else None
-        if art is None and title:
-            for a in wiki.list_articles():
-                if a.title.lower() == title.lower():
-                    art = a
-                    break
+        art = _match_article(wiki, session.state.subject, title) if title else None
         if art is not None:
             return {"node": node, "wiki": art.to_dict()}
     except Exception:

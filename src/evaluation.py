@@ -35,6 +35,25 @@ def rag_context(store: Any, query: str, state: TutorState, k: int = 3) -> List[s
         return []
 
 
+def _topic_source(store: Any, topic: str, state: TutorState) -> str:
+    """Источник темы (URL/учебник) из RAG-чанков — для wiki-статьи (OKF source)."""
+    if store is None or not topic:
+        return ""
+    filters: Dict[str, Any] = {}
+    if state.subject:
+        filters["subject"] = state.subject
+    if state.grade:
+        filters["grade"] = state.grade
+    try:
+        for r in store.search(topic, k=3, filters=filters or None):
+            src = getattr(r.chunk, "source", "")
+            if src:
+                return src
+    except Exception:
+        pass
+    return ""
+
+
 def evaluate_and_record(
     st: TutorState,
     deps: Any,
@@ -47,7 +66,27 @@ def evaluate_and_record(
     Возвращает (state, message, judge_result, explanation). Не мутирует вход (копирует).
     """
     st = st.model_copy(deep=True)
-    context = rag_context(getattr(deps, "store", None), card.topic if card else "", st, k=3)
+    topic = card.topic if card else ""
+    context = rag_context(getattr(deps, "store", None), topic, st, k=3)
+
+    # Wiki-LLM (roadmap #2): к контексту оценки добавляем накопленную wiki-статью темы —
+    # межсессионные знания/заметки дополняют RAG-чанки (сверка «с wiki», а не только с чанками).
+    # Если RAG пуст — wiki-статья становится единственным эталоном.
+    wiki_body: Optional[str] = None
+    try:
+        from .wiki import KnowledgeWiki
+
+        art = KnowledgeWiki(deps.settings.KNOWLEDGE_WIKI_DIR).get(
+            getattr(st, "subject", None) or "общая тема", topic
+        )
+        if art and (art.body or "").strip():
+            wiki_body = art.body.strip()
+    except Exception as exc:
+        logger.warning("Wiki-контекст в оценке не добавлен: %s", exc)
+
+    if wiki_body:
+        # Wiki-статья дополняет RAG-чанки (межсессионные знания); если RAG пуст — единственный эталон.
+        context = (list(context) + [wiki_body]) if context else [wiki_body]
     if not context:
         context = ["Нет контекста по теме."]
 
@@ -87,7 +126,7 @@ def evaluate_and_record(
     explanation: Optional[Dict[str, Any]] = None
     if not graded.correct and not deterministic:
         explanation = tutor_mod.explain_error(
-            card.question, answer, context, st, llm_call=getattr(deps, "expert_llm", None)
+            card.question, answer, context, st, llm_call=getattr(deps, "expert_llm", None), on_token=deps.on_token
         )
         message += f"\nОбъяснение: {explanation['text']}"
         if explanation["citation"]["paragraph"]:
@@ -105,6 +144,8 @@ def evaluate_and_record(
             "feedback": graded.feedback,
             "model_used": graded.model_used,
             "judge_score": judge_result.avg_score if judge_result else None,
+            "question": card.question if card else "",
+            "correct_answer": ", ".join(st.current_answers) or "",
         })
 
     if emit is not None:
@@ -123,6 +164,10 @@ def evaluate_and_record(
                 art = wiki.get(getattr(st, "subject", None) or "общая тема", card.topic)
                 if art is None or not (art.body or "").strip():
                     wiki.enrich_body(st, card.topic, context, llm_call=getattr(deps, "tutor_llm", None))
+                # источник информации (URL/учебник) из RAG-чанков
+                src = _topic_source(deps.store, card.topic, st)
+                if src:
+                    wiki.set_source(st, card.topic, src)
     except Exception as exc:
         logger.warning("Knowledge Wiki per-answer update failed: %s", exc)
 

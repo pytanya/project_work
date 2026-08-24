@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -19,6 +20,8 @@ from typing import Any, Callable, Dict, List, Optional
 import networkx as nx
 
 from .config import settings as default_settings
+
+logger = logging.getLogger("edututor.knowledge_graph")
 
 # Типы связей
 PART_OF = "part_of"
@@ -201,7 +204,7 @@ def _web_headings(kg: "KnowledgeGraph", root_id: str, text: str, source: str) ->
             continue
         seen.add(key)
         nid = f"sec:{source}:web:{len(ids)}"
-        kg.add_topic(nid, title_clean, node_type="topic")
+        kg.add_topic(nid, title_clean, node_type="topic", parent_id=root_id)
         kg.add_edge(root_id, nid, PART_OF)
         ids.append(nid)
         if len(ids) >= 30:  # лимит узлов — не даём «лепнине» завалить граф
@@ -338,8 +341,8 @@ class KnowledgeGraph:
 # ----------------------------------------------------------------------
 # Персистентный кэш графа (per-textbook, переживает сессии)
 # ----------------------------------------------------------------------
-GRAPH_SCHEMA_VERSION = 4  # bump при изменении структуры графа → пересборка кэша
-# v4: parent_id field for hierarchy support
+GRAPH_SCHEMA_VERSION = 5  # bump при изменении структуры графа → пересборка кэша
+# v5: LLM-онтология (вершины/рёбра решает модель), v4: parent_id field
 
 
 def graph_cache_key(source_name: str, path: Optional[Any] = None) -> str:
@@ -388,16 +391,120 @@ def build_or_load_textbook_graph(
     path: Optional[Any] = None,
     graph_dir: Optional[Any] = None,
     llm_link: Optional[Callable[[List[str]], List[Dict[str, str]]]] = None,
+    llm_ontology: Optional[Callable[[List[Dict[str, str]]], str]] = None,
 ) -> KnowledgeGraph:
-    """Build-once: граф из кэша (по fingerprint файла) или пересборка + сохранение."""
+    """Build-once: граф из кэша (по fingerprint файла) или пересборка + сохранение.
+
+    llm_ontology — модель строит онтологию (вершины+рёбра) из контента; если модель
+    недоступна/вернула мусор — эвристический каркас (structure/TOC).
+    """
     if path is not None:
         key = graph_cache_key(source, path)
         cached = load_cached_graph(key, graph_dir)
         if cached is not None:
             return cached
-    kg = build_textbook_graph(text, source, llm_link=llm_link)
+    kg = build_model_graph(text, source, llm_ontology) if llm_ontology else None
+    if kg is None:
+        kg = build_textbook_graph(text, source, llm_link=llm_link)
     if path is not None:
         save_graph(key, kg, graph_dir)
+    return kg
+
+
+# Допустимые типы вершин и связи LLM-онтологии (остальное отбрасываем/нормализуем)
+_ONTOLOGY_TYPES = {"topic", "concept", "section", "lesson"}
+_ONTOLOGY_RELATIONS = {PART_OF, PREREQUISITE, RELATED}
+
+
+def _ontology_prompt(text: str, source: str, max_vertices: int) -> List[Dict[str, str]]:
+    system = (
+        "Ты — онтолог образовательного агента EduTutor. По фрагменту учебного материала "
+        "построй граф знаний: ВЕРШИНЫ — темы и ключевые понятия из текста, РЁБРА — смысловые "
+        "связи между ними. Решения, что станет вершинами и рёбрами, принимаешь ТЫ по содержанию. "
+        "Правила: "
+        "1) Только понятия, реально присутствующие в тексте; не выдумывай и не обобщай вне текста. "
+        f"2) Не больше {max_vertices} вершин; название 1-4 слова. "
+        "3) relation только: part_of (входит в), prerequisite (опирается на), related (связан). "
+        "4) Для каждой вершины укажи section — §N/номер параграфа из текста, откуда понятие "
+        "(если есть, иначе пустая строка). "
+        'Верни строго JSON: {"nodes":[{"id":"c1","title":"...","type":"topic|concept","section":""}], '
+        '"edges":[{"source":"c1","target":"c2","relation":"part_of"}]}'
+    )
+    user = f"Источник: {source}\n\nТекст материала:\n{text[:12000]}"
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def _extract_section_number(section: str) -> str:
+    """«§12», «Параграф 5» → «12» (для RAG-фильтра по section_number)."""
+    m = re.search(r"(\d{1,3})", section or "")
+    return m.group(1) if m else ""
+
+
+def build_model_graph(
+    text: str,
+    source: str,
+    llm_call: Optional[Callable[[List[Dict[str, str]]], str]],
+    max_vertices: int = 14,
+) -> Optional[KnowledgeGraph]:
+    """Модель строит онтологию (вершины+рёбра) из контента. None — недоступна/мусор.
+
+    Валидация как у диаграмм урока: фильтруем типы/рёбра, дедупликация названий,
+    гарантированный корневой узел; при отсутствии вершин — None (caller → каркас).
+    """
+    if llm_call is None:
+        return None
+    try:
+        from .tutor import parse_llm_json
+
+        raw = llm_call(_ontology_prompt(text, source, max_vertices)) or ""
+        data = parse_llm_json(raw)
+    except Exception as exc:
+        logger.warning("LLM-онтология недоступна (%s) — heuristic fallback", exc)
+        return None
+
+    kg = KnowledgeGraph()
+    root_id = f"book:{source}"
+    kg.add_topic(root_id, f"Учебник «{source}»", node_type="book")
+    node_ids = {root_id}
+    seen_titles: set = set()
+    added = 0
+    raw_nodes = data.get("nodes") if isinstance(data.get("nodes"), list) else []
+    for n in raw_nodes:
+        if not isinstance(n, dict):
+            continue
+        title = clean_title(str(n.get("title") or ""))
+        if not title or len(title) < 2:
+            continue
+        key = title.lower()
+        if key in seen_titles:
+            continue
+        seen_titles.add(key)
+        nid = str(n.get("id") or f"concept:{source}:{added}")
+        ntype = str(n.get("type") or "concept")
+        if ntype not in _ONTOLOGY_TYPES:
+            ntype = "concept"
+        section = _extract_section_number(str(n.get("section") or ""))
+        kg.add_topic(nid, title, node_type=ntype, section_number=section or None,
+                     parent_id=root_id)
+        node_ids.add(nid)
+        kg.add_edge(root_id, nid, PART_OF)
+        added += 1
+        if added >= max_vertices:
+            break
+    if not added:
+        return None  # модель не дала вершин — эвристический каркас
+
+    raw_edges = data.get("edges") if isinstance(data.get("edges"), list) else []
+    for e in raw_edges:
+        if not isinstance(e, dict):
+            continue
+        src, tgt = str(e.get("source") or ""), str(e.get("target") or "")
+        if src not in node_ids or tgt not in node_ids or src == tgt:
+            continue
+        rel = str(e.get("relation") or RELATED)
+        if rel not in _ONTOLOGY_RELATIONS:
+            rel = RELATED
+        kg.add_edge(src, tgt, rel)
     return kg
 
 
@@ -426,7 +533,7 @@ def build_textbook_graph(
     for label, num, title, _content in sections:
         nid = f"sec:{source}:{num}"
         kg.add_topic(nid, f"{label.capitalize()} {num}" + (f": {clean_title(title)}" if title else ""),
-                     node_type="section", section_number=num)
+                     node_type="section", section_number=num, parent_id=root_id)
         kg.add_edge(root_id, nid, PART_OF)
         section_ids.append(nid)
 
@@ -448,7 +555,7 @@ def build_textbook_graph(
                     node_title += f": {lesson_title}"
                 # Уроки и параграфы — тип "lesson", а не "topic" (для корректной типизации в UI)
                 lesson_type = "lesson" if label.lower() in ("урок", "урок.", "урок:", "lesson", "module", "unit") else "topic"
-                kg.add_topic(nid, node_title, node_type=lesson_type)
+                kg.add_topic(nid, node_title, node_type=lesson_type, parent_id=root_id)
                 kg.add_edge(root_id, nid, PART_OF)
                 section_ids.append(nid)
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from src.config import BASE_DIR, Settings
+from src.guardrails import BudgetExceededError, BudgetGuard
 from src.llm_client import LLMClient, LLMResponse, _estimate_cost
 from src.metrics import MetricsCollector
 
@@ -124,6 +125,99 @@ class TestCheapMetrics:
         with pytest.raises(RuntimeError):
             client.chat([{"role": "user", "content": "hi"}])
         assert metrics.cheap_refusal_rate == 1.0
+
+
+class TestBudgetEnforcement:
+    """Бюджет (В-7): LLMClient блокирует вызовы после исчерпания лимита."""
+
+    def test_budget_exceeded_raises(self, make_settings):
+        s = make_settings(ROUTERAI_API_KEY="k", MAX_COST_USD=0.0)
+        budget = BudgetGuard(s)
+        budget.record("tutor", 0.01)  # израсходовано > MAX_COST_USD=0 → лимит превышен
+        client = LLMClient(s, role="tutor", budget=budget)
+        with pytest.raises(BudgetExceededError):
+            client.chat([{"role": "user", "content": "hi"}])
+
+    def test_cost_recorded_on_success(self, make_settings, monkeypatch):
+        s = make_settings(ROUTERAI_API_KEY="k", MAX_COST_USD=1.0)
+        budget = BudgetGuard(s)
+        client = LLMClient(s, role="tutor", budget=budget)
+        monkeypatch.setattr(
+            client, "_make_request",
+            lambda *a, **kw: _fake_response(provider="routerai", cost_usd=0.1),
+        )
+        client.chat([{"role": "user", "content": "hi"}])
+        assert budget.spent("tutor") == pytest.approx(0.1)
+        assert budget.calls_total == 1
+
+    def test_call_limit_blocks_next(self, make_settings, monkeypatch):
+        s = make_settings(ROUTERAI_API_KEY="k", MAX_COST_USD=100.0, MAX_LLM_CALLS_PER_SESSION=1)
+        budget = BudgetGuard(s)
+        client = LLMClient(s, role="tutor", budget=budget)
+        monkeypatch.setattr(
+            client, "_make_request",
+            lambda *a, **kw: _fake_response(provider="routerai", cost_usd=0.01),
+        )
+        client.chat([{"role": "user", "content": "hi"}])  # 1-й вызов — ок
+        with pytest.raises(BudgetExceededError):
+            client.chat([{"role": "user", "content": "hi again"}])  # лимит достигнут
+
+
+class TestStreamRetry:
+    """Ретрай стрима не должен дублировать уже показанные токены в UI."""
+
+    def test_retry_after_partial_stream_suppresses_duplicates(self, make_settings):
+        s = make_settings(ROUTERAI_API_KEY="k")
+        client = LLMClient(s, role="tutor")
+        client._clients = {"routerai": object()}
+
+        attempts = {"n": 0}
+        seen = []
+
+        def fake_stream(client_obj, name, model, messages, on_chunk, mt, temp):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                on_chunk("часть1")
+                raise ConnectionError("stream dropped mid-way")
+            # 2-я попытка успешна, но её чанки НЕ должны повторяться в UI
+            on_chunk("часть2")
+            return LLMResponse(content="часть1часть2", usage={}, provider=name, model=model, role="tutor")
+
+        resp = client._request_with_retry(
+            {"name": "routerai", "base_url": "", "api_key": "k", "model": "m", "timeout": 1},
+            "m", [{"role": "user", "content": "hi"}], None, None, None, None,
+            stream_fn=fake_stream, on_chunk=seen.append,
+        )
+        assert attempts["n"] == 2
+        # UI видит только токены 1-й попытки; ретрай не дублирует их
+        assert seen == ["часть1"]
+        # Финальный ответ при этом полный (из 2-й попытки) — придёт через tutor.lesson
+        assert resp.content == "часть1часть2"
+
+    def test_retry_before_any_chunk_streams_normally(self, make_settings):
+        s = make_settings(ROUTERAI_API_KEY="k")
+        client = LLMClient(s, role="tutor")
+        client._clients = {"routerai": object()}
+
+        attempts = {"n": 0}
+        seen = []
+
+        def fake_stream(client_obj, name, model, messages, on_chunk, mt, temp):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise ConnectionError("dropped before first token")
+            on_chunk("целиком")
+            return LLMResponse(content="целиком", usage={}, provider=name, model=model, role="tutor")
+
+        resp = client._request_with_retry(
+            {"name": "routerai", "base_url": "", "api_key": "k", "model": "m", "timeout": 1},
+            "m", [{"role": "user", "content": "hi"}], None, None, None, None,
+            stream_fn=fake_stream, on_chunk=seen.append,
+        )
+        assert attempts["n"] == 2
+        # Чанков не было — ретрай стримит как обычно
+        assert seen == ["целиком"]
+        assert resp.content == "целиком"
 
 
 class TestRealRouterAI:

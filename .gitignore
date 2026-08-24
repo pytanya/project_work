@@ -19,6 +19,7 @@ logs/
 output/
 evals/results_*.json
 evals/report_*.md
+evals/lesson_eval_*.json
 
 # --- Локальные данные ---
 data/*

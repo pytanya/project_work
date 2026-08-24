@@ -18,6 +18,7 @@ import datetime
 import hashlib
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -270,13 +271,176 @@ def run_all(
     return results
 
 
+# ----------------------------------------------------------------------
+# LessonEval (контракт «урок», детерминированный судья-lite — без задержки)
+# ----------------------------------------------------------------------
+_LESSON_GOOD = json.dumps({
+    "title": "Атмосфера",
+    "hook": "Почему самолёты летают в атмосфере?",
+    "definition": "Атмосфера — газовая оболочка Земли.",
+    "key_terms": [{"term": "азот", "definition": "главный газ атмосферы"}],
+    "diagram": {
+        "kind": "flow",
+        "title": "Состав атмосферы",
+        "nodes": [{"id": "n1", "label": "Азот"}, {"id": "n2", "label": "Кислород"}],
+        "edges": [{"source": "n1", "target": "n2", "label": "смесь"}],
+    },
+    "sections": [
+        {"heading": "Состав", "body": "Азот и кислород — её основа, азота около 78 процентов.",
+         "citation": "§12", "check_question": "Какой газ преобладает?"},
+        {"heading": "Роль", "body": "Атмосфера защищает планету от радиации.",
+         "citation": "§12", "check_question": "От чего защищает атмосфера?"},
+    ],
+    "summary": "Атмосфера защищает жизнь на Земле.",
+}, ensure_ascii=False)
+
+# Деградировавший урок: нет структуры, цитат, длинное предложение, схема вводит новое понятие
+_LESSON_BAD = json.dumps({
+    "title": "Атмосфера",
+    "sections": [{"body": "Атмосфера это газовая оболочка которая окружает планету со всех сторон и "
+                          "состоит из большого количества разных газов но главными являются азот и "
+                          "кислород причём азота почти восемьдесят процентов а кислорода чуть больше "
+                          "двадцати и это очень важно для дыхания всех живых существ на Земле потому "
+                          "что без кислорода жизнь была бы невозможна совершенно поэтому атмосфера "
+                          "играет огромную роль в жизни планеты и это очень интересно."}],
+    "diagram": {"kind": "map", "title": "не связано",
+                "nodes": [{"id": "n1", "label": "Квазар", "x": 0.5, "y": 0.5}]},
+    "summary": "",
+}, ensure_ascii=False)
+
+LESSON_VARIANTS: List[Dict[str, Any]] = [
+    {
+        "id": "lesson_schoolchild",
+        "learner_type": "schoolchild",
+        "grade": "6",
+        "subject": "география",
+        "topic": "Атмосфера",
+        "intake_answers": ["школьник", "6", "география", "Атмосфера", "нет", "урок"],
+        "lesson_llm": lambda m: _LESSON_GOOD,
+        "expect": "pass",
+    },
+    {
+        "id": "lesson_student",
+        "learner_type": "student",
+        "grade": None,
+        "subject": "география",
+        "topic": "Атмосфера",
+        "intake_answers": ["студент", "география", "Атмосфера", "нет", "урок"],
+        "lesson_llm": lambda m: _LESSON_GOOD,
+        "expect": "pass",
+    },
+    {
+        "id": "lesson_degraded",
+        "learner_type": "schoolchild",
+        "grade": "6",
+        "subject": "география",
+        "topic": "Атмосфера",
+        "intake_answers": ["школьник", "6", "география", "Атмосфера", "нет", "урок"],
+        "lesson_llm": lambda m: _LESSON_BAD,
+        "expect": "fail",
+    },
+]
+
+
+def run_lesson_scenario(deps: GraphDeps, variant: Dict[str, Any]) -> Dict[str, Any]:
+    """Прогон режима «урок»: intake → материал → детерминированный судья-lite."""
+    deps = replace(deps, tutor_llm=variant["lesson_llm"])
+    graph = build_graph(deps)
+    state = TutorState(
+        num_questions=1,
+        learner_type=variant.get("learner_type"),
+        grade=variant.get("grade"),
+        subject=variant.get("subject"),
+        topic=variant.get("topic"),
+        mode="lesson",
+        has_textbook=False,
+        sources=[{"type": "web", "url": "x"}],
+        collection_id="web",
+    )
+    res = state
+    for ans in variant["intake_answers"]:
+        res = TutorState.model_validate(graph.invoke({**res.model_dump(), "pending_answer": ans}))
+    ev = res.lesson_eval or {}
+    return {
+        "scenario": variant["id"],
+        "expect": variant["expect"],
+        "lesson_present": bool(res.lesson_text),
+        "criteria": ev.get("criteria"),
+        "avg_score": ev.get("avg_score"),
+        "verdict": ev.get("verdict"),
+        "grade_budget": ev.get("grade_budget"),
+        "text": res.lesson_text or "",
+    }
+
+
+def eval_lessons(mock: bool = True, with_judge: bool = False) -> Dict[str, Any]:
+    """LessonEval: детерминированный судья-lite (0 LLM-вызовов, без задержки).
+
+    with_judge — дополнительно прогон LLM-судьи groundedness (живой API, медленно).
+    """
+    if mock:
+        deps = build_mock_deps(default_settings)
+    else:
+        deps = build_live_deps(default_settings, MetricsCollector())
+
+    results = []
+    for variant in LESSON_VARIANTS:
+        r = run_lesson_scenario(deps, variant)
+        if with_judge and r.get("lesson_present") and r.get("text"):
+            from src.judge import judge_lesson
+            jr = judge_lesson(
+                r["text"],
+                ["Параграф 12: Атмосфера — воздушная оболочка Земли, состоит из азота (78%) и кислорода (21%)."],
+                variant.get("grade"),
+                judge_call=deps.judge_llm,
+            )
+            r["judge"] = {
+                "criteria": {k: round(float(v) / 10.0, 3) for k, v in jr.criteria.items()},
+                "avg_score": round(float(jr.avg_score) / 10.0, 3),
+                "verdict": jr.verdict,
+            }
+        results.append(r)
+
+    correct = sum(1 for r in results if r.get("verdict") == r.get("expect"))
+    return {
+        "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+        "mock": mock,
+        "with_judge": with_judge,
+        "lesson_correct": f"{correct}/{len(results)}",
+        "results": results,
+        "avg_structure": round(sum((r.get("criteria") or {}).get("structure", 0.0) for r in results) / max(1, len(results)), 3),
+        "avg_citations": round(sum((r.get("criteria") or {}).get("citations", 0.0) for r in results) / max(1, len(results)), 3),
+        "avg_diagram": round(sum((r.get("criteria") or {}).get("diagram", 0.0) for r in results) / max(1, len(results)), 3),
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="EduTutorEval (В-6)")
     parser.add_argument("--runs", type=int, default=1, help="число прогонов")
     parser.add_argument("--scenario", type=str, default=None, help="ID сценария из golden_set.json")
     parser.add_argument("--mock", action="store_true", help="офлайн-режим (без сети/LLM)")
     parser.add_argument("--questions", type=int, default=None, help="число вопросов квиза")
+    parser.add_argument("--lessons", action="store_true", help="LessonEval: детерминированный судья-lite по урокам")
+    parser.add_argument("--judge", action="store_true", help="вместе с --lessons: прогон LLM-судьи groundedness")
     args = parser.parse_args()
+
+    if args.lessons:
+        results = eval_lessons(mock=args.mock or not args.judge, with_judge=args.judge)
+        print(f"LessonEval (mock={results['mock']}, judge={results['with_judge']}): "
+              f"совпадений вердиктов {results['lesson_correct']}")
+        for r in results["results"]:
+            cr = r.get("criteria") or {}
+            extra = f" judge={r.get('judge', {}).get('verdict')}" if r.get("judge") else ""
+            print(
+                f"  {r['scenario']}: verdict={r.get('verdict')} (ожид. {r.get('expect')}) "
+                f"avg={r.get('avg_score')} structure={cr.get('structure')} "
+                f"citations={cr.get('citations')} diagram={cr.get('diagram')}{extra}"
+            )
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        out = RESULTS_DIR / f"lesson_eval_{ts}.json"
+        out.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"Результаты: {out}")
+        return 0
 
     results = run_all(runs=args.runs, mock=args.mock, scenario_id=args.scenario, questions=args.questions)
 

@@ -179,3 +179,79 @@ class TestCache:
         loaded = load_cached_graph("k1", tmp_path)
         assert loaded is not None
         assert loaded.stats() == kg.stats()
+
+
+class TestModelOntology:
+    """Модель строит онтологию (вершины+рёбра) из контента; эвристика — fallback."""
+
+    _GOOD = (
+        '{"nodes": [{"id": "c1", "title": "Атмосфера", "type": "topic", "section": "§12"}, '
+        '{"id": "c2", "title": "Состав атмосферы", "type": "concept", "section": "§12"}, '
+        '{"id": "c3", "title": "Давление воздуха", "type": "concept", "section": "§13"}], '
+        '"edges": [{"source": "c1", "target": "c2", "relation": "part_of"}, '
+        '{"source": "c2", "target": "c3", "relation": "prerequisite"}, '
+        '{"source": "c1", "target": "нет_такого", "relation": "related"}]}'
+    )
+
+    def test_model_builds_ontology(self):
+        from src.knowledge_graph import build_model_graph
+
+        kg = build_model_graph("текст про атмосферу", "geog", lambda m: self._GOOD)
+        assert kg is not None
+        nodes = kg.to_dict()["nodes"]
+        titles = [n["title"] for n in nodes]
+        assert "Атмосфера" in titles
+        assert "Состав атмосферы" in titles
+        assert any(n.get("type") == "concept" for n in nodes)
+        # рёбра: валидные есть, битые (нет_такого) отфильтрованы
+        edges = kg.to_dict()["edges"]
+        rels = {(e["source"], e["target"], e["relation"]) for e in edges}
+        assert ("c1", "c2", PART_OF) in rels
+        assert ("c2", "c3", PREREQUISITE) in rels
+        assert not any("нет_такого" in (e["source"] + e["target"]) for e in edges)
+        # section нормализован «§12» → «12» для RAG-фильтра
+        sec12 = [n for n in nodes if n.get("title") == "Состав атмосферы"][0]
+        assert sec12.get("section_number") == "12"
+
+    def test_model_garbage_returns_none(self):
+        from src.knowledge_graph import build_model_graph
+
+        assert build_model_graph("t", "s", lambda m: "не json") is None
+        assert build_model_graph("t", "s", lambda m: '{"nodes": []}') is None
+        assert build_model_graph("t", "s", None) is None
+
+    def test_model_llm_error_falls_back(self):
+        from src.knowledge_graph import build_model_graph
+
+        def boom(m):
+            raise RuntimeError("LLM недоступен")
+
+        assert build_model_graph("t", "s", boom) is None
+
+    def test_build_or_load_prefers_model_then_fallback(self, tmp_path: Path):
+        f = tmp_path / "book.pdf"
+        f.write_bytes(b"data")
+
+        # модель работает → граф модели
+        kg = build_or_load_textbook_graph(OPK_TEXT, source="book", path=f,
+                                          graph_dir=tmp_path / "g", llm_ontology=lambda m: self._GOOD)
+        titles = [n["title"] for n in kg.to_dict()["nodes"]]
+        assert "Состав атмосферы" in titles  # понятие от модели
+
+        # модель падает → эвристический каркас (Уроки/Параграф)
+        kg2 = build_or_load_textbook_graph(OPK_TEXT, source="book2", path=f,
+                                           graph_dir=tmp_path / "g",
+                                           llm_ontology=lambda m: (_ for _ in ()).throw(RuntimeError("down")))
+        titles2 = [n["title"] for n in kg2.to_dict()["nodes"]]
+        assert any("Урок" in t for t in titles2)
+
+    def test_model_undefined_relations_become_related(self):
+        from src.knowledge_graph import build_model_graph
+
+        raw = ('{"nodes": [{"id": "a", "title": "Понятие А"}, {"id": "b", "title": "Понятие Б"}], '
+               '"edges": [{"source": "a", "target": "b", "relation": "explains"}]}')
+        kg = build_model_graph("t", "s", lambda m: raw)
+        assert kg is not None
+        edges = kg.to_dict()["edges"]
+        ab = [e for e in edges if e["source"] == "a" and e["target"] == "b"]
+        assert ab and ab[0]["relation"] == RELATED
