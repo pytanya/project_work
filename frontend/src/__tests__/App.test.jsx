@@ -36,9 +36,9 @@ vi.mock('../api', async () => {
 })
 
 describe('App', () => {
-  it('показывает «Сессия создаётся…», затем приходит вопрос чек-листа', async () => {
+  it('показывает «Готовим занятие…», затем приходит вопрос чек-листа', async () => {
     render(<App />)
-    expect(screen.getByText(/Сессия создаётся/)).toBeInTheDocument()
+    expect(screen.getByText(/Готовим занятие/)).toBeInTheDocument()
 
     // вопрос показывается дважды: в ленте и в карточке IntakeWizard
     const questions = await screen.findAllByText(/Для кого готовим материал/)
@@ -112,5 +112,27 @@ describe('App', () => {
     expect(await screen.findByText('Поиск материалов по теме…')).toBeInTheDocument()
     // баннер чек-листа должен исчезнуть (фаза источника = intake завершён)
     await waitFor(() => expect(screen.queryByText(/Чек-лист/)).not.toBeInTheDocument())
+  })
+
+  it('tutor.lesson превращает стрим-пузырь в урок (без дубля и каретки)', async () => {
+    render(<App />)
+    await screen.findAllByText(/Для кого готовим материал/)
+
+    const ws = globalThis.WebSocket.instances[globalThis.WebSocket.instances.length - 1]
+    ws.onmessage({ data: JSON.stringify({ event: 'token', data: { text: 'Атмосфера' } }) })
+    ws.onmessage({ data: JSON.stringify({ event: 'token', data: { text: ' — газовая оболочка.' } }) })
+    ws.onmessage({
+      data: JSON.stringify({
+        event: 'tutor.lesson',
+        data: { text: 'Атмосфера — газовая оболочка.', topic: 'Атмосфера' },
+      }),
+    })
+
+    // пузырь стал уроком: заголовок темы от LessonPanel виден
+    expect(await screen.findByText('📖 Урок: Атмосфера')).toBeInTheDocument()
+    // стрим-каретка исчезла — «живой» пузырь не остался висеть с мигающим курсором
+    expect(document.querySelector('.stream-caret')).not.toBeInTheDocument()
+    // дубля нет: текст урока в ленте ровно один
+    expect(screen.getAllByText('Атмосфера — газовая оболочка.')).toHaveLength(1)
   })
 })

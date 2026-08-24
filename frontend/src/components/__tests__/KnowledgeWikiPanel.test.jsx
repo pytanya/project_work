@@ -1,4 +1,5 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import KnowledgeWikiPanel from '../KnowledgeWikiPanel'
 
 describe('KnowledgeWikiPanel', () => {
@@ -6,13 +7,13 @@ describe('KnowledgeWikiPanel', () => {
     vi.restoreAllMocks()
   })
 
-  it('показывает «накапливаются» при пустой базе', async () => {
+  it('показывает «Знания накапливаются» при пустой базе', async () => {
     global.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ subjects: [] }) })
     render(<KnowledgeWikiPanel />)
-    await waitFor(() => expect(screen.getByText(/накапливаются между сессиями/)).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText(/Знания накапливаются/)).toBeInTheDocument())
   })
 
-  it('показывает темы с мастерством по предметам (donut-chart)', async () => {
+  it('показывает темы с мастерством по предметам', async () => {
     global.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -20,30 +21,36 @@ describe('KnowledgeWikiPanel', () => {
           {
             subject: 'Философия',
             articles: [
-              { topic: 'Кант', title: 'Кант', mastery: 0.85, accuracy: 0.8, attempts: 5 },
-              { topic: 'Гегель', title: 'Гегель', mastery: 0.3, accuracy: 0.25, attempts: 4 },
+              { topic: 'Кант', title: 'Кант', mastery: 0.85, correct: 4, attempts: 5 },
+              { topic: 'Гегель', title: 'Гегель', mastery: 0.3, correct: 1, attempts: 4 },
             ],
           },
         ],
       }),
     })
-    render(<KnowledgeWikiPanel />)
-    // donut-диаграмма тем с числом изученных
-    await waitFor(() =>
-      expect(screen.getByRole('img', { name: /Круговая диаграмма тем базы знаний/ })).toBeInTheDocument(),
-    )
-    expect(screen.getByText('тем изучено')).toBeInTheDocument()
-    // легенда предметов в SVG
-    expect(screen.getByText(/Философия \(2\)/)).toBeInTheDocument()
+    const { container } = render(<KnowledgeWikiPanel />)
+    await waitFor(() => expect(screen.getByText(/База знаний · 2/)).toBeInTheDocument())
+    // статистика по темам
+    expect(screen.getByText('тем')).toBeInTheDocument()
+    // секция предмета и статьи с процентом мастерства (браузер, не heat-map усвоения)
+    expect(screen.getByRole('button', { name: /Философия/ })).toBeInTheDocument()
+    expect(container.querySelector('.wiki-subject__count').textContent).toBe('2')
+    const browser = container.querySelector('.wiki-subjects')
+    expect(within(browser).getByRole('button', { name: /Кант/ })).toBeInTheDocument()
+    expect(within(browser).getByRole('button', { name: /Гегель/ })).toBeInTheDocument()
+    expect(screen.getByText('85%')).toBeInTheDocument()
+    expect(screen.getByText('30%')).toBeInTheDocument()
   })
 
   it('не падает при ошибке сети', async () => {
     global.fetch = vi.fn().mockRejectedValue(new Error('network'))
     render(<KnowledgeWikiPanel />)
-    await waitFor(() => expect(document.querySelector('.card.wiki')).not.toBeNull())
+    await waitFor(() => expect(document.querySelector('.card.wiki-panel')).not.toBeNull())
+    expect(await screen.findByText(/Не удалось загрузить: network/)).toBeInTheDocument()
   })
 
-  it('показывает детали темы при наведении на сектор (tooltip)', async () => {
+  it('открывает тему в модальном окне для чтения по клику', async () => {
+    const user = userEvent.setup()
     global.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -51,20 +58,69 @@ describe('KnowledgeWikiPanel', () => {
           {
             subject: 'Философия',
             articles: [
-              { topic: 'Кант', title: 'Кант', mastery: 0.85, accuracy: 0.8, attempts: 5, correct: 4, notes: ['ошибка в императиве'] },
+              { topic: 'Кант', title: 'Кант', mastery: 0.85, correct: 4, attempts: 5,
+                source: 'https://example.com/kant', notes: ['ошибка в императиве'],
+                concepts: ['императив', 'априори'], body: 'Кант — основоположник критической философии.' },
             ],
           },
         ],
       }),
     })
-    render(<KnowledgeWikiPanel />)
-    const chart = await screen.findByRole('img', { name: /Круговая диаграмма/ })
-    expect(chart).toBeInTheDocument()
-    // tooltip-контент доступен через SVG <title> (браузерный)
-    const sliceTitle = chart.querySelector('title')
-    expect(sliceTitle).toBeTruthy()
-    expect(sliceTitle.textContent).toContain('Кант')
-    expect(sliceTitle.textContent).toContain('Предмет: Философия')
-    expect(sliceTitle.textContent).toContain('Мастерство: 85%')
+    const { container } = render(<KnowledgeWikiPanel />)
+    await screen.findByRole('button', { name: /Философия/ })  // дождались данных
+    const browser = container.querySelector('.wiki-subjects')
+    await user.click(within(browser).getByRole('button', { name: /Кант/ }))
+    // модальное чтение: заголовок, источник, изложение, понятия, заметки
+    const modal = await screen.findByRole('dialog')
+    expect(modal).toBeInTheDocument()
+    expect(within(modal).getByText('Кант')).toBeInTheDocument()
+    expect(within(modal).getByText(/https:\/\/example.com\/kant/)).toBeInTheDocument()
+    expect(within(modal).getByText('Кант — основоположник критической философии.')).toBeInTheDocument()
+    expect(within(modal).getByText('императив')).toBeInTheDocument()
+    expect(within(modal).getByText('ошибка в императиве')).toBeInTheDocument()
+  })
+
+  it('закрывает модал по клику на фон', async () => {
+    const user = userEvent.setup()
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        subjects: [
+          { subject: 'Философия', articles: [{ topic: 'Кант', title: 'Кант', mastery: 0.85, body: 'Текст' }] },
+        ],
+      }),
+    })
+    const { container } = render(<KnowledgeWikiPanel />)
+    await screen.findByRole('button', { name: /Философия/ })
+    const browser = container.querySelector('.wiki-subjects')
+    await user.click(within(browser).getByRole('button', { name: /Кант/ }))
+    await screen.findByRole('dialog')
+    await user.click(document.querySelector('.topic-modal-backdrop'))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('предлагает сгенерировать изложение, когда тело — плейсхолдер, и не показывает «unverified»', async () => {
+    const user = userEvent.setup()
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        subjects: [
+          { subject: 'Информатика', articles: [
+            { topic: 'Системы счисления', title: 'Системы счисления', mastery: 0.46,
+              attempts: 2, correct: 1, curriculum: 'unverified',
+              body: 'Материал по теме «Системы счисления» накапливается по мере прохождения квизов.' },
+          ] },
+        ],
+      }),
+    })
+    const { container } = render(<KnowledgeWikiPanel />)
+    await screen.findByRole('button', { name: /Информатика/ })
+    const browser = container.querySelector('.wiki-subjects')
+    await user.click(within(browser).getByRole('button', { name: /Системы счисления/ }))
+    const modal = await screen.findByRole('dialog')
+    // «unverified» и плейсхолдер скрыты; есть кнопка генерации изложения
+    expect(within(modal).queryByText(/unverified/)).not.toBeInTheDocument()
+    expect(within(modal).queryByText(/накапливается/)).not.toBeInTheDocument()
+    expect(within(modal).getByRole('button', { name: /Сгенерировать изложение/ })).toBeInTheDocument()
   })
 })

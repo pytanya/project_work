@@ -4,7 +4,7 @@ import ChatStream from '../ChatStream'
 describe('ChatStream', () => {
   it('показывает заглушку при пустой ленте', () => {
     render(<ChatStream feed={[]} />)
-    expect(screen.getByText(/Сессия создаётся/)).toBeInTheDocument()
+    expect(screen.getByText(/Готовим занятие/)).toBeInTheDocument()
   })
 
   it('рендерит разные типы сообщений', () => {

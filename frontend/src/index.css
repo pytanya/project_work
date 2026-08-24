@@ -110,120 +110,554 @@ body {
 .bar-fill { height: 100%; background: linear-gradient(90deg, var(--green), var(--green-strong)); border-radius: 4px; transition: width 0.5s ease; }
 .scoreline { margin-top: 8px; font-size: 12.5px; color: var(--ok); font-weight: 600; }
 
-/* --- Граф знаний: темы (мульти-акцентная раскраска) --- */
-.card.graph { display: flex; flex-direction: column; gap: 8px; }
-.active-topic { font-size: 12.5px; color: var(--green-strong); }
-.active-topic strong { color: var(--ink); }
-.topic-search {
-  padding: 8px 11px; border-radius: 9px; border: 1.5px solid var(--line);
-  background: var(--card); color: var(--ink); font-family: var(--font-body); font-size: 13px; outline: none;
+/* ============================================================
+   Граф знаний — Obsidian-style Canvas (roadmap #3 redesign)
+   ============================================================ */
+.graph-panel { display: flex; flex-direction: column; gap: 8px; }
+.graph-panel__header { display: flex; align-items: center; justify-content: space-between; }
+.graph-panel__header h3 { margin-bottom: 0; }
+.graph-panel__expand {
+  width: 28px; height: 28px; border-radius: 7px; border: 1px solid var(--line);
+  background: var(--card); color: var(--ink-soft); font-size: 15px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.2s ease;
 }
-.topic-search:focus { border-color: var(--green); box-shadow: 0 0 0 3px var(--green-soft); }
-.topic-chips { display: flex; flex-direction: column; gap: 6px; max-height: 240px; overflow-y: auto; }
-.graph-svg {
-  width: 100%; height: auto; border: 1px solid var(--line); border-radius: 12px;
-  background: rgba(238, 241, 234, 0.55); touch-action: manipulation;
-}
-.kg-node { cursor: pointer; }
-.kg-node:hover circle { stroke-width: 3; filter: brightness(1.15); }
-.kg-node.active circle { filter: drop-shadow(0 0 6px var(--green)); }
-.kg-node text { fill: var(--ink); pointer-events: none; font-family: var(--font-mono); font-weight: 700; }
+.graph-panel__expand:hover { border-color: var(--green); color: var(--green-strong); background: var(--green-soft); }
 
-/* --- Граф: zoom/pan, рёбра, mastery, drill-down (roadmap #3) --- */
-.graph-svg-wrap {
-  position: relative; overflow: hidden; border: 1px solid var(--line);
-  border-radius: 12px; background: rgba(238, 241, 234, 0.55);
+/* Canvas wrapper */
+.graph-canvas-wrap {
+  position: relative; overflow: hidden; border-radius: 12px;
+  border: 1px solid rgba(100, 223, 223, 0.12);
   touch-action: none; user-select: none;
+  background: #0d1117;
 }
-.graph-svg { width: 100%; height: auto; display: block; }
+.graph-canvas { display: block; border-radius: 11px; }
 .graph-zoom-hint {
-  position: absolute; right: 6px; bottom: 4px; font-size: 10px;
-  color: var(--ink-soft); opacity: 0.7; pointer-events: none;
+  position: absolute; right: 6px; bottom: 4px; font-size: 9.5px;
+  color: rgba(201, 209, 217, 0.4); pointer-events: none;
+  font-family: var(--font-mono);
 }
-/* --- Граф: Obsidian-стиль (roadmap #3) --- */
-.kg-node { cursor: pointer; transition: opacity 0.15s ease; }
-.kg-node.dim { opacity: 0.16; }
-.kg-node:hover circle { filter: brightness(1.18); }
-.kg-node.active circle { filter: drop-shadow(0 0 6px var(--green)); }
-.kg-hover-label {
-  fill: var(--ink); font-size: 10px; font-weight: 700;
-  font-family: var(--font-mono); pointer-events: none;
-  paint-order: stroke; stroke: var(--paper); stroke-width: 3px; stroke-linejoin: round;
+
+/* Floating (плавающее окно графа) — портал в document.body */
+.graph-float-backdrop {
+  position: fixed; inset: 0; z-index: 300;
+  background: rgba(10, 14, 18, 0.55); backdrop-filter: blur(3px);
+  animation: rise 0.18s ease;
 }
-.kg-edge { transition: opacity 0.15s ease; }
-.kg-edge.dim { opacity: 0.05; }
+.graph-float-sizer {
+  position: fixed; width: min(1200px, 96vw); max-height: 92vh; display: flex;
+}
+.graph-panel--float {
+  flex: 1; max-height: 92vh; overflow-y: auto;
+  border-radius: 18px; box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+  animation: graph-expand-in 0.22s ease;
+}
+.graph-panel--float .graph-panel__header { cursor: grab; user-select: none; }
+.graph-panel--float .graph-panel__header:active { cursor: grabbing; }
+.graph-panel--float .graph-canvas-wrap { flex: 1; }
+.graph-panel-empty {
+  font-size: 13px; color: var(--muted); line-height: 1.5; padding: 4px 2px;
+}
+@keyframes graph-expand-in {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* Tooltip (shared with old graph) */
 .kg-tooltip {
   position: absolute; z-index: 30; pointer-events: none;
-  max-width: 220px; min-width: 140px;
-  background: var(--card); border: 1px solid var(--line); border-radius: 10px;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
-  padding: 8px 10px; font-size: 11px; color: var(--ink);
-}.kg-tooltip-title { font-weight: 700; font-size: 12px; margin-bottom: 4px; }
-.kg-tooltip-meta { display: flex; flex-wrap: wrap; gap: 4px 8px; color: var(--ink-soft); font-size: 10.5px; }
+  max-width: 230px; min-width: 150px;
+  background: #1c2028; border: 1px solid rgba(100, 223, 223, 0.2); border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  padding: 9px 11px; font-size: 11px; color: #c9d1d9;
+  animation: kg-tooltip-in 0.12s ease;
+}
+@keyframes kg-tooltip-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.kg-tooltip-title { font-weight: 700; font-size: 12px; margin-bottom: 4px; color: #e6edf3; }
+.kg-tooltip-meta { display: flex; flex-wrap: wrap; gap: 4px 8px; color: #8b949e; font-size: 10.5px; }
 .kg-tooltip-type {
   display: inline-block; padding: 1px 6px; border-radius: 6px;
-  background: var(--green-soft); color: var(--green-strong); font-weight: 700;
+  background: rgba(100, 223, 223, 0.12); color: #64DFDF; font-weight: 700; font-size: 10px;
 }
 .kg-tooltip-mastery { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
 .kg-tooltip-mastery .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-.kg-tooltip-source { margin-top: 4px; color: var(--ink-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.graph-legend { display: flex; flex-wrap: wrap; gap: 8px 12px; font-size: 11px; color: var(--ink-soft); align-items: center; }
-.graph-legend span { display: inline-flex; align-items: center; gap: 4px; }
-.graph-legend i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
-.graph-legend i.dot-high { background: #2E9E4F; }
-.graph-legend i.dot-mid { background: #F0B429; }
-.graph-legend i.dot-low { background: #E4572E; }
-.graph-wiki {
+.kg-tooltip-source { margin-top: 4px; color: #8b949e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Legend */
+.graph-legend { display: flex; flex-wrap: wrap; gap: 6px 10px; font-size: 10.5px; color: var(--ink-soft); align-items: center; }
+.graph-legend span { display: inline-flex; align-items: center; gap: 3px; }
+.graph-legend i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.graph-legend i.dot-high { background: #4ade80; }
+.graph-legend i.dot-mid { background: #fbbf24; }
+.graph-legend i.dot-low { background: #f87171; }
+
+.active-topic { font-size: 12.5px; color: var(--green-strong); }
+.active-topic strong { color: var(--ink); }
+
+/* Topic search */
+.topic-search {
+  padding: 8px 11px; border-radius: 9px; border: 1.5px solid var(--line);
+  background: var(--card); color: var(--ink); font-family: var(--font-body); font-size: 13px; outline: none;
+  width: 100%;
+}
+.topic-search:focus { border-color: var(--green); box-shadow: 0 0 0 3px var(--green-soft); }
+
+/* Topic chips */
+.topic-chips { display: flex; flex-direction: column; gap: 5px; max-height: 200px; overflow-y: auto; }
+.topic-chip {
+  display: flex; align-items: center; gap: 8px;
+  text-align: left; padding: 7px 11px; border-radius: 9px; cursor: pointer;
+  background: var(--card); border: 1.5px solid var(--line);
+  color: var(--ink); font-family: var(--font-body); font-size: 12.5px; font-weight: 600;
+  border-left: 4px solid var(--chip-color, var(--green));
+  transition: all 0.12s ease;
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis; max-width: 100%;
+}
+.topic-chip:hover:not(:disabled) { background: color-mix(in srgb, var(--chip-color, var(--green)) 12%, var(--card)); transform: translateX(3px); }
+.topic-chip.active { border-color: var(--chip-color, var(--green)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--chip-color, var(--green)) 30%, transparent); }
+.topic-chip:disabled { opacity: 0.5; cursor: default; }
+.chip-mastery {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+}
+.chip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topic-group { display: flex; flex-direction: column; gap: 5px; margin-top: 2px; }
+.topic-group-header {
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  width: 100%; text-align: left; cursor: pointer;
+  font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--muted); font-family: var(--font-mono); padding: 3px 2px 1px;
+  background: none; border: none; border-top: 1px dashed var(--line); margin-top: 2px;
+  transition: color 0.12s ease;
+}
+.topic-group-header:hover:not(:disabled) { color: var(--green-strong); }
+.topic-group-header.active { color: var(--green-strong); }
+.topic-group-header:first-child { border-top: none; margin-top: 0; }
+.topic-group-count {
+  font-size: 10px; color: var(--muted); background: var(--paper); border-radius: 10px;
+  padding: 0 6px; line-height: 15px;
+}
+.graph-wiki-related { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 8px; }
+.graph-wiki-related-title {
+  font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--muted); font-family: var(--font-mono); margin-bottom: 6px;
+}
+.graph-wiki-related-chip {
+  display: inline-flex; margin: 2px 4px 2px 0; padding: 4px 9px; border-radius: 12px;
+  background: var(--green-soft); border: 1px solid var(--green); color: var(--green-strong);
+  font-family: var(--font-body); font-size: 11.5px; cursor: pointer; transition: all 0.12s ease;
+}
+.graph-wiki-related-chip:hover { transform: translateX(2px); box-shadow: var(--shadow); }
+.graph-wiki-concepts { margin-top: 8px; }
+.graph-wiki-concepts-title {
+  font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--muted); font-family: var(--font-mono); margin-bottom: 5px;
+}
+.graph-wiki-concept {
+  display: inline-block; margin: 2px 4px 2px 0; padding: 3px 9px; border-radius: 12px;
+  background: var(--amber-soft); border: 1px solid var(--amber); color: #6b4a12;
+  font-size: 11.5px; font-family: var(--font-mono);
+}
+
+/* Wiki drill-down card (from graph click) */
+.graph-wiki-card {
   position: relative; border: 1px solid var(--green); border-radius: 10px;
-  background: var(--paper); padding: 10px 12px; margin-top: 6px; font-size: 12px;
+  background: var(--paper); padding: 10px 12px; font-size: 12px;
 }
 .graph-wiki-close {
   position: absolute; right: 6px; top: 4px; border: none; background: none;
   cursor: pointer; color: var(--ink-soft); font-size: 13px; line-height: 1;
 }
-.graph-wiki-title { font-weight: 700; color: var(--ink); margin-bottom: 4px; font-size: 13px; }
-.wiki-mastery-line { font-size: 12px; margin-bottom: 4px; }
-.wiki-mastery-line.high { color: #2E9E4F; }
-.wiki-mastery-line.mid { color: #b8860b; }
-.wiki-mastery-line.low { color: #E4572E; }
+.graph-wiki-close:hover { color: var(--err); }
+.graph-wiki-title { font-weight: 700; color: var(--ink); margin-bottom: 6px; font-size: 13px; }
+.graph-wiki-study {
+  width: 100%; margin-bottom: 10px; padding: 8px 12px;
+  background: var(--green-soft); border: 1px solid var(--green); color: var(--green-strong);
+  border-radius: 9px; font-family: var(--font-body); font-size: 12.5px; font-weight: 600;
+  cursor: pointer; transition: all 0.12s ease;
+}
+.graph-wiki-study:hover:not(:disabled) { background: var(--green); color: #fff; }
+.graph-wiki-study:disabled { opacity: 0.6; cursor: default; }
+.wiki-mastery-line { font-size: 12px; margin-bottom: 6px; display: flex; flex-direction: column; gap: 4px; }
+.wiki-mastery-line span { font-size: 11px; }
+.wiki-mastery-line.high span { color: #2E9E4F; }
+.wiki-mastery-line.mid span { color: #b8860b; }
+.wiki-mastery-line.low span { color: #E4572E; }
+.wiki-mastery-bar-bg {
+  height: 5px; background: var(--paper-deep); border-radius: 3px; overflow: hidden;
+}
+.wiki-mastery-bar-fill {
+  height: 100%; border-radius: 3px; transition: width 0.5s ease;
+  background: linear-gradient(90deg, var(--green), var(--green-strong));
+}
+.wiki-mastery-line.high .wiki-mastery-bar-fill { background: linear-gradient(90deg, #22c55e, #16a34a); }
+.wiki-mastery-line.mid .wiki-mastery-bar-fill { background: linear-gradient(90deg, #f59e0b, #d97706); }
+.wiki-mastery-line.low .wiki-mastery-bar-fill { background: linear-gradient(90deg, #ef4444, #dc2626); }
 .graph-wiki-notes { display: flex; flex-direction: column; gap: 3px; margin: 6px 0; }
 .graph-wiki-note { font-size: 11px; color: var(--ink-soft); border-left: 3px solid var(--green); padding-left: 6px; }
 .graph-wiki-body { font-size: 12px; color: var(--ink); line-height: 1.5; max-height: 160px; overflow-y: auto; }
 
-.graph-wiki {
-  text-align: left; padding: 8px 11px; border-radius: 9px; cursor: pointer;
-  background: var(--card); border: 1.5px solid var(--line);
-  color: var(--ink); font-family: var(--font-body); font-size: 13px; font-weight: 600;
-  border-left: 4px solid var(--chip-color, var(--green));
-  transition: all 0.12s ease;
-  /* Fix #1: обрезка длинных названий тем */
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  max-width: 100%;
-}
-.topic-chip:hover:not(:disabled) { background: color-mix(in srgb, var(--chip-color, var(--green)) 12%, var(--card)); transform: translateX(3px); }
-.topic-chip.active { border-color: var(--chip-color, var(--green)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--chip-color, var(--green)) 30%, transparent); }
-.topic-chip:disabled { opacity: 0.5; cursor: default; }
+/* ============================================================
+   База знаний — card-based layout (roadmap #2 redesign)
+   ============================================================ */
+.wiki-panel { display: flex; flex-direction: column; gap: 8px; }
 
-/* --- База знаний (roadmap #2) --- */
-.card.wiki { display: flex; flex-direction: column; gap: 8px; }
-.wiki-subject-name {
-  font-size: 12px; font-weight: 700; color: var(--ink-soft);
-  text-transform: uppercase; letter-spacing: 0.4px; margin-top: 4px;
-}
-.wiki-topic {
-  display: flex; align-items: center; gap: 7px; font-size: 13px;
-  padding: 5px 6px; border-radius: 8px; background: var(--paper);
+/* Empty state */
+.wiki-empty { text-align: center; padding: 16px 10px; }
+.wiki-empty__icon { font-size: 28px; margin-bottom: 6px; }
+.wiki-empty__title { font-weight: 700; font-size: 13px; color: var(--ink); margin-bottom: 4px; }
+.wiki-empty__text { font-size: 12px; color: var(--muted); line-height: 1.5; }
+
+/* Stats bar */
+.wiki-stats-bar {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px;
+  padding: 8px 6px; background: var(--paper); border-radius: 10px;
   border: 1px solid var(--line);
 }
-.wiki-topic-name { flex: 1; font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.wiki-topic-meta { font-size: 11px; color: var(--ink-soft); white-space: nowrap; }
-.wiki-mastery { width: 9px; height: 9px; border-radius: 50%; flex: none; }
-.wiki-mastery.high { background: var(--ok); }
-.wiki-mastery.mid { background: #f0b429; }
-.wiki-mastery.low { background: var(--err); }
-.graph-legend { font-size: 11px; color: var(--muted); }
+.wiki-stat { text-align: center; }
+.wiki-stat__value {
+  display: block; font-family: var(--font-mono); font-weight: 700;
+  font-size: 15px; color: var(--green-strong); line-height: 1.2;
+}
+.wiki-stat__label { font-size: 9.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
+
+/* Subject sections */
+.wiki-subjects { display: flex; flex-direction: column; gap: 4px; }
+.wiki-subject { border-radius: 8px; overflow: hidden; }
+.wiki-subject__header {
+  width: 100%; display: flex; align-items: center; gap: 6px;
+  padding: 7px 10px; border: none; background: var(--paper);
+  border-radius: 8px; cursor: pointer; font-family: var(--font-body);
+  font-size: 12px; font-weight: 700; color: var(--ink-soft);
+  text-transform: uppercase; letter-spacing: 0.04em;
+  transition: all 0.15s ease; border: 1px solid var(--line);
+}
+.wiki-subject__header:hover { background: var(--green-soft); border-color: var(--green); }
+.wiki-subject__header.open { background: var(--green-soft); border-color: var(--green); color: var(--green-strong); }
+.wiki-subject__arrow { font-size: 10px; color: var(--muted); width: 12px; }
+.wiki-subject__name { flex: 1; text-align: left; }
+.wiki-subject__count {
+  font-family: var(--font-mono); font-size: 11px; padding: 1px 7px;
+  border-radius: 10px; background: var(--card); color: var(--ink-soft);
+  border: 1px solid var(--line);
+}
+
+/* Articles */
+.wiki-articles { display: flex; flex-direction: column; gap: 3px; padding: 4px 0 2px 0; }
+.wiki-article {
+  border-radius: 8px; background: var(--card); border: 1px solid var(--line);
+  overflow: hidden; transition: all 0.15s ease;
+}
+.wiki-article--open { border-color: var(--green); box-shadow: 0 2px 12px rgba(47, 107, 79, 0.08); }
+.wiki-article__row {
+  width: 100%; display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; border: none; background: none; cursor: pointer;
+  font-family: var(--font-body); font-size: 12.5px; color: var(--ink);
+  transition: background 0.12s;
+}
+.wiki-article__row:hover { background: var(--paper); }
+.wiki-article__dot {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+}
+.wiki-article__dot.high { background: #4ade80; box-shadow: 0 0 4px rgba(74, 222, 128, 0.4); }
+.wiki-article__dot.mid { background: #fbbf24; box-shadow: 0 0 4px rgba(251, 191, 36, 0.4); }
+.wiki-article__dot.low { background: #f87171; box-shadow: 0 0 4px rgba(248, 113, 113, 0.4); }
+.wiki-article__src {
+  font-size: 9.5px; font-weight: 700; font-family: var(--font-mono);
+  color: var(--green-strong); background: var(--green-soft);
+  border: 1px solid var(--green); border-radius: 8px; padding: 0 5px; line-height: 14px;
+  flex-shrink: 0;
+}
+.wiki-article__concepts { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px; }
+.wiki-article__concept {
+  font-size: 11px; font-family: var(--font-mono); padding: 2px 8px;
+  background: var(--amber-soft); border: 1px solid var(--amber); color: #6b4a12; border-radius: 10px;
+}
+
+/* --- Усвоение: отдельный схлапываемый визуал (heat-map) --- */
+.mastery-wall { border-bottom: 1px dashed var(--line); padding-bottom: 8px; margin-bottom: 4px; }
+.mastery-wall__header {
+  display: flex; align-items: center; justify-content: space-between; width: 100%;
+  background: none; border: none; cursor: pointer; padding: 2px 0;
+  font-family: var(--font-mono); color: var(--ink-soft);
+}
+.mastery-wall__title {
+  font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+}
+.mastery-wall__meta { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+.mastery-wall__ratio { font-weight: 700; color: var(--green-strong); }
+.mastery-wall__arrow { color: var(--muted); }
+.mastery-wall__grid { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; max-height: 200px; overflow-y: auto; }
+.mastery-wall__subject {
+  font-size: 10px; font-weight: 700; color: var(--muted); text-transform: uppercase;
+  letter-spacing: 0.05em; margin-bottom: 4px; font-family: var(--font-mono);
+}
+.mastery-wall__cells { display: flex; flex-wrap: wrap; gap: 4px; }
+.mastery-wall__cell {
+  font-size: 11px; padding: 2px 7px; border-radius: 9px; border: 1px solid transparent;
+  cursor: pointer; font-family: var(--font-body); transition: all 0.12s ease;
+}
+.mastery-wall__cell.high { background: var(--green-soft); color: var(--green-strong); border-color: var(--green); }
+.mastery-wall__cell.mid { background: var(--amber-soft); color: #6b4a12; border-color: var(--amber); }
+.mastery-wall__cell.low { background: var(--red-soft); color: var(--err); border-color: var(--err); }
+.mastery-wall__cell:hover { transform: translateY(-1px); box-shadow: var(--shadow); }
+
+/* --- Модальное чтение темы (база знаний) --- */
+.topic-modal-backdrop {
+  position: fixed; inset: 0; z-index: 300; background: rgba(10, 14, 18, 0.55);
+  backdrop-filter: blur(3px); display: flex; align-items: center; justify-content: center; padding: 20px;
+}
+.topic-modal {
+  position: relative; width: min(640px, 92vw); max-height: 84vh; overflow-y: auto;
+  background: var(--card); border: 1px solid var(--line); border-radius: 16px;
+  padding: 22px 24px; box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
+  animation: rise 0.18s ease;
+}
+.topic-modal__close {
+  position: absolute; top: 12px; right: 12px; width: 30px; height: 30px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--card); color: var(--ink-soft);
+  font-size: 14px; cursor: pointer;
+}
+.topic-modal__close:hover { border-color: var(--err); color: var(--err); }
+.topic-modal__meta { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.topic-modal__subject {
+  font-family: var(--font-mono); font-size: 11px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--green-strong);
+}
+.topic-modal__badge {
+  font-family: var(--font-mono); font-size: 10px; padding: 2px 7px; border-radius: 8px;
+  background: var(--paper); border: 1px solid var(--line); color: var(--muted);
+}
+.topic-modal__badge.okf { background: var(--green-soft); border-color: var(--green); color: var(--green-strong); }
+.topic-modal__title {
+  margin: 0 0 12px; font-family: var(--font-display); font-size: 22px; line-height: 1.2;
+  color: var(--ink); padding-right: 30px;
+}
+.topic-modal__mastery { display: flex; flex-direction: column; gap: 5px; margin-bottom: 14px; }
+.topic-modal__stats { font-size: 12px; color: var(--ink-soft); font-family: var(--font-mono); }
+.topic-modal__source {
+  font-size: 12.5px; color: var(--muted); margin-bottom: 12px; line-height: 1.5;
+  word-break: break-all;
+}
+.topic-modal__source-value { color: var(--ink); font-family: var(--font-mono); font-size: 11.5px; }
+.topic-modal__concepts { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 14px; }
+.topic-modal__concept {
+  font-family: var(--font-mono); font-size: 11.5px; padding: 3px 10px; border-radius: 12px;
+  background: var(--amber-soft); border: 1px solid var(--amber); color: #6b4a12;
+}
+.topic-modal__section-label {
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--muted); margin-bottom: 6px;
+}
+.topic-modal__body { margin-bottom: 14px; }
+.topic-modal__body-text {
+  font-size: 14.5px; line-height: 1.65; color: var(--ink); white-space: pre-wrap;
+}
+.topic-modal__notes { border-top: 1px dashed var(--line); padding-top: 10px; }
+.topic-modal__note {
+  font-size: 12.5px; color: var(--ink-soft); padding: 5px 9px; margin-bottom: 5px;
+  background: var(--amber-soft); border-radius: 8px; line-height: 1.5;
+}
+
+/* Legacy заметки (строки) */
+.topic-modal__note--legacy {
+  font-size: 12.5px; color: var(--ink-soft); padding: 5px 9px; margin-bottom: 5px;
+  background: var(--paper); border-radius: 8px; line-height: 1.5;
+  border-left: 3px solid var(--muted);
+}
+.topic-modal__note--legacy .topic-modal__note-text { white-space: pre-wrap; }
+
+/* Структурированные заметки — карточка */
+.topic-modal__note--structured {
+  border: 1px solid var(--line); border-radius: 10px; margin-bottom: 6px;
+  background: var(--card); overflow: hidden; transition: all 0.2s ease;
+}
+.topic-modal__note--structured:hover { box-shadow: var(--shadow); }
+
+/* Типы заметок по цвету границы */
+.topic-modal__note--error { border-left: 4px solid var(--red); }
+.topic-modal__note--clarification { border-left: 4px solid var(--amber); }
+.topic-modal__note--info { border-left: 4px solid var(--green); }
+
+/* Header структурированной заметки — аккордеон */
+.topic-modal__note-header {
+  width: 100%; display: flex; align-items: center; gap: 7px;
+  padding: 8px 10px; border: none; background: none; cursor: pointer;
+  font-family: var(--font-body); font-size: 13px; color: var(--ink);
+  transition: background 0.12s; text-align: left;
+}
+.topic-modal__note-header:hover { background: var(--paper); }
+
+.topic-modal__note-icon { font-size: 13px; flex-shrink: 0; }
+.topic-modal__note-feedback { flex: 1; font-weight: 600; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topic-modal__note-date { font-family: var(--font-mono); font-size: 10px; color: var(--muted); flex-shrink: 0; }
+.topic-modal__note-arrow { font-size: 10px; color: var(--muted); transition: transform 0.2s ease; flex-shrink: 0; }
+.topic-modal__note-arrow.open { transform: rotate(180deg); }
+
+/* Тело раскрытой заметки */
+.topic-modal__note-body {
+  padding: 0 10px 10px; border-top: 1px dashed var(--line);
+  animation: note-body-in 0.2s ease;
+  display: flex; flex-direction: column; gap: 6px;
+}
+@keyframes note-body-in {
+  from { opacity: 0; max-height: 0; }
+  to { opacity: 1; max-height: 500px; }
+}
+
+.topic-modal__note-label {
+  display: block; font-size: 10px; font-weight: 700; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 2px;
+}
+
+.topic-modal__note-question {
+  font-size: 13px; color: var(--ink); padding: 6px 8px;
+  background: var(--paper); border-radius: 6px;
+}
+
+.topic-modal__note-student-answer {
+  font-size: 13px; color: var(--ink-soft); padding: 6px 8px;
+  background: var(--paper-deep); border-radius: 6px; font-style: italic;
+}
+
+.topic-modal__note-correct-answer {
+  font-size: 13px; color: var(--green-strong); padding: 6px 8px;
+  background: var(--green-soft); border-radius: 6px; font-weight: 600;
+}
+
+.topic-modal__note-feedback-text {
+  font-size: 13px; color: var(--ink-soft); padding: 6px 8px;
+  background: var(--paper); border-radius: 6px; line-height: 1.45;
+}
+.topic-modal__note-feedback--error {
+  color: var(--err);
+}
+
+/* ===== Прогресс-блок ===== */
+.topic-modal__progress {
+  margin-bottom: 14px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--paper); overflow: hidden;
+}
+
+/* Header прогресса — аккордеон */
+.topic-modal__progress-header {
+  width: 100%; display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; border: none; background: none; cursor: pointer;
+  font-family: var(--font-body); font-size: 13px; color: var(--ink);
+  transition: background 0.12s; text-align: left;
+}
+.topic-modal__progress-header:hover { background: var(--green-soft); }
+
+.topic-modal__progress-level { font-size: 16px; flex-shrink: 0; }
+.topic-modal__progress-title { flex: 1; font-weight: 600; }
+.topic-modal__progress-arrow { font-size: 10px; color: var(--muted); transition: transform 0.2s ease; }
+.topic-modal__progress-arrow.open { transform: rotate(180deg); }
+
+/* Основной контент прогресса */
+.topic-modal__progress-main { padding: 0 12px 10px; display: flex; flex-direction: column; gap: 8px; }
+
+.topic-modal__progress-bar-wrap { display: flex; align-items: center; gap: 8px; }
+.topic-modal__progress-bar-track {
+  flex: 1; height: 10px; background: var(--paper-deep); border-radius: 5px;
+  overflow: hidden; position: relative;
+}
+.topic-modal__progress-bar-fill {
+  height: 100%; border-radius: 5px; transition: width 0.7s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.topic-modal__progress-bar-fill.high { background: linear-gradient(90deg, #22c55e, #4ade80); }
+.topic-modal__progress-bar-fill.mid { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+.topic-modal__progress-bar-fill.low { background: linear-gradient(90deg, #ef4444, #f87171); }
+
+.topic-modal__progress-pct {
+  font-family: var(--font-mono); font-size: 14px; font-weight: 700; min-width: 42px; text-align: right;
+}
+.topic-modal__progress-pct.high { color: #16a34a; }
+.topic-modal__progress-pct.mid { color: #d97706; }
+.topic-modal__progress-pct.low { color: #dc2626; }
+
+/* Статистика прогресса */
+.topic-modal__progress-stats { display: flex; gap: 16px; flex-wrap: wrap; }
+.topic-modal__progress-stat { font-size: 12.5px; display: flex; gap: 4px; }
+.topic-modal__progress-stat-label { color: var(--muted); }
+.topic-modal__progress-stat-value { font-weight: 700; font-family: var(--font-mono); color: var(--ink); }
+
+/* Раскрытые детали прогресса */
+.topic-modal__progress-details {
+  padding: 0 12px 10px; border-top: 1px dashed var(--line);
+  animation: note-body-in 0.2s ease;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.topic-modal__progress-detail-row {
+  display: flex; justify-content: space-between; font-size: 12px;
+  padding: 3px 0; color: var(--ink-soft);
+}
+.topic-modal__progress-detail-row strong { font-family: var(--font-mono); color: var(--ink); }
+.topic-modal__enrich {
+  width: 100%; padding: 10px 14px; margin-bottom: 14px;
+  background: var(--green-soft); border: 1px solid var(--green); color: var(--green-strong);
+  border-radius: 10px; font-family: var(--font-body); font-size: 13px; font-weight: 600;
+  cursor: pointer; transition: all 0.12s ease;
+}
+.topic-modal__enrich:hover:not(:disabled) { background: var(--green); color: #fff; }
+.topic-modal__enrich:disabled { opacity: 0.6; cursor: default; }
+.topic-modal__enrich-note {
+  font-size: 12.5px; color: #6b4a12; background: var(--amber-soft);
+  border: 1px solid var(--amber); border-radius: 8px; padding: 8px 11px; margin-bottom: 14px;
+  line-height: 1.5;
+}
+.wiki-article__title {
+  flex: 1; text-align: left; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.wiki-article__pct {
+  font-family: var(--font-mono); font-size: 11px; font-weight: 700;
+  color: var(--ink-soft); flex-shrink: 0;
+}
+.wiki-article__bar-bg {
+  height: 3px; margin: 0 10px; background: var(--paper-deep); border-radius: 2px; overflow: hidden;
+}
+.wiki-article__bar-fill {
+  height: 100%; border-radius: 2px; transition: width 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.wiki-article__bar-fill.high { background: linear-gradient(90deg, #22c55e, #4ade80); }
+.wiki-article__bar-fill.mid { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+.wiki-article__bar-fill.low { background: linear-gradient(90deg, #ef4444, #f87171); }
+
+/* Expanded details */
+.wiki-article__details {
+  padding: 8px 10px 10px; border-top: 1px dashed var(--line);
+  animation: wiki-details-in 0.2s ease;
+}
+@keyframes wiki-details-in {
+  from { opacity: 0; max-height: 0; }
+  to { opacity: 1; max-height: 400px; }
+}
+.wiki-detail-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px;
+}
+.wiki-detail { display: flex; flex-direction: column; gap: 1px; padding: 3px 0; }
+.wiki-detail__label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
+.wiki-detail__value { font-size: 12px; font-weight: 600; color: var(--ink); }
+.wiki-detail__value.high { color: #16a34a; }
+.wiki-detail__value.mid { color: #d97706; }
+.wiki-detail__value.low { color: #dc2626; }
+.wiki-detail__mono { font-family: var(--font-mono); font-size: 10.5px; }
+
+/* Notes inside article */
+.wiki-article__notes {
+  margin-top: 6px; padding: 7px 8px; background: var(--paper);
+  border-radius: 6px; border: 1px solid var(--line);
+}
+.wiki-article__notes-title {
+  font-size: 10px; font-weight: 700; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px;
+}
+.wiki-article__note {
+  font-size: 11.5px; color: var(--ink-soft); line-height: 1.4;
+  padding-left: 7px; border-left: 2px solid var(--red); margin-bottom: 3px;
+}
 
 /* --- Источник / загрузка --- */
 .source-status { font-size: 13px; padding: 7px 10px; border-radius: 9px; background: var(--paper); border: 1px solid var(--line); }
@@ -281,7 +715,7 @@ body {
 .msg { display: flex; animation: rise 0.2s ease; }
 @keyframes rise { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 .bubble {
-  max-width: 74%; padding: 11px 16px; border-radius: 14px;
+  max-width: 74%; min-width: 0; padding: 11px 16px; border-radius: 14px;
   font-size: 14.5px; line-height: 1.55;
   box-shadow: var(--shadow);
 }
@@ -344,6 +778,57 @@ body {
 .lesson-topic { font-size: 12.5px; font-weight: 700; color: var(--green-strong); font-family: var(--font-display); }
 .lesson p { margin: 0; line-height: 1.6; }
 
+/* Структурированный урок (LessonSchema): карточки вместо стены текста */
+.lesson-hook {
+  font-style: italic; color: var(--ink-soft);
+  padding: 9px 12px; background: var(--amber-soft);
+  border-left: 3px solid var(--amber); border-radius: 8px;
+}
+.lesson-definition {
+  padding: 9px 12px; background: var(--green-soft);
+  border-left: 3px solid var(--green); border-radius: 8px;
+  font-weight: 600; line-height: 1.55;
+}
+.lesson-terms {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 9px 12px; background: var(--card);
+  border: 1px solid var(--line); border-radius: 10px;
+}
+.lesson-terms-label { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.lesson-term { font-size: 13.5px; line-height: 1.5; }
+.lesson-term strong { color: var(--green-strong); }
+.lesson-section {
+  padding: 11px 13px; background: var(--card);
+  border: 1px solid var(--line); border-radius: 12px;
+  display: flex; flex-direction: column; gap: 7px;
+}
+.lesson-section-heading { margin: 0; font-size: 14px; font-weight: 700; color: var(--green-strong); font-family: var(--font-display); }
+.lesson-section-body { line-height: 1.6; }
+.lesson-citation { font-size: 11.5px; color: var(--muted); font-family: var(--font-mono); }
+.lesson-check {
+  font-size: 13px; line-height: 1.5;
+  padding: 8px 11px; background: var(--amber-soft);
+  border-radius: 8px; color: #6b4a12;
+}
+.lesson-summary {
+  font-weight: 600; line-height: 1.6;
+  padding: 9px 12px; background: var(--green-soft);
+  border-radius: 10px; border-left: 3px solid var(--green);
+}
+.lesson-diagram {
+  display: block; width: 100%; max-width: 100%; min-width: 0; height: auto;
+  border: 1px solid var(--line); border-radius: 12px;
+  background: var(--card); box-shadow: var(--shadow);
+}
+.lesson-eval {
+  display: flex; flex-wrap: wrap; gap: 4px 10px;
+  font-size: 11.5px; padding: 7px 11px;
+  border-radius: 8px; font-family: var(--font-mono);
+}
+.lesson-eval.ok { background: var(--green-soft); color: var(--green-strong); }
+.lesson-eval.warn { background: var(--amber-soft); color: #6b4a12; }
+.lesson-eval-crit { opacity: 0.85; }
+
 /* --- Объяснение --- */
 .explanation-text { white-space: pre-line; }
 .citation {
@@ -380,6 +865,20 @@ body {
 .empty-chat .mark {
   width: 44px; height: 44px; margin: 0 auto 12px; border-radius: 12px;
   background: linear-gradient(135deg, var(--green) 0 50%, var(--red) 50% 100%);
+  display: flex; align-items: center; justify-content: center;
+  animation: mark-breathe 1.6s ease-in-out infinite;
+}
+.empty-chat .mark span {
+  width: 12px; height: 12px; border-radius: 50%; background: #fff;
+  animation: mark-pulse 1.6s ease-in-out infinite;
+}
+@keyframes mark-breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.08); }
+}
+@keyframes mark-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
 }
 .empty-chat h2 {
   font-family: var(--font-display); font-weight: 600; font-size: 18px; color: var(--ink); margin: 0 0 8px;
@@ -557,174 +1056,7 @@ body {
 }
 
 /* ============================================================
-   KnowledgeWikiPanel — круговая диаграмма тем (donut chart)
-   ============================================================ */
-
-.wiki-chart-wrapper {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.wiki-chart-svg {
-  width: 100%;
-  height: auto;
-  border-radius: 12px;
-  background: rgba(238, 241, 234, 0.3);
-  touch-action: manipulation;
-}
-
-/* Сектор диаграммы */
-.wiki-slice-path {
-  transition: opacity 0.2s ease, filter 0.2s ease;
-}
-.wiki-slice:hover .wiki-slice-path {
-  opacity: 0.95;
-  filter: brightness(1.2) drop-shadow(0 2px 6px rgba(0, 0, 0, 0.2));
-}
-
-/* Пустое состояние */
-.wiki-empty-hint {
-  font-size: 12px;
-  color: var(--muted);
-  text-align: center;
-  padding: 20px 10px;
-  line-height: 1.5;
-  border-top: 1px dashed var(--line);
-  margin-top: 8px;
-}
-
-/* ============================================
-   Wiki Tooltip / Detail Panel
-   ============================================ */
-.wiki-tooltip {
-  background: var(--card);
-  border: 1.5px solid var(--line);
-  border-left: 4px solid var(--green);
-  border-radius: 10px;
-  padding: 12px 14px;
-  box-shadow: var(--shadow);
-  animation: tooltip-fade-in 0.2s ease;
-}
-
-@keyframes tooltip-fade-in {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-.wiki-tooltip-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 10px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--line);
-}
-
-.wiki-tooltip-title {
-  font-weight: 700;
-  font-size: 13.5px;
-  color: var(--ink);
-  flex: 1;
-}
-
-.wiki-tooltip-badge {
-  font-size: 10px;
-  font-weight: 700;
-  padding: 2px 8px;
-  border-radius: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  font-family: var(--font-mono);
-}
-
-.wiki-tooltip-badge.high {
-  background: var(--green-soft);
-  color: var(--green-strong);
-}
-
-.wiki-tooltip-badge.mid {
-  background: var(--amber-soft);
-  color: #b87a1e;
-}
-
-.wiki-tooltip-badge.low {
-  background: var(--red-soft);
-  color: var(--err);
-}
-
-.wiki-tooltip-details {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.wiki-tooltip-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12.5px;
-}
-
-.wiki-tooltip-label {
-  color: var(--muted);
-  min-width: 130px;
-  font-size: 11.5px;
-}
-
-.wiki-tooltip-value {
-  color: var(--ink);
-  font-weight: 600;
-  font-size: 12.5px;
-}
-
-.wiki-tooltip-code {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  background: var(--paper);
-  padding: 1px 6px;
-  border-radius: 4px;
-}
-
-/* Полоска мастерства */
-.wiki-tooltip-meter {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 140px;
-}
-
-.wiki-tooltip-meter-fill {
-  height: 6px;
-  border-radius: 3px;
-  background: linear-gradient(90deg, var(--green), var(--green-strong));
-  transition: width 0.4s ease;
-}
-
-/* Заметки в тултипе */
-.wiki-tooltip-notes {
-  margin-top: 4px;
-  padding: 8px;
-  background: var(--paper);
-  border-radius: 8px;
-  border: 1px solid var(--line);
-  font-size: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.wiki-tooltip-note {
-  color: var(--ink-soft);
-  line-height: 1.4;
-  padding-left: 8px;
-  border-left: 2px solid var(--red-soft);
-}
-
-/* ============================================================
-   Оптимизация стриминга: контекстный прогресс (implementation_plan)
+   Оптимизация стриминга: контекстный прогресс
    ============================================================ */
 
 /* --- Прогресс в чате вместо трёх точек при подготовке темы/урока --- */
@@ -750,37 +1082,24 @@ body {
   100% { transform: translateX(360%); }
 }
 
-/* --- Граф: пульсация активного узла --- */
-.kg-pulse {
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: kg-pulse 1.8s ease-in-out infinite;
-}
-@keyframes kg-pulse {
-  0%, 100% { transform: scale(1); opacity: 0.95; }
-  50% { transform: scale(1.32); opacity: 0.7; }
-}
-
-/* --- Граф: overlay загрузки при подготовке темы --- */
-/* Стек: .graph-svg-wrap (0) < .graph-loading-overlay (5) < .kg-tooltip (30).
-   overlay не перехватывает клики (pointer-events: none), тултип всегда сверху. */
+/* --- Граф: overlay загрузки при подготовке темы (dark canvas) --- */
 .graph-loading-overlay {
   position: absolute; inset: 0; z-index: 5; pointer-events: none;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 9px;
-  background: rgba(238, 241, 234, 0.7);
-  backdrop-filter: blur(2px);
+  background: rgba(13, 17, 23, 0.75);
+  backdrop-filter: blur(3px);
   border-radius: 12px;
 }
 .graph-spinner {
-  width: 26px; height: 26px; border: 3px solid var(--line);
-  border-top-color: var(--green); border-radius: 50%;
+  width: 26px; height: 26px; border: 3px solid rgba(100, 223, 223, 0.15);
+  border-top-color: #64DFDF; border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
 .graph-loading-text {
-  font-size: 12px; font-weight: 600; color: var(--green-strong);
+  font-size: 12px; font-weight: 600; color: #64DFDF;
 }
 @media (prefers-reduced-motion: reduce) {
-  .kg-pulse, .progress-bar-indeterminate, .graph-spinner { animation: none !important; }
+  .progress-bar-indeterminate, .graph-spinner { animation: none !important; }
 }
 

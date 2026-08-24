@@ -23,7 +23,7 @@ export default function ChatStream({ feed, busy = false, progressPhase = null })
           {m.kind === 'quiz' && <div className="bubble agent quiz">🎯 {m.text}</div>}
           {m.kind === 'lesson' && (
             <div className="bubble agent">
-              <LessonPanel text={m.text} topic={m.data?.topic} />
+              <LessonPanel text={m.text} topic={m.data?.topic} lesson={m.data?.lesson} />
             </div>
           )}
           {m.kind === 'stream' && (
@@ -64,10 +64,10 @@ export default function ChatStream({ feed, busy = false, progressPhase = null })
       )}
       {feed.length === 0 && !busy && (
         <div className="empty-chat">
-          <div className="mark" aria-hidden="true" />
-          <h2>Сессия создаётся…</h2>
+          <div className="mark" aria-hidden="true"><span /></div>
+          <h2>Готовим занятие…</h2>
           <p>
-            Ответьте на вопросы тьютора внизу или загрузите учебник — и начнём урок.
+            Тьютор готовит первый вопрос. Можно загрузить учебник или подождать секунду.
           </p>
         </div>
       )}

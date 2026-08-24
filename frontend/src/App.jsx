@@ -3,7 +3,6 @@ import { api, wsUrl } from './api'
 import ChatStream from './components/ChatStream'
 import IntakeWizard from './components/IntakeWizard'
 import QuizCard from './components/QuizCard'
-import ProgressDashboard from './components/ProgressDashboard'
 import SourceSearchPanel from './components/SourceSearchPanel'
 import FileUpload from './components/FileUpload'
 import KnowledgeGraphPanel from './components/KnowledgeGraphPanel'
@@ -122,6 +121,22 @@ export default function App() {
     streamRef.current = null
   }, [])
 
+  // Финализация стрима: превращаем «живой» пузырь токенов в финальный вид (kind/text).
+  // Иначе остаётся мигающая каретка + дубль-пузырь не проходит по dedupe (тот же текст).
+  const finalizeStream = useCallback((kind, text, data) => {
+    setFeed((f) => {
+      const id = streamRef.current
+      streamRef.current = null
+      if (id) {
+        return f.map((m) => (m.id === id ? { ...m, kind, text, data } : m))
+      }
+      const normalized = String(text || '').trim().toLowerCase()
+      const alreadyExists = f.some((m) => (m.text || '').trim().toLowerCase() === normalized)
+      if (alreadyExists) return f
+      return [...f, { id: `${Date.now()}-${Math.random()}`, kind, text, data }]
+    })
+  }, [])
+
   // Busy-таймаут (оптимизация #5): 120 сек вместо 240. Каждый WS-событие heartbeat
   // (system.heartbeat) продлевает таймаут, поэтому долгая генерация не «отваливается».
   const ANSWER_TIMEOUT = 120000
@@ -172,7 +187,8 @@ export default function App() {
         if (evt.event === 'system') {
           const finalSystemKinds = [
             'topic.all', 'topic.selected', 'lesson.done', 'lesson.repeat',
-            'lesson.ready', 'agent.message', 'doc.scanned'
+            'lesson.ready', 'agent.message', 'doc.scanned', 'content.empty',
+            'lesson.judge'
           ]
           if (finalSystemKinds.includes(d.kind)) {
             setChatBusy(false)
@@ -200,12 +216,11 @@ export default function App() {
           pushToken(d.text)
           break
         case 'intake.question':
-          endStream()
+          finalizeStream('intake', d.question)
           setCurrent({ kind: 'intake', question: d.question, missingFields: d.missing_fields })
-          push('intake', d.question)
           break
         case 'quiz.card':
-          endStream()
+          finalizeStream('quiz', d.question)
           setCurrent({
             kind: 'quiz',
             question: d.question,
@@ -215,27 +230,23 @@ export default function App() {
             difficulty: d.difficulty,
             questionId: d.question_id,
           })
-          push('quiz', d.question)
           break
         case 'tutor.explanation':
-          endStream()
+          finalizeStream('explanation', d.message, d)
           setCurrent(null)
           // Логирование для отладки LaTeX
           console.log('tutor.explanation message:', JSON.stringify(d.message?.substring(0, 200)))
-          push('explanation', d.message, d)
           break
         case 'tutor.lesson':
-          endStream()
-          push('lesson', d.text, { topic: d.topic })
+          finalizeStream('lesson', d.text, { topic: d.topic, lesson: d.lesson })
           break
         case 'tutor.summary':
-          endStream()
+          finalizeStream('summary', `Квиз завершён: правильных ${d.correct}/${d.total}`)
           setCurrent(null)
           setKnowledge(d.knowledge_map || {})
           setScore({ correct: d.correct || 0, total: d.total || 0 })
           setQuizCount(d.total || 0)
           setQuestionNum(d.total || 0)
-          push('summary', `Квиз завершён: правильных ${d.correct}/${d.total}`)
           break
         case 'source.progress':
           endStream()
@@ -281,10 +292,15 @@ export default function App() {
           break
         case 'wiki.updated':
           setWikiReloadKey((k) => k + 1)
+          refreshGraph()  // мастерство узлов графа обновляется после квиза (а не только на graph.ready)
           break
         case 'system':
           endStream()
-          setCurrent(null)
+          // Информационные события (фоновый судья, RAG-гейт, агент-сообщения)
+          // НЕ должны сносить активный UI (карточка квиза / чек-лист).
+          if (!['lesson.judge', 'content.empty', 'agent.message'].includes(d.kind)) {
+            setCurrent(null)
+          }
           push('system', d.message)
           break
         case 'intake.completed':
@@ -299,7 +315,7 @@ export default function App() {
           break
       }
     },
-    [push, refreshGraph, pushToken, endStream, resetBusyAfterTimeout],
+    [push, refreshGraph, pushToken, finalizeStream, endStream, resetBusyAfterTimeout],
   )
 
   useEffect(() => {
@@ -417,7 +433,19 @@ export default function App() {
       if (d.lesson_text && !hasFrontendActiveQuestion) {
         const alreadyShown = feed.some((m) => m.kind === 'lesson' && m.text === d.lesson_text)
         if (!alreadyShown) {
-          push('lesson', d.lesson_text, { topic: d.active_topic || d.topic || '' })
+          push('lesson', d.lesson_text, {
+            topic: d.active_topic || d.topic || '',
+            lesson: {
+              title: d.lesson_title,
+              hook: d.lesson_hook,
+              definition: d.lesson_definition,
+              key_terms: d.lesson_key_terms || [],
+              diagram: d.lesson_diagram || null,
+              sections: d.lesson_sections || [],
+              summary: d.lesson_summary,
+              eval: d.lesson_eval || null,
+            },
+          })
         }
       }
       
@@ -647,16 +675,16 @@ export default function App() {
           </div>
         </div>
         {sessionId && <div className="session-id">сессия: {sessionId}</div>}
-        <ProgressDashboard knowledge={knowledge} correct={score.correct} total={score.total} />
-        <SourceSearchPanel status={source.status} note={source.note} sources={source.sources} author={source.author} onFind={handleFind} busy={uploadBusy} />
+        <KnowledgeWikiPanel key={wikiReloadKey} />
         <KnowledgeGraphPanel
           nodes={graph.nodes}
           edges={graph.edges}
           activeTopic={graph.activeTopic}
           onSelect={handleSelectTopic}
           busy={chatBusy}
+          sessionId={sessionId}
         />
-        <KnowledgeWikiPanel key={wikiReloadKey} />
+        <SourceSearchPanel status={source.status} note={source.note} sources={source.sources} author={source.author} onFind={handleFind} busy={uploadBusy} />
         <FileUpload onUpload={handleUpload} busy={uploadBusy} />
       </aside>
       <main className="chat">

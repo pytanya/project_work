@@ -1,5 +1,6 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { fireEvent } from '@testing-library/dom'
 import KnowledgeGraphPanel from '../KnowledgeGraphPanel'
 
 const nodes = [
@@ -8,24 +9,59 @@ const nodes = [
   { id: 'sec:x:2', title: 'Урок 2: Культура и религия', type: 'section', color: '#B388FF' },
 ]
 
+function makeMockCtx() {
+  const gradient = { addColorStop: () => {} }
+  return new Proxy({}, {
+    get(target, prop) {
+      if (prop === 'createLinearGradient' || prop === 'createRadialGradient') return () => gradient
+      if (prop === 'measureText') return () => ({ width: 0 })
+      return () => {}
+    },
+    set() { return true },
+  })
+}
+
+const RECT = { left: 0, top: 0, width: 600, height: 260, right: 600, bottom: 260, x: 0, y: 0, toJSON: () => {} }
+
+beforeEach(() => {
+  // jsdom не реализует canvas 2D-контекст — заглушка, чтобы анимационный цикл не падал
+  HTMLCanvasElement.prototype.getContext = () => makeMockCtx()
+  // симуляция раскладывается по размерам канваса
+  Object.defineProperty(HTMLElement.prototype, 'offsetWidth', { configurable: true, get: () => 600 })
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  delete HTMLElement.prototype.offsetWidth
+})
+
 describe('KnowledgeGraphPanel', () => {
-  it('не рендерится без узлов', () => {
-    const { container } = render(<KnowledgeGraphPanel nodes={[]} onSelect={() => {}} />)
-    expect(container.querySelector('.card.graph')).not.toBeInTheDocument()
+  it('без узлов показывает дружелюбное пустое состояние', () => {
+    render(<KnowledgeGraphPanel nodes={[]} onSelect={() => {}} />)
+    expect(screen.getByText(/Загрузите учебник или найдите источник/)).toBeInTheDocument()
   })
 
-  it('показывает темы (без корневого учебника)', () => {
-    render(<KnowledgeGraphPanel nodes={nodes} onSelect={() => {}} />)
+  it('показывает темы (без корневого учебника) и канвас-граф', () => {
+    const { container } = render(<KnowledgeGraphPanel nodes={nodes} onSelect={() => {}} />)
     expect(screen.getByRole('button', { name: 'Урок 1: Россия — наша Родина' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Урок 2: Культура и религия' })).toBeInTheDocument()
-    expect(screen.getByRole('img', { name: /Граф тем учебника/ })).toBeInTheDocument()
+    expect(container.querySelector('canvas.graph-canvas')).toBeInTheDocument()
   })
 
-  it('вызывает onSelect по клику', async () => {
+  it('клик по узлу открывает карточку; изучение — по кнопке «Изучить тему»', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ node: nodes[2], wiki: null, related: [] }),
+    })
     const user = userEvent.setup()
     const onSelect = vi.fn()
     render(<KnowledgeGraphPanel nodes={nodes} onSelect={onSelect} />)
+    // клик по чипу НЕ запускает изучение (осознанный шаг), а открывает карточку
     await user.click(screen.getByRole('button', { name: 'Урок 2: Культура и религия' }))
+    expect(onSelect).not.toHaveBeenCalled()
+    // в карточке — кнопка «Изучить тему»
+    const study = await screen.findByRole('button', { name: /Изучить тему/ })
+    await user.click(study)
     expect(onSelect).toHaveBeenCalledWith(nodes[2])
   })
 
@@ -37,14 +73,14 @@ describe('KnowledgeGraphPanel', () => {
   it('фильтрует темы по поиску', async () => {
     const user = userEvent.setup()
     render(<KnowledgeGraphPanel nodes={nodes} onSelect={() => {}} />)
-    await user.type(screen.getByPlaceholderText('Найти тему…'), 'Культура')
+    await user.type(screen.getByPlaceholderText(/Найти тему/), 'Культура')
     expect(screen.getByRole('button', { name: 'Урок 2: Культура и религия' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Урок 1: Россия — наша Родина' })).not.toBeInTheDocument()
   })
 
   it('показывает счётчик тем', () => {
     render(<KnowledgeGraphPanel nodes={nodes} onSelect={() => {}} />)
-    expect(screen.getByText(/Темы учебника · 2/)).toBeInTheDocument()
+    expect(screen.getByText(/Граф знаний · 2/)).toBeInTheDocument()
   })
 
   it('отображает mastery-метку в подсказке узла (roadmap #3)', () => {
@@ -70,19 +106,69 @@ describe('KnowledgeGraphPanel', () => {
       ok: true,
       json: async () => ({
         node: nodes[2],
-        wiki: { title: 'Урок 2', topic: 'Культура', mastery: 0.6, attempts: 3, accuracy: 0.33, notes: ['ошибка'], body: 'Тело статьи' },
+        wiki: { title: 'Урок 2', topic: 'Культура', mastery: 0.6, attempts: 3, accuracy: 0.33, notes: ['ошибка'], concepts: ['артефакт', 'ритуал'], body: 'Тело статьи' },
       }),
     })
     const user = userEvent.setup()
     render(<KnowledgeGraphPanel nodes={nodes} onSelect={() => {}} />)
     await user.click(screen.getByRole('button', { name: 'Урок 2: Культура и религия' }))
-    const panel = await screen.findByText(/Мастерство: 60%/)
+    const panel = await screen.findByText(/60% · попыток: 3/)
     expect(panel).toBeInTheDocument()
     expect(screen.getByText(/Тело статьи/)).toBeInTheDocument()
+    // Ключевые понятия темы (roadmap #3)
+    expect(screen.getByText(/Ключевые понятия/)).toBeInTheDocument()
+    expect(screen.getByText('артефакт')).toBeInTheDocument()
+    expect(screen.getByText('ритуал')).toBeInTheDocument()
   })
 
-  it('показывает тултип с данными при наведении на узел (Obsidian-стиль)', async () => {
+  it('группирует подтемы под родителем (не книгой)', () => {
+    const nodesWithParent = [
+      ...nodes,
+      { id: 'page:web:0', title: 'ru.wikipedia.org', type: 'topic', color: '#69F0AE', parent_id: 'book:x' },
+      { id: 'sec:web:0', title: 'Жизнь и биография', type: 'topic', color: '#69F0AE', parent_id: 'page:web:0' },
+      { id: 'sec:web:1', title: 'Критика чистого разума', type: 'topic', color: '#69F0AE', parent_id: 'page:web:0' },
+    ]
+    render(<KnowledgeGraphPanel nodes={nodesWithParent} onSelect={() => {}} />)
+    // родитель — заголовок группы (кнопка), подтемы — чипы внутри группы; родитель не дублируется чипом
+    expect(screen.getByRole('button', { name: /ru.wikipedia.org/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Жизнь и биография' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Критика чистого разума' })).toBeInTheDocument()
+  })
+
+  it('drill-down показывает связанные темы (roadmap #3)', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        node: nodes[2],
+        related: [
+          { source: 'sec:x:2', target: 'sec:x:1', relation: 'related',
+            target_title: 'Урок 1: Россия — наша Родина', target_type: 'section' },
+        ],
+      }),
+    })
     const user = userEvent.setup()
+    render(<KnowledgeGraphPanel nodes={nodes} onSelect={() => {}} />)
+    await user.click(screen.getByRole('button', { name: 'Урок 2: Культура и религия' }))
+    const relatedBox = await screen.findByText(/Связанные темы/)
+    expect(relatedBox).toBeInTheDocument()
+    expect(within(relatedBox.closest('.graph-wiki-related')).getByRole('button', { name: 'Урок 1: Россия — наша Родина' })).toBeInTheDocument()
+  })
+
+  it('открывает граф в плавающем окне (портал) и закрывает по фону', async () => {
+    global.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ node: null, wiki: null, related: [] }) })
+    const user = userEvent.setup()
+    render(<KnowledgeGraphPanel nodes={nodes} onSelect={() => {}} />)
+    // открыть в окне (кнопка ⛶)
+    await user.click(screen.getByRole('button', { name: '⛶' }))
+    const backdrop = document.querySelector('.graph-float-backdrop')
+    expect(backdrop).toBeInTheDocument()  // портал в document.body
+    expect(backdrop.querySelector('.graph-panel--float')).toBeInTheDocument()
+    // закрыть по клику на фон
+    await user.click(backdrop)
+    expect(document.querySelector('.graph-float-backdrop')).not.toBeInTheDocument()
+  })
+
+  it('показывает тултип с данными при наведении на узел (Obsidian-стиль)', () => {
     const { container } = render(
       <KnowledgeGraphPanel
         nodes={nodes}
@@ -90,15 +176,16 @@ describe('KnowledgeGraphPanel', () => {
         onSelect={() => {}}
       />,
     )
-    const topicNode = container.querySelector('.kg-node:not(.kg-book)')
-    await user.hover(topicNode)
-    const tt = await (() => {
-      const el = container.querySelector('.kg-tooltip')
-      return Promise.resolve(el)
-    })()
+    const wrap = container.querySelector('.graph-canvas-wrap')
+    const canvas = container.querySelector('canvas.graph-canvas')
+    wrap.getBoundingClientRect = () => RECT
+    canvas.getBoundingClientRect = () => RECT
+    // mousemove в центр канваса — там закреплён корневой узел учебника
+    fireEvent.mouseMove(wrap, { clientX: 300, clientY: 130 })
+    const tt = container.querySelector('.kg-tooltip')
     expect(tt).toBeTruthy()
-    expect(tt.textContent).toContain('Урок 1: Россия — наша Родина')
-    expect(tt.textContent).toContain('Раздел')
+    expect(tt.textContent).toContain('Учебник «x»')
+    expect(tt.textContent).toContain('Учебник')
     expect(tt.textContent).toContain('связей: 1')
   })
 })

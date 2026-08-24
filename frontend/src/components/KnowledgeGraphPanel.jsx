@@ -1,183 +1,364 @@
-// KnowledgeGraphPanel — граф знаний в стиле Obsidian (roadmap #3):
-// минимальные узлы-точки, размер по числу связей, подсветка соседей при наведении,
-// данные — в тултипе, zoom/pan/drag, drill-down → wiki, поиск + чипсы тем.
+// KnowledgeGraphPanel — «Созвездие» Canvas graph (roadmap #3 redesign):
+// dark canvas, animated force-directed layout, constellation glow & twinkle,
+// gradient edges, star dust, zoom/pan/drag/pinch, drill-down → wiki, chips.
 import { useMemo, useState, useCallback, useRef, useEffect } from 'react'
+import { createPortal } from 'react-dom'
+import NoteItem from './NoteItem'
 
 const EDGE_COLORS = {
   part_of: '#64DFDF',
   prerequisite: '#FFB703',
   related: '#B388FF',
 }
-const EDGE_LABELS = {
-  part_of: 'входит в',
-  prerequisite: 'опирается на',
-  related: 'связан',
-}
-const VIEW_W = 340
-const VIEW_H = 320
-
 const TYPE_LABELS = {
   book: 'Учебник',
   section: 'Раздел',
   page: 'Источник',
   topic: 'Тема',
+  lesson: 'Урок',
+  concept: 'Понятие',
   default: 'Тема',
 }
+const BG_COLOR = '#0d1117'
+const LABEL_BG = 'rgba(13,17,23,0.88)'
+const LABEL_COLOR = '#c9d1d9'
 
 function masteryColor(mastery) {
   if (mastery === undefined || mastery === null) return null
-  if (mastery >= 0.75) return '#2E9E4F'   // зелёный — высокое
-  if (mastery >= 0.45) return '#F0B429'   // жёлтый — среднее
-  return '#E4572E'                        // красный — низкое
+  if (mastery >= 0.75) return '#4ade80'
+  if (mastery >= 0.45) return '#fbbf24'
+  return '#f87171'
 }
 
-function radialLayout(nodes, edges) {
-  const topics = (nodes || []).filter((n) => n.type !== 'book')
-  const book = (nodes || []).find((n) => n.type === 'book')
-  if (topics.length === 0) return { book: null, topics: [], byId: {} }
-  const cx = VIEW_W / 2
-  const cy = VIEW_H / 2
-  const r = 118
-  const placed = topics.map((n, i) => {
-    const angle = (2 * Math.PI * i) / topics.length - Math.PI / 2
-    return { ...n, x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) }
+/* Simple hash for stable per-node phase offset (twinkle) */
+function hashId(id) {
+  let h = 0
+  const s = String(id)
+  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0
+  return (h & 0x7fffffff) / 0x7fffffff // 0..1
+}
+
+/* ------------------------------------------------------------------ */
+/*  Star dust — fixed background particles (seeded, stable)           */
+/* ------------------------------------------------------------------ */
+function generateStarDust(W, H, count = 60) {
+  const stars = []
+  for (let i = 0; i < count; i++) {
+    stars.push({
+      x: ((i * 127 + 31) * 7919) % W,
+      y: ((i * 311 + 97) * 6271) % H,
+      r: 0.4 + ((i * 37) % 10) * 0.08,
+      alpha: 0.02 + ((i * 53) % 10) * 0.005,
+    })
+  }
+  return stars
+}
+
+/* ------------------------------------------------------------------ */
+/*  Force simulation (runs per-frame via requestAnimationFrame)       */
+/* ------------------------------------------------------------------ */
+function createSim(rawNodes, rawEdges, W, H) {
+  const nodes = rawNodes.map((n, i) => {
+    const ang = (2 * Math.PI * i) / Math.max(1, rawNodes.length)
+    const r = Math.min(W, H) * 0.28
+    return {
+      ...n,
+      x: W / 2 + r * Math.cos(ang) + (Math.random() - 0.5) * 30,
+      y: H / 2 + r * Math.sin(ang) + (Math.random() - 0.5) * 30,
+      vx: 0, vy: 0, pinned: false,
+      _phase: hashId(n.id), // stable twinkle phase
+    }
   })
-  const byId = {}
-  if (book) byId[book.id] = { ...book, x: cx, y: cy }
-  for (const t of placed) byId[t.id] = t
-  return { book: book ? { ...book, x: cx, y: cy } : null, topics: placed, byId }
+  const bookIdx = nodes.findIndex((n) => n.type === 'book')
+  if (bookIdx >= 0) {
+    nodes[bookIdx].x = W / 2
+    nodes[bookIdx].y = H / 2
+    nodes[bookIdx].pinned = true
+  }
+  const map = {}
+  nodes.forEach((n) => { map[n.id] = n })
+  const links = (rawEdges || []).filter((e) => map[e.source] && map[e.target])
+  return { nodes, links, map, alpha: 1.0 }
 }
 
-// Простая force-directed симуляция на чистом JS (~d3-force-lite) для больших графов:
-// разводит перекрывающиеся узлы, сохраняя рёберные связи. Используется при >20 тем.
-function forceLayout(nodes, edges, bookNode) {
-  const W = VIEW_W
-  const H = VIEW_H
-  const pos = {}
-  nodes.forEach((n, i) => {
-    const ang = (2 * Math.PI * i) / Math.max(1, nodes.length)
-    pos[n.id] = { x: W / 2 + 90 * Math.cos(ang), y: H / 2 + 90 * Math.sin(ang) }
-  })
-  if (bookNode) pos[bookNode.id] = { x: W / 2, y: H / 2 }
+function tickSim(sim, W, H) {
+  if (sim.alpha < 0.002) return false
+  const N = sim.nodes.length
+  const k = Math.sqrt((W * H) / Math.max(1, N)) * 0.8
 
-  const link = []
-  for (const e of edges || []) {
-    if (pos[e.source] && pos[e.target]) link.push({ a: e.source, b: e.target })
-  }
-  const k = Math.sqrt((W * H) / Math.max(1, nodes.length))
-
-  // Итерации снижены с 260 до 120 (fix #3): для >20 узлов сходимость
-  // достигается раньше, а синхронный расчёт в useMemo не «замораживает» UI.
-  for (let iter = 0; iter < 120; iter++) {
-    const forces = {}
-    const ids = Object.keys(pos)
-    for (const id of ids) forces[id] = { fx: 0, fy: 0 }
-    // отталкивание
-    for (let i = 0; i < ids.length; i++) {
-      for (let j = i + 1; j < ids.length; j++) {
-        const a = pos[ids[i]]
-        const b = pos[ids[j]]
-        let dx = a.x - b.x
-        let dy = a.y - b.y
-        const dist = Math.sqrt(dx * dx + dy * dy) || 1
-        const f = (k * k) / dist
-        const fx = (dx / dist) * f
-        const fy = (dy / dist) * f
-        forces[ids[i]].fx += fx
-        forces[ids[i]].fy += fy
-        forces[ids[j]].fx -= fx
-        forces[ids[j]].fy -= fy
-      }
-    }
-    // притяжение по рёбрам
-    for (const l of link) {
-      const a = pos[l.a]
-      const b = pos[l.b]
-      let dx = b.x - a.x
-      let dy = b.y - a.y
-      const dist = Math.sqrt(dx * dx + dy * dy) || 1
-      const f = (dist * dist) / k
-      const fx = (dx / dist) * f
-      const fy = (dy / dist) * f
-      forces[l.a].fx += fx
-      forces[l.a].fy += fy
-      forces[l.b].fx -= fx
-      forces[l.b].fy -= fy
-    }
-    for (const id of ids) {
-      const p = pos[id]
-      p.x += forces[id].fx * 0.04 * 0.85
-      p.y += forces[id].fy * 0.04 * 0.85
-      p.x = Math.max(14, Math.min(W - 14, p.x))
-      p.y = Math.max(14, Math.min(H - 14, p.y))
+  // repulsion
+  for (let i = 0; i < N; i++) {
+    for (let j = i + 1; j < N; j++) {
+      const a = sim.nodes[i], b = sim.nodes[j]
+      let dx = a.x - b.x, dy = a.y - b.y
+      const d = Math.sqrt(dx * dx + dy * dy) || 1
+      const f = (k * k) / d * sim.alpha
+      const fx = (dx / d) * f, fy = (dy / d) * f
+      if (!a.pinned) { a.vx += fx; a.vy += fy }
+      if (!b.pinned) { b.vx -= fx; b.vy -= fy }
     }
   }
+  // attraction
+  for (const e of sim.links) {
+    const a = sim.map[e.source], b = sim.map[e.target]
+    if (!a || !b) continue
+    let dx = b.x - a.x, dy = b.y - a.y
+    const d = Math.sqrt(dx * dx + dy * dy) || 1
+    const f = (d * d) / k * sim.alpha * 0.25
+    const fx = (dx / d) * f, fy = (dy / d) * f
+    if (!a.pinned) { a.vx += fx; a.vy += fy }
+    if (!b.pinned) { b.vx -= fx; b.vy -= fy }
+  }
+  // centering
+  const cx = W / 2, cy = H / 2
+  for (const n of sim.nodes) {
+    if (n.pinned) continue
+    n.vx += (cx - n.x) * 0.008 * sim.alpha
+    n.vy += (cy - n.y) * 0.008 * sim.alpha
+    n.vx *= 0.55; n.vy *= 0.55
+    n.x += n.vx; n.y += n.vy
+    n.x = Math.max(24, Math.min(W - 24, n.x))
+    n.y = Math.max(24, Math.min(H - 24, n.y))
+  }
+  sim.alpha = Math.max(0, sim.alpha - 0.004)
+  return true
+}
 
-  const byId = {}
-  for (const n of nodes) byId[n.id] = { ...n, ...pos[n.id] }
-  if (bookNode) byId[bookNode.id] = { ...bookNode, ...pos[bookNode.id] }
-  return {
-    book: bookNode ? byId[bookNode.id] : null,
-    topics: nodes.map((n) => byId[n.id]),
-    byId,
+/* ------------------------------------------------------------------ */
+/*  Canvas drawing — «Созвездие» style                                */
+/* ------------------------------------------------------------------ */
+function drawGraph(ctx, sim, W, H, view, hovId, activeId, degree, nbrs, dpr, starDust) {
+  const now = Date.now()
+  ctx.save()
+  ctx.scale(dpr, dpr)
+
+  // background — deep space
+  ctx.fillStyle = BG_COLOR
+  ctx.fillRect(0, 0, W, H)
+
+  // star dust — tiny fixed particles
+  for (const s of starDust) {
+    const twk = 0.5 + 0.5 * Math.sin(now * 0.0008 + s.x * 0.1)
+    ctx.globalAlpha = s.alpha * twk
+    ctx.fillStyle = '#fff'
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.fill()
+  }
+  ctx.globalAlpha = 1
+
+  // dot grid (subtle)
+  ctx.fillStyle = 'rgba(255,255,255,0.018)'
+  const gs = 24
+  for (let x = ((view.x % gs) + gs) % gs; x < W; x += gs) {
+    for (let y = ((view.y % gs) + gs) % gs; y < H; y += gs) {
+      ctx.fillRect(x, y, 0.8, 0.8)
+    }
+  }
+
+  ctx.save()
+  ctx.translate(view.x, view.y)
+  ctx.scale(view.scale, view.scale)
+
+  const isConn = (id) => hovId && (nbrs[hovId]?.has(id) || id === hovId)
+  const dim = (id) => hovId && !isConn(id)
+
+  // edges — gradient trails
+  for (const e of sim.links) {
+    const s = sim.map[e.source], t = sim.map[e.target]
+    if (!s || !t) continue
+    const color = EDGE_COLORS[e.relation] || '#444'
+    const lit = hovId && isConn(e.source) && isConn(e.target)
+    const dd = dim(e.source) && dim(e.target)
+
+    ctx.beginPath()
+    ctx.moveTo(s.x, s.y); ctx.lineTo(t.x, t.y)
+
+    // gradient edge — fades in the middle for constellation feel
+    if (lit || !dd) {
+      const grad = ctx.createLinearGradient(s.x, s.y, t.x, t.y)
+      const a1 = lit ? 'bb' : '44'
+      const a2 = lit ? '66' : '18'
+      grad.addColorStop(0, color + a1)
+      grad.addColorStop(0.5, color + a2)
+      grad.addColorStop(1, color + a1)
+      ctx.strokeStyle = grad
+    } else {
+      ctx.strokeStyle = color
+    }
+    ctx.globalAlpha = dd ? 0.04 : 1
+    ctx.lineWidth = lit ? 1.8 : 0.7
+    ctx.stroke()
+  }
+  ctx.globalAlpha = 1
+
+  // nodes — constellation glow + twinkle
+  for (const n of sim.nodes) {
+    const r = n.type === 'book' ? 9 : 3.5 + Math.min((degree[n.id] || 0) * 0.8, 5)
+    const mc = masteryColor(n.mastery)
+    const baseColor = mc || n.color || '#69F0AE'
+    const isAct = activeId === n.id
+    const isHov = hovId === n.id
+    const isDimmed = dim(n.id)
+
+    // twinkle: soft pulsation unique per node
+    const twinkle = isDimmed ? 0.12 : (0.72 + 0.28 * Math.sin(now * 0.0018 + n._phase * 6.28))
+
+    ctx.globalAlpha = twinkle
+
+    // outer halo glow (constellation feel) — all nodes get soft glow
+    if (!isDimmed) {
+      const glowR = r * (isHov || isAct ? 4.5 : 2.8)
+      const grad = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, glowR)
+      const glowAlpha = isHov || isAct ? '44' : '1a'
+      grad.addColorStop(0, baseColor + glowAlpha)
+      grad.addColorStop(0.5, baseColor + '0a')
+      grad.addColorStop(1, 'transparent')
+      ctx.beginPath(); ctx.arc(n.x, n.y, glowR, 0, Math.PI * 2)
+      ctx.fillStyle = grad
+      ctx.fill()
+    }
+
+    // focused glow ring (active / hovered)
+    if (isHov || isAct) {
+      ctx.save()
+      ctx.shadowColor = baseColor
+      ctx.shadowBlur = isAct ? 20 : 14
+      ctx.beginPath(); ctx.arc(n.x, n.y, r + 2, 0, Math.PI * 2)
+      ctx.fillStyle = baseColor + '55'
+      ctx.fill()
+      ctx.restore()
+    }
+
+    // core node
+    ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2)
+    ctx.fillStyle = baseColor
+    ctx.fill()
+    if (isAct) {
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.8; ctx.stroke()
+    }
+
+    ctx.globalAlpha = 1
+
+    // label (hover / active)
+    if (isHov || isAct) {
+      const title = String(n.title || '').slice(0, 36)
+      ctx.font = '600 10px "JetBrains Mono","Golos Text",monospace'
+      ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'
+      const tw = ctx.measureText(title).width + 10
+      ctx.fillStyle = LABEL_BG
+      const lx = n.x - tw / 2, ly = n.y - r - 16
+      ctx.beginPath(); ctx.roundRect(lx, ly, tw, 15, 4); ctx.fill()
+      ctx.fillStyle = LABEL_COLOR
+      ctx.fillText(title, n.x, n.y - r - 4)
+    }
+
+    // book emoji
+    if (n.type === 'book') {
+      ctx.font = '11px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+      ctx.fillText('📚', n.x, n.y + 0.5)
+    }
+  }
+
+  ctx.restore()
+  ctx.restore()
+}
+
+/* roundRect polyfill for older browsers */
+if (typeof CanvasRenderingContext2D !== 'undefined' && !CanvasRenderingContext2D.prototype.roundRect) {
+  CanvasRenderingContext2D.prototype.roundRect = function (x, y, w, h, r) {
+    if (typeof r === 'number') r = [r, r, r, r]
+    const [tl, tr, br, bl] = r
+    this.moveTo(x + tl, y)
+    this.lineTo(x + w - tr, y); this.quadraticCurveTo(x + w, y, x + w, y + tr)
+    this.lineTo(x + w, y + h - br); this.quadraticCurveTo(x + w, y + h, x + w - br, y + h)
+    this.lineTo(x + bl, y + h); this.quadraticCurveTo(x, y + h, x, y + h - bl)
+    this.lineTo(x, y + tl); this.quadraticCurveTo(x, y, x + tl, y)
+    this.closePath()
+    return this
   }
 }
 
-// Гибрид: radial для небольших графов (≤20 тем), force-directed для больших —
-// radial складывает всё в круг и становится нечитаемым при 50+ узлах.
-function computeLayout(nodes, edges) {
-  const topics = (nodes || []).filter((n) => n.type !== 'book')
-  const book = (nodes || []).find((n) => n.type === 'book')
-  if (topics.length === 0) return { book: null, topics: [], byId: {} }
-  if (topics.length <= 20) return radialLayout(nodes, edges)
-  return forceLayout(topics, edges, book)
-}
+/* ------------------------------------------------------------------ */
+/*  Component                                                         */
+/* ------------------------------------------------------------------ */
+export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopic = null, onSelect, busy = false, sessionId = null }) {
+  const canvasRef = useRef(null)
+  const wrapRef = useRef(null)
+  const simRef = useRef(null)
+  const animRef = useRef(null)
+  const viewRef = useRef({ x: 0, y: 0, scale: 1 })
+  const dragRef = useRef(null)
+  const hovIdRef = useRef(null)
+  const starDustRef = useRef([])
+  // Refs for draw state — avoid restarting animation loop on selection changes
+  const activeIdRef = useRef(null)
+  const degreeRef = useRef({})
+  const nbrsRef = useRef({})
+  // Touch pinch state
+  const pinchRef = useRef(null)
 
-function shortTitle(title) {
-  return String(title || '').replace(/^Урок\s*(\d+).*/i, '$1').slice(0, 14)
-}
-
-export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopic = null, onSelect, busy = false }) {
   const [query, setQuery] = useState('')
-  const [view, setView] = useState({ x: 0, y: 0, scale: 1 })
+  const [hovered, setHovered] = useState(null)
+  const [tooltip, setTooltip] = useState(null)
   const [selected, setSelected] = useState(null)
   const [wiki, setWiki] = useState(null)
-  const [hovered, setHovered] = useState(null)      // id узла под курсором
-  const [tooltip, setTooltip] = useState(null)      // {node, left, top}
-  const dragRef = useRef(null)
-  const svgRef = useRef(null)
-  const wrapRef = useRef(null)
+  const [related, setRelated] = useState(null)
+  const [expanded, setExpanded] = useState(false)
+  // Плавающее окно: позиция (null = по центру) + перетаскивание за заголовок
+  const [floatPos, setFloatPos] = useState(null)
+  const [dragging, setDragging] = useState(false)
+  const floatRef = useRef(null)
+  const floatDragRef = useRef(null)
+  // Высота окна — для масштабируемого канваса в плавающем режиме
+  const [winH, setWinH] = useState(() => (typeof window !== 'undefined' ? window.innerHeight : 700))
+
+  useEffect(() => {
+    const onR = () => setWinH(window.innerHeight)
+    window.addEventListener('resize', onR)
+    return () => window.removeEventListener('resize', onR)
+  }, [])
 
   const topics = useMemo(() => (nodes || []).filter((n) => n.type !== 'book'), [nodes])
+  const nodeMap = useMemo(() => Object.fromEntries((nodes || []).map((n) => [n.id, n])), [nodes])
   const filtered = useMemo(() => {
     if (!query.trim()) return topics
     const q = query.trim().toLowerCase()
     return topics.filter((n) => String(n.title || '').toLowerCase().includes(q))
   }, [topics, query])
 
-  // Мемоизация layout (оптимизация #4): ключ = отсортированные id узлов + рёбра.
-  // Изменение только атрибутов узлов (mastery и т.п.) не пересчитывает layout,
-  // а hover/zoom/drag не ре-раннят его вовсе.
-  const layoutKey = useMemo(
-    () =>
-      (nodes || []).map((n) => n.id).sort().join('|') +
-      '#' +
-      (edges || []).map((e) => `${e.source}->${e.target}`).sort().join('|'),
-    [nodes, edges],
-  )
-  const layout = useMemo(() => computeLayout(nodes, edges), [layoutKey])
+  // Группировка чипов: темы с parent_id (не «книга») — под заголовком родителя
+  // (напр. подтемы веб-страницы под её доменом). Родитель с детьми становится
+  // только заголовком группы (кликабельным), а не дублирующим чипом. При поиске — плоский список.
+  const grouped = useMemo(() => {
+    const childOf = new Set()
+    for (const n of topics) {
+      const pid = n.parent_id
+      const parent = pid ? nodeMap[pid] : null
+      if (parent && parent.type !== 'book') childOf.add(pid)
+    }
+    const top = []
+    const byParent = {}
+    for (const n of filtered) {
+      const pid = n.parent_id
+      const parent = pid ? nodeMap[pid] : null
+      if (parent && parent.type !== 'book') {
+        ;(byParent[pid] ||= []).push(n)
+      } else if (!childOf.has(n.id)) {
+        top.push(n)
+      }
+    }
+    return { top, byParent }
+  }, [filtered, topics, nodeMap])
 
-  // Степень узла (число связей) — размер точки в графе (как в Obsidian)
   const degree = useMemo(() => {
     const m = {}
     for (const e of edges || []) {
       m[e.source] = (m[e.source] || 0) + 1
       m[e.target] = (m[e.target] || 0) + 1
     }
+    degreeRef.current = m
     return m
   }, [edges])
 
-  // Соседи по рёбрам — для подсветки при наведении
   const neighbors = useMemo(() => {
     const m = {}
     for (const e of edges || []) {
@@ -186,186 +367,287 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
       m[e.source].add(e.target)
       m[e.target].add(e.source)
     }
+    nbrsRef.current = m
     return m
   }, [edges])
 
-  const nodeR = useCallback((id) => 5 + Math.min(degree[id] || 0, 7), [degree])
+  // Keep activeId ref in sync without restarting animation
+  useEffect(() => { activeIdRef.current = activeTopic || selected?.id || null }, [activeTopic, selected])
+
+  /* canvas sizing — в плавающем окне масштабируется под высоту окна */
+  const canvasH = expanded ? Math.max(420, Math.round(winH * 0.68)) : 260
+
+  useEffect(() => {
+    const c = canvasRef.current, w = wrapRef.current
+    if (!c || !w) return
+    const resize = () => {
+      const dpr = window.devicePixelRatio || 1
+      const cw = w.offsetWidth
+      c.width = cw * dpr; c.height = canvasH * dpr
+      c.style.width = cw + 'px'; c.style.height = canvasH + 'px'
+      // Regenerate star dust on resize
+      starDustRef.current = generateStarDust(cw, canvasH)
+    }
+    resize()
+    window.addEventListener('resize', resize)
+    return () => window.removeEventListener('resize', resize)
+  }, [canvasH])
+
+  /* simulation init + animation loop */
+  useEffect(() => {
+    if (!nodes || !nodes.length) return
+    const c = canvasRef.current, w = wrapRef.current
+    if (!c || !w) return
+    const cw = w.offsetWidth
+    simRef.current = createSim(nodes, edges, cw, canvasH)
+    viewRef.current = { x: 0, y: 0, scale: 1 }
+    starDustRef.current = generateStarDust(cw, canvasH)
+
+    const loop = () => {
+      const sim = simRef.current
+      if (!sim) return
+      const dpr = window.devicePixelRatio || 1
+      const W = c.width / dpr, H = c.height / dpr
+      tickSim(sim, W, H)
+      const ctx = c.getContext('2d')
+      // Read from refs so changes don't restart the loop
+      drawGraph(ctx, sim, W, H, viewRef.current, hovIdRef.current,
+        activeIdRef.current, degreeRef.current, nbrsRef.current, dpr,
+        starDustRef.current)
+      animRef.current = requestAnimationFrame(loop)
+    }
+    animRef.current = requestAnimationFrame(loop)
+    return () => { if (animRef.current) cancelAnimationFrame(animRef.current) }
+  }, [nodes, edges, canvasH])
+
+  // При открытии плавающего окна — вместить граф целиком (масштаб под новую площадь)
+  useEffect(() => {
+    if (!expanded) return
+    const t = setTimeout(() => fitToView(), 90)
+    return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expanded])
+
+  // Перетаскивание плавающего окна за заголовок (мышь/тач через pointer events)
+  const onFloatHeaderDown = useCallback((e) => {
+    if (e.target.closest('button')) return  // не драгаем с кнопок (⊟ и др.)
+    const el = floatRef.current
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    const base = floatPos || { x: r.left, y: r.top }
+    floatDragRef.current = { sx: e.clientX, sy: e.clientY, ox: base.x, oy: base.y }
+    setDragging(true)
+  }, [floatPos])
+
+  useEffect(() => {
+    if (!dragging) return
+    const move = (e) => {
+      const d = floatDragRef.current
+      if (d) setFloatPos({ x: d.ox + (e.clientX - d.sx), y: d.oy + (e.clientY - d.sy) })
+    }
+    const up = () => { floatDragRef.current = null; setDragging(false) }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+    return () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+    }
+  }, [dragging])
+
+  /* hit-test */
+  const nodeAt = useCallback((cx, cy) => {
+    const c = canvasRef.current; if (!c) return null
+    const rect = c.getBoundingClientRect()
+    const v = viewRef.current
+    const mx = (cx - rect.left - v.x) / v.scale
+    const my = (cy - rect.top - v.y) / v.scale
+    const sim = simRef.current; if (!sim) return null
+    for (let i = sim.nodes.length - 1; i >= 0; i--) {
+      const n = sim.nodes[i]
+      const r = n.type === 'book' ? 12 : 6 + Math.min((degree[n.id] || 0), 6)
+      if ((mx - n.x) ** 2 + (my - n.y) ** 2 < r * r * 2.5) return n
+    }
+    return null
+  }, [degree])
+
+  const onMove = useCallback((e) => {
+    const d = dragRef.current
+    if (d) {
+      const dx = e.clientX - d.sx, dy = e.clientY - d.sy
+      if (Math.abs(dx) + Math.abs(dy) > 3) d.moved = true
+      viewRef.current = { ...viewRef.current, x: d.ox + dx, y: d.oy + dy }
+      return
+    }
+    const n = nodeAt(e.clientX, e.clientY)
+    hovIdRef.current = n?.id || null
+    setHovered(n?.id || null)
+    if (n) {
+      const rect = wrapRef.current?.getBoundingClientRect()
+      if (rect) {
+        let left = e.clientX - rect.left + 14
+        let top = e.clientY - rect.top - 12
+        const ww = wrapRef.current?.offsetWidth || 300
+        if (left + 200 > ww) left = e.clientX - rect.left - 210
+        if (top < 4) top = e.clientY - rect.top + 18
+        setTooltip({ node: n, left: Math.max(4, left), top: Math.max(4, top) })
+      }
+    } else { setTooltip(null) }
+  }, [nodeAt])
+
+  const onDown = useCallback((e) => {
+    dragRef.current = { sx: e.clientX, sy: e.clientY, ox: viewRef.current.x, oy: viewRef.current.y, moved: false }
+  }, [])
 
   const openNode = useCallback(async (node) => {
-    setSelected(node)
-    setWiki(null)
+    setSelected(node); setWiki(null); setRelated(null)
     if (!node) return
+    const sid = sessionId || sessionStorage.getItem('edututor_sid') || ''
     try {
-      const res = await fetch(`/api/sessions/${sessionStorage.getItem('edututor_sid') || ''}/graph/${encodeURIComponent(node.id)}/wiki`)
-      if (res.ok) {
-        const body = await res.json()
-        setWiki(body.wiki)
-      }
+      const [wRes, rRes] = await Promise.all([
+        fetch(`/api/sessions/${sid}/graph/${encodeURIComponent(node.id)}/wiki`),
+        fetch(`/api/sessions/${sid}/graph/${encodeURIComponent(node.id)}/related`),
+      ])
+      if (wRes.ok) { const b = await wRes.json(); setWiki(b.wiki) }
+      if (rRes.ok) { const b = await rRes.json(); setRelated(b.related || []) }
     } catch (_) {}
-  }, [])
+  }, [sessionId])
 
-  // Позиция узла в пикселях обёртки (viewBox → CSS)
-  const nodePx = useCallback(
-    (node) => {
-      const rect = svgRef.current?.getBoundingClientRect()
-      if (!rect) return { x: 0, y: 0 }
-      const sx = rect.width / VIEW_W
-      return {
-        x: (node.x + view.x) * view.scale * sx,
-        y: (node.y + view.y) * view.scale * sx,
-      }
-    },
-    [view],
-  )
+  const onUp = useCallback((e) => {
+    const d = dragRef.current; dragRef.current = null
+    if (d && !d.moved) {
+      const n = nodeAt(e.clientX, e.clientY)
+      if (n) { openNode(n) }  // клик по узлу → карточка; изучение — кнопкой «Изучить»
+    }
+  }, [nodeAt, openNode])
 
-  const onNodeEnter = useCallback(
-    (node) => {
-      setHovered(node.id)
-      const p = nodePx(node)
-      const wrapW = wrapRef.current?.offsetWidth || 340
-      let left = p.x + 16
-      let top = p.y - 14
-      if (left + 210 > wrapW) left = p.x - 220
-      if (top < 6) top = p.y + 20
-      setTooltip({ node, left: Math.max(4, left), top: Math.max(4, top) })
-    },
-    [nodePx],
-  )
-
-  const onNodeLeave = useCallback(() => {
-    setHovered(null)
-    setTooltip(null)
-  }, [])
-
-  // zoom/pan (те же жесты)
   const onWheel = useCallback((e) => {
-    const rect = svgRef.current?.getBoundingClientRect()
-    if (!rect) return
-    const px = e.clientX - rect.left
-    const py = e.clientY - rect.top
-    setView((v) => {
-      const scale = Math.min(2.5, Math.max(0.6, v.scale * (e.deltaY > 0 ? 0.9 : 1.1)))
-      const ratio = 1 - scale / v.scale
-      return { x: v.x + px * ratio, y: v.y + py * ratio, scale }
-    })
+    e.preventDefault()
+    const rect = canvasRef.current?.getBoundingClientRect(); if (!rect) return
+    const v = viewRef.current
+    const s = Math.min(3, Math.max(0.3, v.scale * (e.deltaY > 0 ? 0.91 : 1.09)))
+    const r = 1 - s / v.scale
+    viewRef.current = { x: v.x + (e.clientX - rect.left) * r, y: v.y + (e.clientY - rect.top) * r, scale: s }
   }, [])
 
-  const onPanStart = useCallback((e) => {
-    dragRef.current = { sx: e.clientX, sy: e.clientY, ox: view.x, oy: view.y, moved: false }
-  }, [view])
-
-  const onPanMove = useCallback((e) => {
-    const d = dragRef.current
-    if (!d) return
-    const dx = e.clientX - d.sx
-    const dy = e.clientY - d.sy
-    if (Math.abs(dx) + Math.abs(dy) > 4) d.moved = true
-    setView((v) => ({ ...v, x: d.ox + dx, y: d.oy + dy }))
+  const onLeave = useCallback(() => {
+    dragRef.current = null; hovIdRef.current = null; setHovered(null); setTooltip(null)
   }, [])
 
-  const onPanEnd = useCallback(() => {
-    dragRef.current = null
+  /* --- Zoom controls --- */
+  const applyZoom = useCallback((factor) => {
+    const c = canvasRef.current; if (!c) return
+    const v = viewRef.current
+    const cx = c.offsetWidth / 2, cy = canvasH / 2
+    const s = Math.min(3, Math.max(0.3, v.scale * factor))
+    const r = 1 - s / v.scale
+    viewRef.current = { x: v.x + cx * r, y: v.y + cy * r, scale: s }
+  }, [canvasH])
+
+  const zoomIn = useCallback(() => applyZoom(1.3), [applyZoom])
+  const zoomOut = useCallback(() => applyZoom(0.75), [applyZoom])
+
+  const fitToView = useCallback(() => {
+    const sim = simRef.current; if (!sim || !sim.nodes.length) return
+    const c = canvasRef.current; if (!c) return
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+    for (const n of sim.nodes) {
+      minX = Math.min(minX, n.x); maxX = Math.max(maxX, n.x)
+      minY = Math.min(minY, n.y); maxY = Math.max(maxY, n.y)
+    }
+    const pad = 40
+    const bw = (maxX - minX) + pad * 2, bh = (maxY - minY) + pad * 2
+    if (bw < 1 || bh < 1) return
+    const cw = c.offsetWidth
+    const s = Math.min(cw / bw, canvasH / bh, 2.5)
+    viewRef.current = {
+      x: (cw - bw * s) / 2 - (minX - pad) * s,
+      y: (canvasH - bh * s) / 2 - (minY - pad) * s,
+      scale: s,
+    }
+  }, [canvasH])
+
+  /* --- Touch: pinch-to-zoom --- */
+  const onTouchStart = useCallback((e) => {
+    if (e.touches.length === 2) {
+      const t = e.touches
+      const dist = Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY)
+      const cx = (t[0].clientX + t[1].clientX) / 2
+      const cy = (t[0].clientY + t[1].clientY) / 2
+      pinchRef.current = { dist, cx, cy, scale: viewRef.current.scale, x: viewRef.current.x, y: viewRef.current.y }
+    } else if (e.touches.length === 1) {
+      const t = e.touches[0]
+      dragRef.current = { sx: t.clientX, sy: t.clientY, ox: viewRef.current.x, oy: viewRef.current.y, moved: false }
+    }
   }, [])
+
+  const onTouchMove = useCallback((e) => {
+    e.preventDefault()
+    if (e.touches.length === 2 && pinchRef.current) {
+      const t = e.touches
+      const dist = Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY)
+      const p = pinchRef.current
+      const newScale = Math.min(3, Math.max(0.3, p.scale * (dist / p.dist)))
+      const rect = canvasRef.current?.getBoundingClientRect()
+      if (rect) {
+        const cx = (t[0].clientX + t[1].clientX) / 2 - rect.left
+        const cy = (t[0].clientY + t[1].clientY) / 2 - rect.top
+        const r = 1 - newScale / p.scale
+        viewRef.current = { x: p.x + cx * r, y: p.y + cy * r, scale: newScale }
+      }
+    } else if (e.touches.length === 1 && dragRef.current) {
+      const t = e.touches[0]
+      const d = dragRef.current
+      const dx = t.clientX - d.sx, dy = t.clientY - d.sy
+      if (Math.abs(dx) + Math.abs(dy) > 3) d.moved = true
+      viewRef.current = { ...viewRef.current, x: d.ox + dx, y: d.oy + dy }
+    }
+  }, [])
+
+  const onTouchEnd = useCallback((e) => {
+    if (pinchRef.current) { pinchRef.current = null; return }
+    const d = dragRef.current; dragRef.current = null
+    if (d && !d.moved && e.changedTouches.length === 1) {
+      const t = e.changedTouches[0]
+      const n = nodeAt(t.clientX, t.clientY)
+      if (n) { openNode(n) }
+    }
+  }, [nodeAt, openNode])
 
   useEffect(() => {
     const el = document.querySelector('.session-id')
     if (el) sessionStorage.setItem('edututor_sid', el.textContent.replace('сессия: ', '').trim())
   }, [])
 
-  if (!nodes || nodes.length === 0) return null
-
+  if (!nodes || nodes.length === 0) {
+    return (
+      <div className="card graph-panel">
+        <div className="graph-panel__header"><h3>Граф знаний</h3></div>
+        <div className="graph-panel-empty">Загрузите учебник или найдите источник — здесь появится карта темы.</div>
+      </div>
+    )
+  }
   const selectedId = activeTopic || selected?.id
-  const connected = (id) => hovered && (neighbors[hovered]?.has(id) || id === hovered)
-  const isDimmed = (id) => hovered && !connected(id)
+  const activeNode = (nodes || []).find((n) => n.id === activeTopic)
 
-  return (
-    <div className="card graph">
-      <h3>Темы учебника · {topics.length}</h3>
-      {activeTopic && (
-        <div className="active-topic">
-          Изучаем: <strong>{activeTopic}</strong>
-        </div>
+  const panel = (
+    <div className={`card graph-panel ${expanded ? 'graph-panel--float' : ''}`}>
+      <div className="graph-panel__header"
+        onPointerDown={expanded ? onFloatHeaderDown : undefined}
+        title={expanded ? 'Перетащите окно за заголовок' : undefined}>
+        <h3>Граф знаний · {topics.length}</h3>
+        <button className="graph-panel__expand" onClick={() => setExpanded((v) => !v)}
+          title={expanded ? 'Свернуть' : 'Открыть в окне'}>
+          {expanded ? '⊟' : '⛶'}
+        </button>
+      </div>
+      {activeNode && (
+        <div className="active-topic">Изучаем: <strong>{activeNode.title}</strong></div>
       )}
-      <div
-        ref={wrapRef}
-        className="graph-svg-wrap"
-        onWheel={onWheel}
-        onMouseDown={onPanStart}
-        onMouseMove={onPanMove}
-        onMouseUp={onPanEnd}
-        onMouseLeave={onPanEnd}
-      >
-        <svg className="graph-svg" viewBox={`0 0 ${VIEW_W} ${VIEW_H}`} role="img" aria-label="Граф тем учебника"
-          ref={svgRef} style={{ cursor: dragRef.current ? 'grabbing' : 'grab' }}>
-          <g transform={`translate(${view.x},${view.y}) scale(${view.scale})`}>
-            {edges && edges.length > 0
-              ? edges.map((ed, i) => {
-                  const s = layout.byId[ed.source]
-                  const t = layout.byId[ed.target]
-                  if (!s || !t) return null
-                  const color = EDGE_COLORS[ed.relation] || '#888'
-                  const lit = hovered && connected(ed.source) && connected(ed.target)
-                  return (
-                    <line
-                      key={`e${i}`}
-                      x1={s.x} y1={s.y} x2={t.x} y2={t.y}
-                      stroke={color}
-                      strokeOpacity={lit ? 0.85 : isDimmed(ed.source) && isDimmed(ed.target) ? 0.05 : 0.35}
-                      strokeWidth={lit ? 2 : 1.2}
-                      className={`kg-edge ${isDimmed(ed.source) && isDimmed(ed.target) ? 'dim' : ''}`}
-                    />
-                  )
-                })
-              : topics.map((t) => {
-                  const s = layout.book
-                  return (
-                    <line key={t.id} x1={s?.x ?? VIEW_W / 2} y1={s?.y ?? VIEW_H / 2} x2={t.x} y2={t.y}
-                      stroke="#888" strokeOpacity={hovered ? (connected(t.id) ? 0.7 : 0.08) : 0.25} />
-                  )
-                })}
-            {layout.book && (
-              <g
-                className={`kg-node kg-book ${isDimmed(layout.book.id) ? 'dim' : ''}`}
-                transform={`translate(${layout.book.x},${layout.book.y})`}
-                onClick={() => onSelect && onSelect(layout.book)}
-                onMouseEnter={() => onNodeEnter(layout.book)}
-                onMouseLeave={onNodeLeave}
-              >
-                <circle r={nodeR(layout.book.id) + 4} fill="#69F0AE" opacity="0.22" stroke="#69F0AE" strokeWidth="1.5" />
-                <text textAnchor="middle" dominantBaseline="middle" fontSize="10">📚</text>
-              </g>
-            )}
-            {topics.map((t) => {
-              const active = selectedId === t.id
-              const mc = masteryColor(t.mastery)
-              const fill = mc || t.color || '#69F0AE'
-              const r = nodeR(t.id)
-              const dim = isDimmed(t.id)
-              const showLabel = active || hovered === t.id
-              return (
-                <g
-                  key={t.id}
-                  className={`kg-node ${active ? 'active' : ''} ${dim ? 'dim' : ''}`}
-                  transform={`translate(${t.x},${t.y})`}
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    if (dragRef.current && dragRef.current.moved) return
-                    onSelect && onSelect(t)
-                    openNode(t)
-                  }}
-                  onMouseEnter={() => onNodeEnter(t)}
-                  onMouseLeave={onNodeLeave}
-                >
-                  <circle r={r} fill={fill} className={active ? 'kg-pulse' : ''} opacity={active ? 0.95 : 0.85} stroke={active ? '#fff' : fill} strokeWidth={active ? 2 : 1} />
-                  {mc && <circle r="2.6" fill="#fff" opacity="0.95" cx={r + 3} cy={-(r + 3)} />}
-                  {showLabel && (
-                    <text textAnchor="middle" dy="-14" className="kg-hover-label">{shortTitle(t.title)}</text>
-                  )}
-                </g>
-              )
-            })}
-          </g>
-        </svg>
+      <div ref={wrapRef} className="graph-canvas-wrap"
+        onMouseMove={onMove} onMouseDown={onDown} onMouseUp={onUp}
+        onMouseLeave={onLeave} onWheel={onWheel}
+        onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}>
+        <canvas ref={canvasRef} className="graph-canvas" />
         {tooltip && (
           <div className="kg-tooltip" style={{ left: tooltip.left, top: tooltip.top }}>
             <div className="kg-tooltip-title">{tooltip.node.title}</div>
@@ -390,51 +672,105 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
             <div className="graph-loading-text">Готовим материал…</div>
           </div>
         )}
-        <div className="graph-zoom-hint">колесо — масштаб · drag — сдвиг</div>
+        <div className="graph-zoom-controls">
+          <button onClick={zoomIn} title="Приблизить">+</button>
+          <button onClick={zoomOut} title="Отдалить">−</button>
+          <button onClick={fitToView} title="Вместить всё">⊡</button>
+        </div>
+        <div className="graph-zoom-hint">колесо / pinch — масштаб · drag — сдвиг</div>
       </div>
       {selected && (
-        <div className="graph-wiki">
+        <div className="graph-wiki-card">
           <button className="graph-wiki-close" onClick={() => setSelected(null)}>✕</button>
           <div className="graph-wiki-title">{selected.title}</div>
+          <button className="graph-wiki-study" onClick={() => onSelect && onSelect(selected)}
+            disabled={busy}>
+            📖 Изучить тему
+          </button>
           {wiki && (
             <>
               {wiki.mastery !== undefined && (
                 <div className={`wiki-mastery-line ${wiki.mastery >= 0.75 ? 'high' : wiki.mastery >= 0.45 ? 'mid' : 'low'}`}>
-                  Мастерство: {Math.round(wiki.mastery * 100)}% · попыток: {wiki.attempts} ·
-                  точность: {Math.round((wiki.accuracy || 0) * 100)}%
+                  <div className="wiki-mastery-bar-bg">
+                    <div className="wiki-mastery-bar-fill" style={{ width: `${Math.round(wiki.mastery * 100)}%` }} />
+                  </div>
+                  <span>{Math.round(wiki.mastery * 100)}% · попыток: {wiki.attempts} · точность: {Math.round((wiki.accuracy || 0) * 100)}%</span>
                 </div>
               )}
               {wiki.notes && wiki.notes.length > 0 && (
                 <div className="graph-wiki-notes">
-                  {wiki.notes.map((n, i) => (
-                    <div key={i} className="graph-wiki-note">{n}</div>
-                  ))}
+                  {wiki.notes.map((n, i) => <NoteItem key={i} note={n} index={i} />)}
+                </div>
+              )}
+              {wiki.concepts && wiki.concepts.length > 0 && (
+                <div className="graph-wiki-concepts">
+                  <div className="graph-wiki-concepts-title">Ключевые понятия</div>
+                  {wiki.concepts.map((c, i) => <span key={i} className="graph-wiki-concept">{c}</span>)}
                 </div>
               )}
               {wiki.body && <div className="graph-wiki-body">{wiki.body}</div>}
             </>
           )}
           {!wiki && <div className="muted">Статья ещё не создана — пройдите квиз по теме</div>}
+          {related && related.length > 0 && (
+            <div className="graph-wiki-related">
+              <div className="graph-wiki-related-title">Связанные темы</div>
+              {[...new Map(related.map((r) => [r.target, r])).values()]
+                .filter((r) => r.target !== selected.id)
+                .slice(0, 6)
+                .map((r) => (
+                  <button key={r.target}
+                    className="graph-wiki-related-chip"
+                    onClick={() => {
+                      const pseudo = { id: r.target, title: r.target_title, type: r.target_type }
+                      onSelect(pseudo); openNode(pseudo)
+                    }}>
+                    {r.target_title}
+                  </button>
+                ))}
+            </div>
+          )}
         </div>
       )}
-      <input
-        className="topic-search"
-        placeholder="Найти тему…"
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-      />
+      <input className="topic-search" placeholder="🔍 Найти тему…"
+        value={query} onChange={(e) => setQuery(e.target.value)} />
       <div className="topic-chips">
-        {filtered.map((n) => (
-          <button
-            key={n.id}
+        {(query.trim() ? filtered : grouped.top).map((n) => (
+          <button key={n.id}
             className={`topic-chip ${selectedId === n.id ? 'active' : ''}`}
             style={{ '--chip-color': masteryColor(n.mastery) || n.color || '#69F0AE' }}
-            onClick={() => { onSelect(n); openNode(n) }}
+            onClick={() => openNode(n)}
             disabled={busy}
-            title={`${n.title}${n.mastery !== undefined ? ` · мастерство ${Math.round(n.mastery * 100)}%` : ''}`}
-          >
-            {n.title}
+            title={`${n.title}${n.mastery !== undefined ? ` · мастерство ${Math.round(n.mastery * 100)}%` : ''}`}>
+            {n.mastery !== undefined && (
+              <span className="chip-mastery" style={{ background: masteryColor(n.mastery) }} />
+            )}
+            <span className="chip-text">{n.title}</span>
           </button>
+        ))}
+        {!query.trim() && Object.entries(grouped.byParent).map(([pid, children]) => (
+          <div key={pid} className="topic-group">
+            <button className={`topic-group-header ${selectedId === pid ? 'active' : ''}`}
+              onClick={() => { const p = nodeMap[pid]; if (p) { onSelect(p); openNode(p) } }}
+              disabled={busy}
+              title={nodeMap[pid]?.title || pid}>
+              <span className="topic-group-title">{nodeMap[pid]?.title || pid}</span>
+              <span className="topic-group-count">{children.length}</span>
+            </button>
+            {children.map((n) => (
+              <button key={n.id}
+                className={`topic-chip ${selectedId === n.id ? 'active' : ''}`}
+                style={{ '--chip-color': masteryColor(n.mastery) || n.color || '#69F0AE' }}
+                onClick={() => openNode(n)}
+                disabled={busy}
+                title={`${n.title}${n.mastery !== undefined ? ` · мастерство ${Math.round(n.mastery * 100)}%` : ''}`}>
+                {n.mastery !== undefined && (
+                  <span className="chip-mastery" style={{ background: masteryColor(n.mastery) }} />
+                )}
+                <span className="chip-text">{n.title}</span>
+              </button>
+            ))}
+          </div>
         ))}
         {filtered.length === 0 && <div className="muted">Ничего не найдено</div>}
       </div>
@@ -446,7 +782,23 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
         <span><i className="dot dot-mid" />среднее</span>
         <span><i className="dot dot-low" />низкое</span>
       </div>
-      <div className="graph-legend">наведите на точку → данные · клик → подготовка + статья</div>
     </div>
   )
+
+  if (expanded) {
+    // Плавающее окно через портал: иначе position:fixed «прилипает» к сайдбару
+    // (backdrop-filter создаёт containing-block) и граф не масштабируется.
+    return createPortal(
+      <div className="graph-float-backdrop" onClick={() => setExpanded(false)}>
+        <div ref={floatRef} className="graph-float-sizer"
+          style={{ left: floatPos ? `${floatPos.x}px` : '50%', top: floatPos ? `${floatPos.y}px` : '50%',
+                   transform: floatPos ? 'none' : 'translate(-50%, -50%)' }}
+          onClick={(e) => e.stopPropagation()}>
+          {panel}
+        </div>
+      </div>,
+      document.body,
+    )
+  }
+  return panel
 }
