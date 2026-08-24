@@ -58,4 +58,30 @@ describe('LessonPanel', () => {
     expect(screen.getByText(/Абзац 1/)).toBeInTheDocument()
     expect(screen.getByText(/Абзац 2/)).toBeInTheDocument()
   })
+
+  it('не рендерит сырой JSON в полях урока (модель вложила объект в definition)', () => {
+    const jsonBlob = JSON.stringify({
+      title: 'Поэты серебряного века',
+      hook: 'Вопрос',
+      definition: 'Определение.',
+      sections: [{ heading: 'Раздел', body: 'Текст.' }],
+    })
+    const lesson = {
+      title: 'Поэты серебряного века',
+      hook: 'Знаете ли вы, какие течения объединились?',
+      definition: jsonBlob, // весь урок JSON-строкой
+      key_terms: [{ term: 'Акмеизм', definition: 'направление' }],
+      sections: [
+        { heading: 'Что объединяет поэтов?', body: 'Акмеизм появился как ответ.', citation: '§12' },
+      ],
+      summary: 'Итог.',
+    }
+    render(<LessonPanel text="полный текст" topic="Поэты серебряного века" lesson={lesson} />)
+    // Заголовок и настоящие карточки есть, а сырого JSON — нет
+    expect(screen.getByText('📖 Урок: Поэты серебряного века')).toBeInTheDocument()
+    expect(screen.getByText(/Знаете ли вы/)).toBeInTheDocument()
+    expect(screen.getByText(/Что объединяет поэтов/)).toBeInTheDocument()
+    expect(screen.queryByText(/\"title\"/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/\"key_terms\"/)).not.toBeInTheDocument()
+  })
 })

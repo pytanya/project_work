@@ -287,6 +287,21 @@ class TestEvaluateAnswer:
         lesson = generate_lesson("Тема", ["контекст"], state, llm_call=fake)
         assert lesson.definition == ""
 
+    def test_generate_lesson_cleans_bom_quoted_json_definition(self):
+        """Вложенный JSON с BOM и кавычками тоже очищается."""
+        state = _state()
+        nested = json.dumps({"title": "Тема", "sections": []}, ensure_ascii=False)
+        fake = lambda m: json.dumps({
+            "title": "Тема",
+            "hook": "Вопрос?",
+            "definition": "\ufeff" + "'" + nested + "'",  # BOM + кавычки-обёртка
+            "key_terms": [],
+            "sections": [{"heading": "Раздел", "body": "Текст раздела."}],
+        })
+        lesson = generate_lesson("Тема", ["контекст"], state, llm_call=fake)
+        assert lesson.definition == ""
+        assert lesson.sections[0].heading == "Раздел"
+
     def test_generate_lesson_diagram_map(self):
         """Map-диаграмма с координатами и цветами течений; санитизация."""
         state = _state(grade="7")

@@ -1,11 +1,26 @@
 // LessonPanel — урок по теме (режим lesson).
 // Структурированный урок (LessonSchema): зацепка → определение → термины → секции
 // с «Проверь себя» → итог. Если структуры нет (explain/deep_dive) — связный текст.
+import { useMemo } from 'react'
 import LatexText from './LatexText'
 import LessonDiagram from './LessonDiagram'
 
+// Страховка: модель иногда вкладывает весь JSON урока строкой в одно из полей.
+// Такие значения не рендерим — иначе в UI вместо карточек появится сырой JSON.
+function clean(v) {
+  const s = String(v ?? '').trim().replace(/^\ufeff/, '')
+  if (!s) return ''
+  if (s.startsWith('{') || s.startsWith('[')) return ''
+  const inner = s.replace(/^['"]/, '').replace(/['"]$/, '')
+  if (inner.startsWith('{') || inner.startsWith('[')) return ''
+  return s
+}
+
 function PlainLesson({ text, topic }) {
-  const paragraphs = String(text || '').split(/\n{2,}/)
+  const paragraphs = String(text || '').split(/\n{2,}/).filter((p) => {
+    const t = p.trim()
+    return t && !t.startsWith('{') && !t.startsWith('[')
+  })
   return (
     <div className="lesson">
       {topic && <div className="lesson-topic">📖 Урок: {topic}</div>}
@@ -40,7 +55,25 @@ function EvalBadge({ evalData }) {
 }
 
 export default function LessonPanel({ text, topic, lesson }) {
-  const data = lesson && Array.isArray(lesson.sections) && lesson.sections.length > 0 ? lesson : null
+  const raw = lesson && Array.isArray(lesson.sections) && lesson.sections.length > 0 ? lesson : null
+  // Санитизация полей: JSON-подобные значения (вложенный объект от модели) не рендерим
+  const data = useMemo(() => (raw ? {
+    ...raw,
+    title: clean(raw.title),
+    hook: clean(raw.hook),
+    definition: clean(raw.definition),
+    summary: clean(raw.summary),
+    key_terms: (raw.key_terms || [])
+      .map((t) => ({ term: clean(t?.term), definition: clean(t?.definition) }))
+      .filter((t) => t.term),
+    sections: (raw.sections || []).map((s) => ({
+      ...s,
+      heading: clean(s?.heading),
+      body: clean(s?.body),
+      citation: clean(s?.citation),
+      check_question: clean(s?.check_question),
+    })),
+  } : null), [raw])
   if (!data) return <PlainLesson text={text} topic={topic} />
 
   const title = data.title || topic || ''

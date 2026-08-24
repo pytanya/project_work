@@ -412,8 +412,14 @@ def _clean_plain_field(value: Any) -> str:
     """
     if isinstance(value, dict) or isinstance(value, list):
         return ""
-    text = str(value or "").strip()
+    text = str(value or "").strip().lstrip("\ufeff")
+    if not text:
+        return ""
     if text.startswith("{") or text.startswith("["):
+        return ""
+    # JSON с обёрткой в кавычки: '\"{...}\"', "'{...}'"
+    inner = text.strip("\"'")
+    if inner.startswith("{") or inner.startswith("["):
         return ""
     return text
 
