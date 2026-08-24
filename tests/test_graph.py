@@ -96,6 +96,71 @@ def _feed(graph, state, answers):
     return res
 
 
+class TestReuseMaterials:
+    """Гейт переиспользования: если по теме уже есть разобранные материалы ученика,
+    поиск не запускается повторно — ученик подтверждает решение (да/нет)."""
+
+    def _state(self, **kw):
+        base = dict(num_questions=2, learner_type="schoolchild", grade="6",
+                    subject="география", topic="Атмосфера", mode="quiz", has_textbook=False)
+        base.update(kw)
+        return TutorState(**base)
+
+    def test_asks_to_reuse_when_materials_exist(self, deps):
+        graph = build_graph(deps)
+        res = _invoke(graph, self._state().model_dump())
+        assert res.reuse_pending is True
+        assert "разобранные материалы" in (res.agent_question or "")
+        assert res.agent_options
+
+    def test_yes_reuses_existing_without_search(self, deps):
+        graph = build_graph(deps)
+        res = _invoke(graph, self._state().model_dump())
+        res = _invoke(graph, {**res.model_dump(), "pending_answer": "да"})
+        assert res.reuse_pending is False
+        assert res.source_status == "ready"
+        assert res.sources and res.sources[0]["type"] == "existing"
+
+    def test_no_triggers_search(self, deps):
+        called = {"n": 0}
+
+        class _Col:
+            def __init__(self):
+                self.status = "failed"
+                self.sources = []
+                self.texts = []
+                self.message = "mock"
+                self.failed_reason = "empty_result"
+
+        def fake_collector(**kw):
+            called["n"] += 1
+            return _Col()
+
+        deps.source_collector = fake_collector
+        graph = build_graph(deps)
+        res = _invoke(graph, self._state().model_dump())
+        assert res.reuse_pending is True
+        res = _invoke(graph, {**res.model_dump(), "pending_answer": "нет"})
+        assert res.reuse_pending is False
+        assert called["n"] == 1  # поиск вызван
+
+    def test_no_materials_skips_reuse(self, make_settings, tmp_path):
+        from src.knowledge import NumpyVectorStore
+        s = make_settings(MAX_INTAKE_ITERATIONS=8)
+        empty = NumpyVectorStore("empty", FakeEmbedder())
+        deps2 = GraphDeps(embedder=FakeEmbedder(), store=empty, settings=s,
+                          tutor_llm=lambda m: '{"question":"Q","answer_type":"open","topic":"T"}')
+        graph = build_graph(deps2)
+        res = _invoke(graph, self._state().model_dump())
+        assert res.reuse_pending is False  # материалов нет → вопрос не задаём
+
+    def test_student_isolation_chunks(self, deps):
+        """Чанки без student_id не видны ученику с student_id (изоляция материалов)."""
+        graph = build_graph(deps)
+        res = _invoke(graph, self._state(student_id="stu_other").model_dump())
+        assert res.reuse_pending is False  # чужие/бесхозные чанки не предлагаем
+
+
 class TestIntakeFlow:
     def test_asks_learner_type_first(self, deps):
         graph = build_graph(deps)

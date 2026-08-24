@@ -232,7 +232,7 @@ export default function App() {
           break
         case 'intake.question':
           finalizeStream('intake', d.question)
-          setCurrent({ kind: 'intake', question: d.question, missingFields: d.missing_fields })
+          setCurrent({ kind: 'intake', question: d.question, missingFields: d.missing_fields, options: d.options })
           break
         case 'intake.card':
           // Карточка знакомства: форма вместо пошаговых вопросов (быстрое заполнение)
@@ -409,7 +409,7 @@ export default function App() {
         if (sess.agent_card) {
           setCurrent({ kind: 'intake_card', card: sess.agent_card, question: sess.agent_question })
         } else if (!st.complete && st.next_question) {
-          setCurrent({ kind: 'intake', question: st.next_question, missingFields: st.missing_fields })
+          setCurrent({ kind: 'intake', question: st.next_question, missingFields: st.missing_fields, options: sess.agent_options || [] })
           push('intake', st.next_question)
         }
         refreshGraph()
@@ -457,7 +457,7 @@ export default function App() {
         // Карточка знакомства ждёт заполнения
         setCurrent({ kind: 'intake_card', card: d.agent_card, question: d.agent_question })
       } else if (d.agent_question && !hasFrontendActiveQuestion) {
-        setCurrent({ kind: 'intake', question: d.agent_question, missingFields: d.missing_fields || [] })
+        setCurrent({ kind: 'intake', question: d.agent_question, missingFields: d.missing_fields || [], options: d.agent_options || [] })
       }
       // else: оставляем текущий current без изменений если фронтенд уже показывает вопрос
 
@@ -516,19 +516,18 @@ export default function App() {
     }
   }, [push, feed])
 
-  async function submitAnswer() {
-    const text = answer.trim()
+  async function sendMessage(text) {
     if (!text || !sessionId) return
     setAnswer('')
     setConfirmedOption(null)
     push('user', text)
     setChatBusy(true)
     isWaitingForAnswer.current = true  // помечаем что ждём WS событие от бэкенда
-    
+
     // Таймаут fallback: если WS событие не пришло за 120 секунд — сбрасываем busy.
     // Heartbeat-события (system.heartbeat) продлевают таймаут при долгой генерации.
     resetBusyAfterTimeout()
-    
+
     try {
       const isIntakeTurn = current?.kind === 'intake' || current?.kind === 'intake_card'
       if (isIntakeTurn) {
@@ -554,6 +553,10 @@ export default function App() {
       if (answerTimeoutRef.current) clearTimeout(answerTimeoutRef.current)
       // busy сбросится при получении WS события или по timeout
     }
+  }
+
+  async function submitAnswer() {
+    sendMessage(answer.trim())
   }
 
   async function submitIntakeCard(values) {
@@ -779,6 +782,8 @@ export default function App() {
                 chapter: intake.chapter,
                 mode: intake.mode,
               }}
+              options={current.options || []}
+              onAnswer={(v) => sendMessage(v)}
             />
           ))}
         {confirmedOption && (

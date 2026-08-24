@@ -1,5 +1,7 @@
-// IntakeWizard — пошаговый чек-лист (раздел 9.2)
-export default function IntakeWizard({ missing = [], question, fieldValues = {} }) {
+// IntakeWizard — пошаговый чек-лист (раздел 9.2).
+// Плюс вариант с кнопками: когда агент задаёт вопрос с фиксированными вариантами
+// (например «использовать существующие материалы? да/нет») — рендерим опции.
+export default function IntakeWizard({ missing = [], question, fieldValues = {}, options = [], onAnswer }) {
   const fields = ['learner_type', 'grade', 'subject', 'topic', 'has_textbook', 'mode']
   const labels = {
     learner_type: 'Тип обучаемого', grade: 'Класс', subject: 'Предмет',
@@ -20,6 +22,23 @@ export default function IntakeWizard({ missing = [], question, fieldValues = {} 
     return String(val)
   }
   const remaining = new Set(missing)
+
+  // Вопрос с вариантами (решение по переиспользованию материалов и т.п.)
+  if (options && options.length > 0 && onAnswer) {
+    return (
+      <div className="card intake">
+        <div className="question-text">{question}</div>
+        <div className="intake-options">
+          {options.map((o) => (
+            <button key={o} className="option" onClick={() => onAnswer(o)}>
+              {o}
+            </button>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="card intake">
       <h3>Чек-лист</h3>

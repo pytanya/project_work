@@ -51,6 +51,7 @@ NODE_PROCESS_DOCUMENT = "process_document"
 NODE_FIND_TEXTBOOK = "find_textbook"
 NODE_SOURCE_FAILED = "source_failed"
 NODE_WAIT_FOR_UPLOAD = "wait_for_upload"
+NODE_REUSE_GATE = "reuse_gate"
 NODE_TOPIC_GATE = "topic_gate"
 NODE_CONTENT = "content_node"
 NODE_ASK_PAGE_RANGE = "ask_page_range"
@@ -252,12 +253,15 @@ def make_graph_deps(settings: Any = None) -> GraphDeps:
 
 
 def _rag_filters(state: TutorState) -> Dict[str, Any]:
-    """Метаданные-фильтры RAG-поиска (subject/grade/раздел активной темы)."""
+    """Метаданные-фильтры RAG-поиска (subject/grade/раздел активной темы/ученик)."""
     filters: Dict[str, Any] = {}
     if state.subject:
         filters["subject"] = state.subject
     if state.grade:
         filters["grade"] = state.grade
+    # Материалы персональны: чанки другого ученика не смешиваются
+    if getattr(state, "student_id", None):
+        filters["student_id"] = state.student_id
     # Подготовка по теме: фильтр по разделу активного узла графа
     if state.active_topic:
         section = _active_topic_section(state)
@@ -576,6 +580,87 @@ def route_source(state: TutorState) -> str:
     if state.has_textbook is True:
         # «да, есть учебник», но файл ещё не загружен — ждём загрузку, а не веб-поиск
         return NODE_WAIT_FOR_UPLOAD
+    # Нет файла и нет учебника: сначала проверяем, есть ли уже разобранные материалы
+    # по теме (переиспользование), и только при их отсутствии/отказе — веб-поиск.
+    return NODE_REUSE_GATE
+
+
+# Ответы на вопрос «использовать существующие материалы или искать другие?»
+def _reuse_decision(answer: Optional[str]) -> str:
+    """Решение по ответу ученика: reuse | search.
+
+    «да»-семейство → reuse; «нет»-семейство («искать», «найти другие») → search;
+    неясный ответ → reuse (безопасно: не гоняем веб-поиск без явного запроса).
+    """
+    a = (answer or "").strip().lower()
+    if not a:
+        return "reuse"
+    if a.startswith("да") or a.startswith("yes") or a.startswith("у") or "использ" in a:
+        return "reuse"
+    if (a.startswith("нет") or a.startswith("no")
+            or "искать" in a or "найти" in a or "другие" in a
+            or "не использ" in a):
+        return "search"
+    return "reuse"
+
+
+def reuse_materials_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
+    """Гейт переиспользования: если по теме уже есть разобранные материалы ученика —
+    спрашиваем, использовать ли их (поиск других — только по явному решению).
+
+    Поиск остаётся опциональным: по умолчанию (если не выбрано «искать другие»)
+    используем существующие, чтобы не гонять веб-поиск каждый раз.
+    """
+    st = state.model_copy(deep=True)
+
+    # Решение ученика уже пришло
+    if st.reuse_pending and st.pending_answer is not None:
+        answer_text = st.pending_answer
+        st.pending_answer = None
+        st.reuse_pending = False
+        st.agent_question = None
+        st.agent_options = None
+        if _reuse_decision(answer_text) == "search":
+            st.source_note = "Ищу другие материалы по теме."
+        else:
+            # используем существующие материалы (без нового поиска)
+            st.source_status = "ready"
+            st.collection_id = getattr(deps.store, "collection_name", None) or "existing"
+            st.sources = [{"type": "existing", "note": "ранее разобранные материалы"}]
+            st.source_note = "Использую уже разобранные материалы по теме — поиск не нужен."
+            _finalize_source(st, web_sources=True)
+            _emit(deps, "system", message=st.source_note, kind="source.reused")
+        return st.model_dump()
+
+    # Первый вход: есть ли уже чанки ученика по предмету/теме?
+    if st.reuse_pending:
+        return st.model_dump()  # вопрос задан, ждём ответ (route_reuse → END)
+    query = st.topic or st.subject or ""
+    if query:
+        try:
+            existing = _rag_chunks(deps.store, query, st, k=3)
+        except Exception:
+            existing = []
+        if existing:
+            st.reuse_pending = True
+            topic = st.topic or st.subject or "этой теме"
+            st.agent_question = (
+                f"По теме «{topic}» у тебя уже есть разобранные материалы. "
+                "Использовать их (да) или найти другие (нет)?"
+            )
+            st.agent_options = ["Да, использовать", "Нет, найти другие"]
+            _emit(deps, "intake.question", question=st.agent_question,
+                  missing_fields=["reuse"], options=st.agent_options)
+            return st.model_dump()
+    return st.model_dump()
+
+
+def route_reuse(state: TutorState) -> str:
+    """После гейта переиспользования: ждём ответа; готово → источник/тема; иначе — поиск."""
+    if state.reuse_pending:
+        return END
+    if state.source_status == "ready" or state.sources or state.collection_id:
+        return NODE_TOPIC_GATE
     return NODE_FIND_TEXTBOOK
 
 
@@ -836,7 +921,8 @@ def process_document_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
 
     try:
         stats = process_document(
-            path, source=source_name, store=deps.store, subject=st.subject, grade=st.grade
+            path, source=source_name, store=deps.store, subject=st.subject, grade=st.grade,
+            student_id=getattr(st, "student_id", None) or None,
         )
         st.collection_id = stats["collection"]
         st.source_status = "ready"
@@ -943,7 +1029,8 @@ def handle_doc_pages_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
 
     source_name = st.textbook_name or path.name
     try:
-        chunks = _make_chunks(text, source=source_name, subject=st.subject, grade=st.grade)
+        chunks = _make_chunks(text, source=source_name, subject=st.subject, grade=st.grade,
+                              student_id=getattr(st, "student_id", None) or None)
         offset = st.page_offset or 0
         printed_start = phys_start + offset
         printed_end = phys_end + offset
@@ -1013,7 +1100,8 @@ def find_textbook_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         chunks: List[Any] = []
         for s, t in zip(col.sources, col.texts):
             chunks.extend(
-                _make_chunks(t, source=s.get("url", "web"), subject=st.subject, grade=st.grade)
+                _make_chunks(t, source=s.get("url", "web"), subject=st.subject, grade=st.grade,
+                             student_id=getattr(st, "student_id", None) or None)
             )
         deps.store.add(chunks)
         st.collection_id = "web"
@@ -1296,6 +1384,7 @@ def build_graph(deps: Optional[GraphDeps] = None, checkpointer: Any = None) -> A
     g.add_node(NODE_FIND_TEXTBOOK, _logged_node(deps, NODE_FIND_TEXTBOOK, lambda s: find_textbook_node(s, deps)))
     g.add_node(NODE_SOURCE_FAILED, _logged_node(deps, NODE_SOURCE_FAILED, lambda s: source_failed_node(s, deps)))
     g.add_node(NODE_WAIT_FOR_UPLOAD, _logged_node(deps, NODE_WAIT_FOR_UPLOAD, lambda s: wait_for_upload_node(s, deps)))
+    g.add_node(NODE_REUSE_GATE, _logged_node(deps, NODE_REUSE_GATE, lambda s: reuse_materials_node(s, deps)))
     g.add_node(NODE_TOPIC_GATE, _logged_node(deps, NODE_TOPIC_GATE, lambda s: topic_gate_node(s, deps)))
     g.add_node(NODE_CONTENT, _logged_node(deps, NODE_CONTENT, lambda s: content_node(s, deps)))
     g.add_node(NODE_ASK_PAGE_RANGE, _logged_node(deps, NODE_ASK_PAGE_RANGE, lambda s: ask_page_range_node(s, deps)))
@@ -1326,6 +1415,16 @@ def build_graph(deps: Optional[GraphDeps] = None, checkpointer: Any = None) -> A
             NODE_PROCESS_DOCUMENT: NODE_PROCESS_DOCUMENT,
             NODE_FIND_TEXTBOOK: NODE_FIND_TEXTBOOK,
             NODE_WAIT_FOR_UPLOAD: NODE_WAIT_FOR_UPLOAD,
+            NODE_REUSE_GATE: NODE_REUSE_GATE,
+        },
+    )
+    g.add_conditional_edges(
+        NODE_REUSE_GATE,
+        route_reuse,
+        {
+            END: END,
+            NODE_TOPIC_GATE: NODE_TOPIC_GATE,
+            NODE_FIND_TEXTBOOK: NODE_FIND_TEXTBOOK,
         },
     )
     g.add_conditional_edges(

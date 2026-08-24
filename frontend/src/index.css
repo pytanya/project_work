@@ -773,6 +773,10 @@ body {
 .check-item.done { border-color: var(--ok); color: var(--ok); background: var(--green-soft); }
 .check-item.pending { border-color: var(--amber); color: #8a5a17; background: var(--amber-soft); }
 
+/* Вопрос с вариантами ответа (переиспользование материалов и т.п.) */
+.intake-options { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.intake-options .option { flex: 1 1 auto; min-width: 160px; }
+
 /* --- Карточка знакомства (быстрое заполнение вместо пошаговых вопросов) --- */
 .card.intake-card { border: 1px solid var(--green); }
 .intake-card__fields { display: flex; flex-direction: column; gap: 10px; margin: 12px 0 14px; }

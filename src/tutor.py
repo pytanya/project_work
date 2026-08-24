@@ -469,8 +469,11 @@ def _repair_lesson_from_text(text: str, topic: str) -> Lesson:
 
     Параграфы (по переводам строк) становятся секциями; первый абзац — определение,
     последний — итог (при 4+ абзацах). Консервативно: не выдумываем заголовки.
+    JSON-абзацы (вложенный объект) отбрасываются — сырой JSON никогда не попадает
+    в карточки.
     """
-    paragraphs = [p.strip() for p in re.split(r"\n+", (text or "").strip()) if p.strip()]
+    paragraphs = [_clean_plain_field(p) for p in re.split(r"\n+", (text or "").strip()) if p.strip()]
+    paragraphs = [p for p in paragraphs if p]
     if len(paragraphs) >= 4:
         return Lesson(
             title=topic,
@@ -484,7 +487,7 @@ def _repair_lesson_from_text(text: str, topic: str) -> Lesson:
             definition=paragraphs[0],
             sections=[LessonSection(body=p) for p in paragraphs[1:]],
         )
-    return Lesson(title=topic, sections=[LessonSection(body=text or "")])
+    return Lesson(title=topic, sections=[LessonSection(body=_clean_plain_field(text))])
 
 
 def generate_lesson(
@@ -511,6 +514,10 @@ def generate_lesson(
         if not text and not data:
             # LLM вернул сплошной текст (не JSON) — используем его напрямую
             text = (raw or "").strip()
+        # Модель вернула JSON, который не удалось разобрать — сырой JSON в урок не попадает,
+        # используем контекст как fallback (иначе в UI появится «стена» из JSON).
+        if text.startswith("{") or text.startswith("[") or text.startswith("\ufeff"):
+            text = ""
         if len(text) < 40:
             text = (context[0] if context else f"Материалы по теме «{topic}» ещё пополняются.")[:1200]
         lesson = _repair_lesson_from_text(text, topic)

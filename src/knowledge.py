@@ -45,6 +45,7 @@ class DocChunk(BaseModel):
     subject: Optional[str] = None
     grade: Optional[str] = None
     page_number: Optional[str] = None  # напечатанный номер страницы скана (если определён)
+    student_id: Optional[str] = None   # владелец чанка: материалы персональны (не смешиваются)
 
     def metadata(self) -> Dict[str, Any]:
         meta = {"source": self.source}
@@ -58,6 +59,8 @@ class DocChunk(BaseModel):
             meta["grade"] = self.grade
         if self.page_number:
             meta["page_number"] = self.page_number
+        if self.student_id:
+            meta["student_id"] = self.student_id
         return meta
 
 
@@ -323,7 +326,8 @@ def _split_long(text: str, max_chars: int = MAX_CHUNK_CHARS) -> List[str]:
     return parts
 
 
-def _make_chunks(text: str, source: str, subject: Optional[str], grade: Optional[str]) -> List[DocChunk]:
+def _make_chunks(text: str, source: str, subject: Optional[str], grade: Optional[str],
+                 student_id: Optional[str] = None) -> List[DocChunk]:
     """Нарезка текста на чанки с обогащением «Параграф N: название» (13.2)."""
     chunks: List[DocChunk] = []
     idx = 0
@@ -335,12 +339,12 @@ def _make_chunks(text: str, source: str, subject: Optional[str], grade: Optional
         for p in paragraphs:
             if buffer and len(buffer) + len(p) > MAX_CHUNK_CHARS:
                 for part in _split_long(buffer):
-                    chunks.append(_chunk(idx, part, source, subject, grade))
+                    chunks.append(_chunk(idx, part, source, subject, grade, student_id=student_id))
                     idx += 1
                 buffer = ""
             buffer += p + "\n\n"
         for part in _split_long(buffer):
-            chunks.append(_chunk(idx, part, source, subject, grade))
+            chunks.append(_chunk(idx, part, source, subject, grade, student_id=student_id))
             idx += 1
         return chunks
 
@@ -348,7 +352,7 @@ def _make_chunks(text: str, source: str, subject: Optional[str], grade: Optional
         cap = _LABEL_CAP.get(label, "Параграф")
         prefix = f"{cap} {num}" + (f": {title}" if title else "")
         if not content:
-            chunks.append(_chunk(idx, prefix + f"\n(пустой {label})", source, subject, grade, num, title))
+            chunks.append(_chunk(idx, prefix + f"\n(пустой {label})", source, subject, grade, num, title, student_id=student_id))
             idx += 1
             continue
         paragraphs = [p.strip() for p in re.split(r"\n\s*\n", content) if p.strip()]
@@ -356,12 +360,12 @@ def _make_chunks(text: str, source: str, subject: Optional[str], grade: Optional
         for p in paragraphs:
             if buffer and len(buffer) + len(p) > MAX_CHUNK_CHARS:
                 for part in _split_long(buffer):
-                    chunks.append(_chunk(idx, f"{prefix}\n{part}", source, subject, grade, num, title))
+                    chunks.append(_chunk(idx, f"{prefix}\n{part}", source, subject, grade, num, title, student_id=student_id))
                     idx += 1
                 buffer = ""
             buffer += p + "\n\n"
         for part in _split_long(buffer):
-            chunks.append(_chunk(idx, f"{prefix}\n{part}", source, subject, grade, num, title))
+            chunks.append(_chunk(idx, f"{prefix}\n{part}", source, subject, grade, num, title, student_id=student_id))
             idx += 1
     return chunks
 
@@ -375,6 +379,7 @@ def _chunk(
     section_number: Optional[str] = None,
     section_title: Optional[str] = None,
     page_number: Optional[str] = None,
+    student_id: Optional[str] = None,
 ) -> DocChunk:
     digest = hashlib.md5(f"{source}:{idx}:{text[:40]}".encode("utf-8")).hexdigest()[:12]
     return DocChunk(
@@ -386,6 +391,7 @@ def _chunk(
         subject=subject,
         grade=grade,
         page_number=page_number,
+        student_id=student_id,
     )
 
 
@@ -911,10 +917,11 @@ def process_document(
     store: VectorStore,
     subject: Optional[str] = None,
     grade: Optional[str] = None,
+    student_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Полный пайплайн: разбор → очистка → чанки → индекс (раздел 7.1 process_document)."""
     text = parse_document(path, source=source)
-    chunks = _make_chunks(text, source=source, subject=subject, grade=grade)
+    chunks = _make_chunks(text, source=source, subject=subject, grade=grade, student_id=student_id)
     store.add(chunks)
     return {
         "source": source,

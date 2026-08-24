@@ -114,6 +114,8 @@ def _rag_results(ctx: AgentToolContext, query: str, k: int = 5) -> List[Any]:
         filters["subject"] = st.subject
     if st.grade:
         filters["grade"] = st.grade
+    if getattr(st, "student_id", None):
+        filters["student_id"] = st.student_id
     try:
         return store.search(query, k=k, filters=filters or None)
     except Exception:

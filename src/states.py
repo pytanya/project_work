@@ -64,6 +64,9 @@ class TutorState(IntakeState):
     source_status: Optional[str] = None        # pending | searching | ready | failed
     source_note: Optional[str] = None          # причина/источник
     sources: List[Dict[str, Any]] = Field(default_factory=list)
+    # Переиспользование материалов: по теме уже есть разобранные чанки → ждём решения
+    # ученика (да — используем существующие, нет — ищем другие).
+    reuse_pending: bool = False
 
     # --- RAG ---
     collection_id: Optional[str] = None

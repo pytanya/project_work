@@ -302,6 +302,17 @@ class TestEvaluateAnswer:
         assert lesson.definition == ""
         assert lesson.sections[0].heading == "Раздел"
 
+    def test_generate_lesson_unparsable_json_falls_back_to_context(self):
+        """Нераспарсившийся JSON (сломанная структура) не попадает в урок —
+        используется контекст, иначе в UI появилась бы «стена» из JSON."""
+        state = _state()
+        broken_json = '{"title": "Тема", "sections": [{"heading": "Раздел", "body": "Текст"}'  # невалидный
+        lesson = generate_lesson("Тема", ["Контекст: Атмосфера — газовая оболочка."], state, llm_call=lambda m: broken_json)
+        rendered = lesson.render_text()
+        assert "title" not in rendered.lower()
+        assert "sections" not in rendered.lower()
+        assert "Контекст" in rendered  # fallback на контекст
+
     def test_generate_lesson_diagram_map(self):
         """Map-диаграмма с координатами и цветами течений; санитизация."""
         state = _state(grade="7")

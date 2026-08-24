@@ -20,7 +20,7 @@ logger = logging.getLogger("edututor.evaluation")
 
 
 def rag_context(store: Any, query: str, state: TutorState, k: int = 3) -> List[str]:
-    """RAG-поиск с фильтрами сессии (subject/grade/section активной темы)."""
+    """RAG-поиск с фильтрами сессии (subject/grade/section активной темы/ученик)."""
     if store is None:
         return []
     filters: Dict[str, Any] = {}
@@ -28,6 +28,8 @@ def rag_context(store: Any, query: str, state: TutorState, k: int = 3) -> List[s
         filters["subject"] = state.subject
     if state.grade:
         filters["grade"] = state.grade
+    if getattr(state, "student_id", None):
+        filters["student_id"] = state.student_id
     try:
         results = store.search(query, k=k, filters=filters or None)
         return [r.chunk.text for r in results]
@@ -44,6 +46,8 @@ def _topic_source(store: Any, topic: str, state: TutorState) -> str:
         filters["subject"] = state.subject
     if state.grade:
         filters["grade"] = state.grade
+    if getattr(state, "student_id", None):
+        filters["student_id"] = state.student_id
     try:
         for r in store.search(topic, k=3, filters=filters or None):
             src = getattr(r.chunk, "source", "")
