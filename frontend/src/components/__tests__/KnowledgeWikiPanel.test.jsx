@@ -7,17 +7,45 @@ describe('KnowledgeWikiPanel', () => {
     vi.restoreAllMocks()
   })
 
-  it('показывает «Заполните карточку ученика» когда intake не завершён', async () => {
+  it('отсекает навигационные/скрап-темы базы знаний, сохраняя реальные', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        subjects: [
+          {
+            subject: 'Литература',
+            articles: [
+              { topic: 'Поэты серебряного века', title: 'Поэты серебряного века', mastery: 0.5 },
+              { topic: 'Картинки', title: 'Картинки', mastery: 0.5 },
+              { topic: 'Параграф 24', title: 'Параграф 24', mastery: 0.5 },
+              { topic: 'По теме: методические разработки, презентации и конспекты', title: 'По теме: методические разработки, презентации и конспекты', mastery: 0.5 },
+              { topic: 'Главным своим результатом считаю…', title: 'Главным своим результатом считаю…', mastery: 0.5 },
+            ],
+          },
+        ],
+      }),
+    })
+    render(<KnowledgeWikiPanel studentId="stu_junk" />)
+    await waitFor(() => expect(screen.getByText(/База знаний/)).toBeInTheDocument())
+    // мусор отфильтрован, реальная тема осталась
+    expect(screen.queryByText(/Картинки/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Параграф 24/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/методические разработки/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Главным своим результатом/)).not.toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: /Поэты серебряного века/ }).length).toBeGreaterThan(0)
+  })
+
+  it('показывает «Знания накапливаются» без профиля ученика и не делает запрос', async () => {
     global.fetch = vi.fn()
-    render(<KnowledgeWikiPanel intakeComplete={false} />)
-    expect(screen.getByText(/Заполните карточку ученика/)).toBeInTheDocument()
-    // запроса к API быть не должно
+    render(<KnowledgeWikiPanel />)
+    expect(screen.getByText(/Знания накапливаются/)).toBeInTheDocument()
+    // запроса к API быть не должно — нет student_id
     expect(global.fetch).not.toHaveBeenCalled()
   })
 
   it('показывает «Знания накапливается» при пустой базе', async () => {
     global.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ subjects: [] }) })
-    render(<KnowledgeWikiPanel intakeComplete={true} />)
+    render(<KnowledgeWikiPanel studentId="stu_empty" />)
     await waitFor(() => expect(screen.getByText(/Знания накапливаются/)).toBeInTheDocument())
   })
 
@@ -36,7 +64,7 @@ describe('KnowledgeWikiPanel', () => {
         ],
       }),
     })
-    const { container } = render(<KnowledgeWikiPanel intakeComplete={true} />)
+    const { container } = render(<KnowledgeWikiPanel studentId="stu_test" />)
     await waitFor(() => expect(screen.getByText(/База знаний · 2/)).toBeInTheDocument())
     // статистика по темам
     expect(screen.getByText('тем')).toBeInTheDocument()
@@ -52,7 +80,7 @@ describe('KnowledgeWikiPanel', () => {
 
   it('не падает при ошибке сети', async () => {
     global.fetch = vi.fn().mockRejectedValue(new Error('network'))
-    render(<KnowledgeWikiPanel intakeComplete={true} />)
+    render(<KnowledgeWikiPanel studentId="stu_test" />)
     await waitFor(() => expect(document.querySelector('.card.wiki-panel')).not.toBeNull())
     expect(await screen.findByText(/Не удалось загрузить: network/)).toBeInTheDocument()
   })
@@ -74,7 +102,7 @@ describe('KnowledgeWikiPanel', () => {
         ],
       }),
     })
-    const { container } = render(<KnowledgeWikiPanel intakeComplete={true} />)
+    const { container } = render(<KnowledgeWikiPanel studentId="stu_test" />)
     await screen.findByRole('button', { name: /Философия/ })  // дождались данных
     const browser = container.querySelector('.wiki-subjects')
     await user.click(within(browser).getByRole('button', { name: /Кант/ }))
@@ -98,7 +126,7 @@ describe('KnowledgeWikiPanel', () => {
         ],
       }),
     })
-    const { container } = render(<KnowledgeWikiPanel intakeComplete={true} />)
+    const { container } = render(<KnowledgeWikiPanel studentId="stu_test" />)
     await screen.findByRole('button', { name: /Философия/ })
     const browser = container.querySelector('.wiki-subjects')
     await user.click(within(browser).getByRole('button', { name: /Кант/ }))
@@ -121,7 +149,7 @@ describe('KnowledgeWikiPanel', () => {
         ],
       }),
     })
-    const { container } = render(<KnowledgeWikiPanel intakeComplete={true} />)
+    const { container } = render(<KnowledgeWikiPanel studentId="stu_test" />)
     await screen.findByRole('button', { name: /Информатика/ })
     const browser = container.querySelector('.wiki-subjects')
     await user.click(within(browser).getByRole('button', { name: /Системы счисления/ }))
