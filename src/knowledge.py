@@ -326,15 +326,64 @@ def _split_long(text: str, max_chars: int = MAX_CHUNK_CHARS) -> List[str]:
     return parts
 
 
+# Мусорные строки со скрапленных веб-страниц и PDF-оглавлений: навигация, кнопки,
+# промо, одиночные символы. Такие строки не должны попадать в чанки/урок.
+_WEB_NOISE_RE = re.compile(
+    r"^(?:\s*[-–—>|·•*×+~#.…]+\s*)+$"      # -->, ---, |, ···
+    r"|^(?:cookie|cookies|файлы|cookies)\s*:?\s*$",
+    re.IGNORECASE,
+)
+_WEB_NOISE_EXACT = {
+    "войти", "вход", "выход", "зарегистрироваться", "создать сайт", "подписаться",
+    "поделиться", "скачать", "печать", "написать сообщение", "все блоги", "все файлы",
+    "все тесты", "выбрать материалы", "главная", "меню", "далее", "назад", "реклама",
+    "спонсор", "рейтинг", "голосовать", "оставить отзыв", "комментарии", "обсуждение",
+    "добавить комментарий", "похожие материалы", "смотрите также", "см. также",
+    "литература", "источники", "использованная литература",
+}
+_WEB_NOISE_SUBSTR = ("скидк", "добро пожаловать", "готовые учебные материалы",
+                     "доступ к материалам на весь год", "ключевые этапы урока")
+# Навигационные действия сайта как подстрока фразы (со словесными границами):
+# «Зарегистрироваться / Создать сайт», «Войти» и т.п.
+_WEB_NOISE_ACTIONS = (
+    r"зарегистрироваться", r"создать сайт", r"войти", r"выйти",
+    r"подписаться", r"поделиться", r"скачать",
+)
+
+
+def _is_web_noise(line: str) -> bool:
+    """Шумовой фрагмент веб-скрапинга/навигации — не учебный контент."""
+    s = (line or "").strip()
+    if not s:
+        return True
+    if _WEB_NOISE_RE.match(s):
+        return True
+    if len(s) < 3:
+        return True
+    low = s.lower()
+    if low in _WEB_NOISE_EXACT:
+        return True
+    if any(sub in low for sub in _WEB_NOISE_SUBSTR):
+        return True
+    if any(re.search(rf"\b{act}\b", low) for act in _WEB_NOISE_ACTIONS):
+        return True
+    return False
+
+
 def _make_chunks(text: str, source: str, subject: Optional[str], grade: Optional[str],
                  student_id: Optional[str] = None) -> List[DocChunk]:
-    """Нарезка текста на чанки с обогащением «Параграф N: название» (13.2)."""
+    """Нарезка текста на чанки с обогащением «Параграф N: название» (13.2).
+
+    Строки-шум (навигация сайтов, «-->», промо) отсекаются, чтобы мусор не
+    попадал в RAG-контекст урока/квиза.
+    """
     chunks: List[DocChunk] = []
     idx = 0
     sections = extract_sections(text)
     if not sections:
         # нет структуры — режем по абзацам
         paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+        paragraphs = [p for p in paragraphs if not _is_web_noise(p)]
         buffer = ""
         for p in paragraphs:
             if buffer and len(buffer) + len(p) > MAX_CHUNK_CHARS:
@@ -356,6 +405,9 @@ def _make_chunks(text: str, source: str, subject: Optional[str], grade: Optional
             idx += 1
             continue
         paragraphs = [p.strip() for p in re.split(r"\n\s*\n", content) if p.strip()]
+        paragraphs = [p for p in paragraphs if not _is_web_noise(p)]
+        if not paragraphs:
+            continue
         buffer = ""
         for p in paragraphs:
             if buffer and len(buffer) + len(p) > MAX_CHUNK_CHARS:

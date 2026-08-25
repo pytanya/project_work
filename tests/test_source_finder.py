@@ -120,6 +120,24 @@ class TestSearchWeb:
 
         assert search_web("q", engines={"ddgs": eng}, settings=s) == []
 
+    def test_prefers_educational_domains(self, make_settings):
+        s = make_settings()
+
+        def eng(q, settings):
+            return [
+                SearchResult(title="Промо-портал", url="https://multiurok.ru/blog/lesson"),
+                SearchResult(title="Викиучебник", url="https://ru.wikibooks.org/wiki/География"),
+                SearchResult(title="ЯКласс", url="https://www.yaklass.by/p/geografia/lesson"),
+                SearchResult(title="Обычный сайт", url="https://some-site.ru/article"),
+            ]
+
+        res = search_web("география атмосфера", engines={"ddgs": eng}, settings=s)
+        urls = [r.url for r in res]
+        # образовательные домены идут первыми, промо-портал — в конце
+        assert urls.index("https://ru.wikibooks.org/wiki/География") < urls.index("https://some-site.ru/article")
+        assert urls.index("https://www.yaklass.by/p/geografia/lesson") < urls.index("https://some-site.ru/article")
+        assert urls[-1] == "https://multiurok.ru/blog/lesson"
+
 
 class TestFetchUrl:
     def _client_with(self, body: bytes, status: int = 200) -> httpx.Client:
@@ -336,13 +354,16 @@ class TestCrawlPageJsIntegration:
 
 class TestCollectSourceMaterials:
     def test_local_pdf_first(self, tmp_path: Path, make_settings, monkeypatch):
+        # Изолируем кэш материалов
+        cache_dir = tmp_path / "material_cache"
         (tmp_path / "alekseev_geografia.pdf").write_bytes(b"%PDF-1.1")
         s = make_settings(TEXTBOOKS_DOWNLOADS_DIR=str(tmp_path))
-        col = collect_source_materials("география", "Атмосфера", author="Алексеев", settings=s)
+        col = collect_source_materials("география", "Атмосфера", author="Алексеев", settings=s, cache_dir=cache_dir)
         assert col.status == "ready"
         assert col.sources[0]["type"] == "local_pdf"
 
-    def test_web_fallback_ready(self, make_settings, monkeypatch):
+    def test_web_fallback_ready(self, make_settings, monkeypatch, tmp_path: Path):
+        cache_dir = tmp_path / "material_cache2"
         s = make_settings()
         monkeypatch.setattr(
             "src.source_finder.search_web",
@@ -352,24 +373,26 @@ class TestCollectSourceMaterials:
             "src.source_finder.fetch_url",
             lambda url, client=None: ("Текст конспекта про атмосферу.", "OK"),
         )
-        col = collect_source_materials("география", "Атмосфера", settings=s)
+        col = collect_source_materials("география", "Атмосфера", settings=s, cache_dir=cache_dir)
         assert col.status == "ready"
         assert any("атмосфер" in t.lower() for t in col.texts)
 
-    def test_empty_result_failed(self, make_settings, monkeypatch):
+    def test_empty_result_failed(self, make_settings, monkeypatch, tmp_path: Path):
+        cache_dir = tmp_path / "material_cache3"
         s = make_settings()
         monkeypatch.setattr("src.source_finder.search_web", lambda q, settings=None: [])
-        col = collect_source_materials("физика", "кванты", settings=s)
+        col = collect_source_materials("физика", "кванты", settings=s, cache_dir=cache_dir)
         assert col.status == "failed"
         assert col.failed_reason == "empty_result"
 
-    def test_license_blocked_failed(self, make_settings, monkeypatch):
+    def test_license_blocked_failed(self, make_settings, monkeypatch, tmp_path: Path):
+        cache_dir = tmp_path / "material_cache4"
         s = make_settings()
         monkeypatch.setattr(
             "src.source_finder.search_web",
             lambda q, settings=None: [SearchResult(title="t", url="https://11klassov.net/x")],
         )
-        col = collect_source_materials("физика", "кванты", settings=s)
+        col = collect_source_materials("физика", "кванты", settings=s, cache_dir=cache_dir)
         assert col.status == "failed"
         assert col.failed_reason == "license_blocked"
 
@@ -546,3 +569,81 @@ class TestLegalRUSources:
         res = _search_lesson_edu("дроби", s)
         assert len(res) == 1
         assert res[0].url == "https://lesson.edu.ru/lesson/1"
+
+
+# ----------------------------------------------------------------------
+# Тесты кэша материалов (6.3)
+# ----------------------------------------------------------------------
+class TestMaterialCache:
+    def test_set_and_get_cached_materials(self, tmp_path: Path):
+        from src.source_finder import (
+            _set_cached_materials,
+            _get_cached_materials,
+        )
+        
+        key = "география::Дроби::5"
+        sources = [
+            {"type": "page", "url": "https://a.ru", "license": "ok"},
+            {"type": "page", "url": "https://b.ru", "license": "ok"},
+        ]
+        
+        # Пустой кэш → None
+        assert _get_cached_materials(key, cache_dir=tmp_path) is None
+        
+        # Сохраняем
+        _set_cached_materials(key, sources, collection_id="web", cache_dir=tmp_path)
+        
+        # Читаем
+        cached = _get_cached_materials(key, cache_dir=tmp_path)
+        assert cached is not None
+        assert cached["sources"] == sources
+        assert cached["collection_id"] == "web"
+        assert "cached_at" in cached
+
+    def test_cache_file_created(self, tmp_path: Path):
+        from src.source_finder import (
+            _set_cached_materials,
+            _MATERIAL_CACHE_FILE_NAME,
+        )
+        
+        key = "математика::Тема::7"
+        sources = [{"type": "page", "url": "https://x.ru"}]
+        _set_cached_materials(key, sources, cache_dir=tmp_path)
+        
+        cache_file = tmp_path / _MATERIAL_CACHE_FILE_NAME
+        assert cache_file.exists()
+        import json
+        data = json.loads(cache_file.read_text(encoding="utf-8"))
+        assert key in data
+
+    def test_cache_multiple_keys(self, tmp_path: Path):
+        from src.source_finder import (
+            _set_cached_materials,
+            _get_cached_materials,
+        )
+        
+        key1 = "физика::Механика::9"
+        key2 = "химия::Атомы::8"
+        
+        sources1 = [{"type": "page", "url": "https://phys.ru"}]
+        sources2 = [{"type": "page", "url": "https://chem.ru"}]
+        
+        _set_cached_materials(key1, sources1, cache_dir=tmp_path)
+        _set_cached_materials(key2, sources2, cache_dir=tmp_path)
+        
+        assert _get_cached_materials(key1, cache_dir=tmp_path)["sources"] == sources1
+        assert _get_cached_materials(key2, cache_dir=tmp_path)["sources"] == sources2
+        assert _get_cached_materials("не существует", cache_dir=tmp_path) is None
+
+    def test_empty_sources_not_returned(self, tmp_path: Path):
+        from src.source_finder import (
+            _set_cached_materials,
+            _get_cached_materials,
+        )
+        
+        key = "пусто::тема::5"
+        # Сохраняем пустые источники
+        _set_cached_materials(key, [], cache_dir=tmp_path)
+        
+        # Пустые источники не должны возвращаться как валидный кэш
+        assert _get_cached_materials(key, cache_dir=tmp_path) is None

@@ -639,19 +639,50 @@ _ENGINES: Dict[str, Callable[[str, Any], List[SearchResult]]] = {
 }
 
 
+# Приоритетные домены: реферальные учебные ресурсы дают чистый конспект, а не
+# промо-страницу сайта учителя. Такие источники поднимаются в результатах поиска.
+_PREFERRED_DOMAINS = (
+    "wikibooks.org", "wikipedia.org", "yaklass.", "lc.rt.ru", "resh.edu.ru",
+    "openedu.ru", "school-collection.edu.ru", "foxford.ru", "uchi.ru", "onlineschool-1.ru",
+)
+# Домены, дающие мусорный контент (промо-лендинги, порталы учителей) — в самый низ.
+_AVOIDED_DOMAINS = ("multiurok.ru", "infourok.ru", "kopilkaurokov.ru", "nsportal.ru", "prodlenka.org")
+
+
+def _domain_of(url: str) -> str:
+    m = re.search(r"https?://([^/\s]+)", url or "")
+    return m.group(1).lower() if m else ""
+
+
+def _rank_source(r: SearchResult) -> int:
+    """Ранг качества источника: меньше — лучше. Приоритет образовательным доменам."""
+    d = _domain_of(r.url)
+    if not d:
+        return 3
+    if any(p in d for p in _PREFERRED_DOMAINS):
+        return 0
+    if any(a in d for a in _AVOIDED_DOMAINS):
+        return 4
+    return 2
+
+
 def search_web(
     query: str,
     engines: Optional[Dict[str, Callable[[str, Any], List[SearchResult]]]] = None,
     settings: Any = None,
 ) -> List[SearchResult]:
-    """Поиск по приоритету (settings.search_engines). Пустой результат — если всё недоступно."""
+    """Поиск по приоритету (settings.search_engines). Пустой результат — если всё недоступно.
+
+    Результаты упорядочиваются по качеству источника (реферальные учебные ресурсы выше,
+    промо-порталы учителей ниже) — чтобы в урок не попадали мусорные страницы.
+    """
     s = settings or default_settings
     engines = engines or _ENGINES
     for engine in s.search_engines:
         try:
             results = engines[engine](query, s)
             if results:
-                return results
+                return sorted(results, key=_rank_source)
         except Exception as e:
             logger.warning("search_web: %s недоступен (%s)", engine, e)
     return []

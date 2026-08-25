@@ -128,6 +128,39 @@ class TestChunking:
         assert len(chunks) == 1  # короткий текст — один чанк
         assert "Абзац первый" in chunks[0].text
 
+    def test_web_noise_filtered_from_chunks(self):
+        from src.knowledge import _make_chunks
+
+        text = (
+            "Атмосфера — воздушная оболочка Земли.\n\n"
+            "-->\n\n"
+            "Войти\n\n"
+            "Зарегистрироваться / Создать сайт\n\n"
+            "Скидки до 50% на комплекты\n\n"
+            "Кислород составляет 21% воздуха."
+        )
+        chunks = _make_chunks(text, source="https://site.ru/page", subject="география", grade="6")
+        merged = "\n".join(c.text for c in chunks)
+        assert "Атмосфера — воздушная оболочка" in merged
+        assert "Кислород составляет 21%" in merged
+        # мусор не попал в чанки
+        assert "-->" not in merged
+        assert "Войти" not in merged
+        assert "Зарегистрироваться" not in merged
+        assert "Скидки" not in merged
+
+    def test_web_noise_exact_words(self):
+        from src.knowledge import _is_web_noise
+
+        assert _is_web_noise("-->")
+        assert _is_web_noise("Войти")
+        assert _is_web_noise("Все блоги")
+        assert _is_web_noise("Зарегистрироваться")
+        assert _is_web_noise("x")
+        assert _is_web_noise("")
+        assert not _is_web_noise("Атмосфера — воздушная оболочка Земли")
+        assert not _is_web_noise("Кислород составляет 21%")
+
 
 class TestVectorStore:
     def test_add_search_and_filter(self):
