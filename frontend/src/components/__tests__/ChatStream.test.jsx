@@ -30,6 +30,6 @@ describe('ChatStream', () => {
     expect(screen.getByText(/поиск…/)).toBeInTheDocument()
     expect(screen.getByText(/ошибка/)).toBeInTheDocument()
     expect(screen.getByText(/Урок про атмосферу/)).toBeInTheDocument()
-    expect(screen.getByText(/Урок: Атмосфера/)).toBeInTheDocument()
+    expect(screen.getByText(/Атмосфера/)).toBeInTheDocument()
   })
 })

@@ -11,7 +11,17 @@ function masteryClass(m) {
   return 'low'
 }
 
-export default function KnowledgeWikiPanel({ studentId = '', studentName = '' }) {
+/* Темы-«мусор» от веб-скрапинга: домены/URL-слаги вместо названий (multiurok.ru, yandex.ru…) */
+const URL_LIKE_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z]{2,})+(?:\/[^\s]*)?$/i
+const DOMAIN_NOISE = /footer|toggle|menu|sidebar|navbar|login|signin|register|cookie/i
+function isJunkTopic(title) {
+  if (!title) return true
+  if (URL_LIKE_RE.test(title.trim())) return true
+  if (DOMAIN_NOISE.test(title)) return true
+  return false
+}
+
+export default function KnowledgeWikiPanel({ studentId = '', studentName = '', intakeComplete = false }) {
   const [data, setData] = useState(null)
   const [error, setError] = useState(null)
   const [expandedSubject, setExpandedSubject] = useState(null)
@@ -21,6 +31,7 @@ export default function KnowledgeWikiPanel({ studentId = '', studentName = '' })
   const [filter, setFilter] = useState('')
 
   useEffect(() => {
+    if (!intakeComplete) return
     let cancelled = false
     // Персональная база знаний: ?student_id= изолирует данные разных учеников
     const q = studentId ? `?student_id=${encodeURIComponent(studentId)}` : ''
@@ -29,9 +40,12 @@ export default function KnowledgeWikiPanel({ studentId = '', studentName = '' })
       .then((body) => !cancelled && setData(body.subjects || []))
       .catch((e) => !cancelled && setError(String(e.message || e)))
     return () => { cancelled = true }
-  }, [studentId])
+  }, [studentId, intakeComplete])
 
-  const subjects = data || []
+  // Отсев URL-мусора от веб-скрапинга (multiurok.ru, footer#toggle и т.п.)
+  const subjects = useMemo(() => (data || [])
+    .map((s) => ({ ...s, articles: (s.articles || []).filter((a) => !isJunkTopic(a.title || a.topic || '')) }))
+    .filter((s) => s.articles.length > 0), [data])
   const total = subjects.reduce((n, s) => n + (s.articles?.length || 0), 0)
 
   // Aggregate stats
@@ -52,16 +66,18 @@ export default function KnowledgeWikiPanel({ studentId = '', studentName = '' })
 
   // Filter articles (темы + ключевые понятия + предмет)
   const filteredSubjects = useMemo(() => {
-    if (!filter.trim()) return subjects
     const q = filter.trim().toLowerCase()
-    return subjects.map((s) => ({
-      ...s,
-      articles: (s.articles || []).filter((a) =>
-        (a.title || a.topic || '').toLowerCase().includes(q) ||
-        (Array.isArray(a.concepts) && a.concepts.some((c) => String(c).toLowerCase().includes(q))) ||
-        (s.subject || '').toLowerCase().includes(q)
-      ),
-    })).filter((s) => s.articles.length > 0)
+    if (!q) return subjects
+    return subjects
+      .map((s) => ({
+        ...s,
+        articles: (s.articles || []).filter((a) =>
+          (a.title || a.topic || '').toLowerCase().includes(q) ||
+          (Array.isArray(a.concepts) && a.concepts.some((c) => String(c).toLowerCase().includes(q))) ||
+          (s.subject || '').toLowerCase().includes(q)
+        ),
+      }))
+      .filter((s) => s.articles.length > 0)
   }, [subjects, filter])
 
   if (error) return (
@@ -101,6 +117,22 @@ export default function KnowledgeWikiPanel({ studentId = '', studentName = '' })
       setEnrichNote('Не удалось сгенерировать изложение: нет связи с сервером.')
     }
     setEnriching(false)
+  }
+
+  // Показываем placeholder, если intake не завершён
+  if (!intakeComplete) {
+    return (
+      <div className="card wiki-panel">
+        <h3>База знаний</h3>
+        <div className="wiki-empty">
+          <div className="wiki-empty__icon">📝</div>
+          <div className="wiki-empty__title">Заполните карточку ученика</div>
+          <div className="wiki-empty__text">
+            База знаний появится после заполнения карточки знакомства.
+          </div>
+        </div>
+      </div>
+    )
   }
 
   return (

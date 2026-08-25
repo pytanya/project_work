@@ -128,8 +128,9 @@ describe('App', () => {
       }),
     })
 
-    // пузырь стал уроком: заголовок темы от LessonPanel виден
-    expect(await screen.findByText('📖 Урок: Атмосфера')).toBeInTheDocument()
+    // пузырь стал уроком: текст урока от PlainLesson виден (заголовок = тема)
+    expect(await screen.findByText('Атмосфера — газовая оболочка.')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Атмосфера' })).toBeInTheDocument()
     // стрим-каретка исчезла — «живой» пузырь не остался висеть с мигающим курсором
     expect(document.querySelector('.stream-caret')).not.toBeInTheDocument()
     // дубля нет: текст урока в ленте ровно один

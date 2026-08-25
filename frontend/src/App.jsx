@@ -12,6 +12,9 @@ import './index.css'
 
 const STORAGE_KEY = 'edututor_settings'
 const STUDENT_KEY = 'edututor_student'
+const SIDEBAR_KEY = 'edututor_sidebar_width'
+const SIDEBAR_MIN = 260
+const SIDEBAR_MAX = 560
 
 function loadSettings() {
   try {
@@ -37,6 +40,12 @@ function saveStudent(s) {
   localStorage.setItem(STUDENT_KEY, JSON.stringify(s))
 }
 
+function loadSidebarWidth() {
+  const v = Number(localStorage.getItem(SIDEBAR_KEY))
+  if (Number.isFinite(v) && v >= SIDEBAR_MIN && v <= SIDEBAR_MAX) return v
+  return 320
+}
+
 export default function App() {
   const [sessionId, setSessionId] = useState(null)
   const [student, setStudent] = useState(() => loadStudent())
@@ -53,6 +62,9 @@ export default function App() {
   const [confirmedOption, setConfirmedOption] = useState(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [quickAnswer, setQuickAnswer] = useState(() => loadSettings().quickAnswer !== false)
+  // Ширина боковой панели (ресайз перетаскиванием, сохраняется в localStorage)
+  const [sidebarWidth, setSidebarWidth] = useState(() => loadSidebarWidth())
+  const sidebarDragRef = useRef(null)
   // Разделение busy: upload для индексации чат для квиза/сообщений
   const [uploadBusy, setUploadBusy] = useState(false)
   const [chatBusy, setChatBusy] = useState(false)
@@ -706,9 +718,46 @@ export default function App() {
     setQuickAnswer((v) => !v)
   }
 
+  // Ресайз боковой панели: pointer-drag по ручке, сохраняем ширину в localStorage
+  useEffect(() => {
+    const el = sidebarDragRef.current
+    if (!el) return
+    let dragging = false
+    const onMove = (e) => {
+      if (!dragging) return
+      const w = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, e.clientX))
+      setSidebarWidth(w)
+    }
+    const onUp = () => {
+      if (!dragging) return
+      dragging = false
+      document.body.classList.remove('resizing')
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      localStorage.setItem(SIDEBAR_KEY, String(el.dataset.w))
+    }
+    const onDown = (e) => {
+      e.preventDefault()
+      dragging = true
+      document.body.classList.add('resizing')
+      window.addEventListener('pointermove', onMove)
+      window.addEventListener('pointerup', onUp)
+    }
+    el.addEventListener('pointerdown', onDown)
+    return () => {
+      el.removeEventListener('pointerdown', onDown)
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (sidebarDragRef.current) sidebarDragRef.current.dataset.w = String(sidebarWidth)
+  }, [sidebarWidth])
+
   return (
     <div className="app">
-      <aside className="sidebar">
+      <aside className="sidebar" style={{ width: sidebarWidth, minWidth: sidebarWidth }}>
         <div className="brand-row">
           <h1 className="brand">
             EduTutor
@@ -750,6 +799,7 @@ export default function App() {
         <SourceSearchPanel status={source.status} note={source.note} sources={source.sources} author={source.author} onFind={handleFind} busy={uploadBusy} />
         <FileUpload onUpload={handleUpload} busy={uploadBusy} />
       </aside>
+      <div className="sidebar-resizer" ref={sidebarDragRef} title="Изменить ширину панели" />
       <main className="chat">
         <ChatStream feed={feed} busy={chatBusy || uploadBusy} progressPhase={progressPhase} />
         {current &&

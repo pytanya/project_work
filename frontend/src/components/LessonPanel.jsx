@@ -183,9 +183,38 @@ function HookSection({ hook }) {
    Секция: Основной контент
    ═══════════════════════════════════════════ */
 
+/* Мусорные фрагменты от скраперов веб-страниц: навигация, пустые абзацы, «-->»,
+   одиночные символы/цифры. Такие секции урока бесполезны ученику. */
+const NOISE_RE = /^(?:\s*[-–—>|·•*×+~#]+[\s]*)+$/
+const NAV_WORDS = new Set([
+  'войти', 'вход', 'зарегистрироваться', 'выйти', 'главная', 'меню', 'подписаться',
+  'поделиться', 'написать сообщение', 'все блоги', 'все файлы', 'все тесты', 'выбрать материалы',
+  'сайты учителей', 'организационный момент', 'проверка знаний', 'объяснение материала',
+  'закрепление изученного', 'итоги урока', 'рассказать о сайте', 'местоположение', 'специализация',
+])
+/* Промо/навигация сайтов: короткие фразы с «скидка/готовые/учитель» — не контент урока */
+const PROMO_RE = /скидк|готовые (учебные|ключевые)|добро пожаловать|войти|зарегистрир|создать сайт|подписать|реклама|баннер|cookie|куки/
+function isNoiseSection(heading, body) {
+  const h = String(heading || '').trim().toLowerCase()
+  const b = String(body || '').trim()
+  if (!b) return true
+  if (NOISE_RE.test(b)) return true
+  if (b.length < 2 && /^[\d×xX.+-]$/.test(b)) return true
+  if (b.length <= 24 && NAV_WORDS.has(b.toLowerCase())) return true
+  if (PROMO_RE.test(b.toLowerCase())) return true
+  if (!h && b.length < 6) return true
+  return false
+}
+
 function ContentSections({ sections }) {
   if (!sections || sections.length === 0) return null
-  return sections.map((s, i) => {
+  const cleanSections = sections.filter((s) => {
+    const heading = s.heading || s.title || ''
+    const body = s.body || s.content || ''
+    return !isNoiseSection(heading, body)
+  })
+  if (cleanSections.length === 0) return null
+  return cleanSections.map((s, i) => {
     const heading = s.heading || s.title || `Часть ${i + 1}`
     const body = s.body || s.content || ''
     return (
@@ -279,8 +308,14 @@ export default function LessonPanel({ text, topic, lesson }) {
 
   /* ── Fallback: нет данных ── */
   if (!data) {
-    const displayText = (lesson && typeof lesson === 'object') ? '' : (text || '')
-    return <LessonFallback text={displayText} topic={topic} lessonKeys={typeof lesson === 'object' ? Object.keys(lesson) : null} />
+    const isObject = lesson && typeof lesson === 'object'
+    const displayText = isObject ? '' : (text || '')
+    // Связный текст без структуры (старый формат/кэш) — показываем абзацами,
+    // а не прячем за debug-toggle.
+    if (!isObject && displayText) {
+      return <PlainLesson text={text} topic={topic} />
+    }
+    return <LessonFallback text={displayText} topic={topic} lessonKeys={isObject ? Object.keys(lesson) : null} />
   }
 
   /* ── Если вообще ничего полезного нет — plain ── */

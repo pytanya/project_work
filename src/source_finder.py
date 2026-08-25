@@ -808,17 +808,42 @@ def collect_source_materials(
     settings: Any = None,
     http: Optional[httpx.Client] = None,
     cache_dir: Optional[Path] = None,
+    *,
+    use_cache: bool = True,
+    student_id: str = "",
+    on_sources_collected: Optional[Callable[[List[Dict[str, Any]], Optional[str]], None]] = None,
 ) -> SourceCollection:
     """Основная fallback-цепочка (6.2): локальные PDF → веб-материалы по теме.
 
     1. Локальные PDF-учебники (Plan B/Plan A) — не требует авто-поиска (В-2).
     2. Поиск страниц-конспектов по теме (search_web) + fetch_url (Plan A).
     3. Ничего → status="failed" (узел source_failed, В-3).
+    
+    Кэширование (6.3): если use_cache=True и материалы уже есть в кэше по ключу
+    "subject::topic::grade" — возвращается SourceCollection из кэша без поиска.
+    При успешном поисходе результаты сохраняются в кэш. Если передан student_id,
+    ключ включает его — кэш персональный по ученику.
     """
     s = settings or default_settings
-    cache_dir = cache_dir or Path(s.SOURCES_CACHE_DIR)
+    cache_dir = cache_dir or Path(getattr(s, 'SOURCES_CACHE_DIR', 'data'))
     sources: List[Dict[str, Any]] = []
     texts: List[str] = []
+    
+    # Ключ кэша: [student_id::]subject::topic::grade
+    _sid = f"{student_id}::" if student_id else ""
+    cache_key = f"{_sid}{subject}::{topic}::{grade}" if (topic or subject) else ""
+
+    # 0) Проверка кэша материалов (если use_cache=True и key не пустой)
+    if use_cache and cache_key:
+        cached = _get_cached_materials(cache_key, cache_dir)
+        if cached is not None:
+            sources = cached["sources"]
+            collection_id = cached.get("collection_id")
+            return SourceCollection(
+                status="ready",
+                sources=sources,
+                message=f"Кэшированные материалы по теме: {len(sources)} источников (collection={collection_id})",
+            )
 
     # 1) Локальные учебники
     local = find_local_textbooks(s, subject=subject, author=author, grade=grade)
@@ -867,8 +892,72 @@ def collect_source_materials(
             http.close()
 
     if texts:
+        # Сохраняем в кэш (если use_cache и key не пустой)
+        if use_cache and cache_key:
+            _set_cached_materials(cache_key, sources, collection_id=None, cache_dir=cache_dir)
         return SourceCollection(status="ready", sources=sources, texts=texts,
                                 message=f"Собрано материалов по теме: {len(sources)} источников")
     return SourceCollection(status="failed", sources=sources,
                             message="Материалы по теме не найдены (лицензионно недоступно)",
                             failed_reason="license_blocked")
+
+
+# ----------------------------------------------------------------------
+# Кэш материалов по (subject, topic, grade) (6.3)
+# ----------------------------------------------------------------------
+_MATERIAL_CACHE_FILE_NAME = "material_cache.json"
+_lock = threading.Lock()
+
+
+def _material_cache_path(cache_dir: Optional[Path] = None) -> Path:
+    """Путь к файлу кэша материалов."""
+    from .config import settings as _settings
+    base = cache_dir or Path(getattr(_settings, 'SOURCES_CACHE_DIR', 'data'))
+    base.mkdir(parents=True, exist_ok=True)
+    return base / _MATERIAL_CACHE_FILE_NAME
+
+
+def _load_material_cache(cache_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """Загрузить кэш материалов из JSON-файла."""
+    path = _material_cache_path(cache_dir)
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def _save_material_cache(data: Dict[str, Any], cache_dir: Optional[Path] = None) -> None:
+    """Сохранить кэш материалов в JSON-файл."""
+    path = _material_cache_path(cache_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _get_cached_materials(key: str, cache_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+    """Получить кэшированные материалы по ключу (subject::topic::grade).
+
+    Возвращает dict с ключами 'sources' и 'collection_id' или None.
+    """
+    with _lock:
+        cache = _load_material_cache(cache_dir)
+        entry = cache.get(key)
+        if entry and isinstance(entry, dict) and entry.get("sources"):
+            logger.info("Материалы найдены в кэше: %s (%d источников)", key, len(entry.get("sources", [])))
+            return entry
+    return None
+
+
+def _set_cached_materials(key: str, sources: List[Dict[str, Any]], collection_id: Optional[str] = None,
+                          cache_dir: Optional[Path] = None) -> None:
+    """Сохранить материалы в кэш по ключу (subject::topic::grade)."""
+    with _lock:
+        cache = _load_material_cache(cache_dir)
+        cache[key] = {
+            "sources": sources,
+            "collection_id": collection_id,
+            "cached_at": time.time(),
+        }
+        _save_material_cache(cache, cache_dir)
+        logger.info("Материалы сохранены в кэш: %s (%d источников)", key, len(sources))

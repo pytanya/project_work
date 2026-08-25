@@ -637,10 +637,14 @@ def reuse_materials_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
 
     # Первый вход:
     
-    # A) Проверяем кэш материалов по (subject::topic::grade)
+    # A) Проверяем кэш материалов по (subject::topic::grade). Ключ включает
+    # student_id — материалы учеников изолированы (из одного предмета/темы у
+    # разных детей могут быть разные учебники и источники).
+    _sid = st.student_id or "anon"
     cache_key = f"{st.subject}::{st.topic or ''}::{st.grade or ''}"
+    _cache_key_student = f"{_sid}::{cache_key}"
     from . import source_finder as _sf
-    cached = _sf._get_cached_materials(cache_key, cache_dir=deps.settings.SOURCES_CACHE_DIR)
+    cached = _sf._get_cached_materials(_cache_key_student, cache_dir=deps.settings.SOURCES_CACHE_DIR)
     if cached is not None:
         cached_sources = cached.get("sources", [])
         cached_collection = cached.get("collection_id")
@@ -1106,6 +1110,7 @@ def find_textbook_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         author=st.textbook_author or "",
         settings=deps.settings,
         http=deps.http,
+        student_id=st.student_id or "",
     )
     if col.status == "ready":
         local_pdf = [s for s in col.sources if s.get("type") == "local_pdf"]
@@ -1130,8 +1135,10 @@ def find_textbook_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         st.collection_id = "web"
         st.sources = col.sources
         
-        # Сохраняем в кэш материалов (6.3)
-        cache_key = f"{st.subject}::{search_topic or ''}::{st.grade or ''}"
+        # Сохраняем в кэш материалов (6.3). Ключ включает student_id — кэш
+        # персональный по ученику, а не общий для всех.
+        _sid2 = st.student_id or "anon"
+        cache_key = f"{_sid2}::{st.subject}::{search_topic or ''}::{st.grade or ''}"
         try:
             from . import source_finder as _sf_cache
             _sf_cache._set_cached_materials(cache_key, col.sources, collection_id="web",
