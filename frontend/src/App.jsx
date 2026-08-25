@@ -9,6 +9,7 @@ import FileUpload from './components/FileUpload'
 import KnowledgeGraphPanel from './components/KnowledgeGraphPanel'
 import KnowledgeWikiPanel from './components/KnowledgeWikiPanel'
 import SessionHistoryPanel from './components/SessionHistoryPanel'
+import SourceWhitelistPanel from './components/SourceWhitelistPanel'
 import './index.css'
 
 const STORAGE_KEY = 'edututor_settings'
@@ -58,6 +59,10 @@ export default function App() {
   const [knowledge, setKnowledge] = useState({})
   const [wikiReloadKey, setWikiReloadKey] = useState(0)
   const [sessionHistoryReloadKey, setSessionHistoryReloadKey] = useState(0)
+  // Политика источников: белый список + «любые источники» (пер-студентная)
+  const [sourcePolicy, setSourcePolicy] = useState({ allow_any_sources: true, whitelist: [] })
+  const [sourcePanelSignal, setSourcePanelSignal] = useState(0)
+  const [sourceProposal, setSourceProposal] = useState(null)
   const [score, setScore] = useState({ correct: 0, total: 0 })
   const [quizCount, setQuizCount] = useState(0)
   const [answer, setAnswer] = useState('')
@@ -79,6 +84,7 @@ export default function App() {
   const inputRef = useRef(null)
   const settingsBtnRef = useRef(null)
   const currentRef = useRef(null)          // зеркало current для обработчиков WS (без stale-closure)
+  const sourcePolicyRef = useRef({ allow_any_sources: true, whitelist: [] })
   const streamRef = useRef(null)           // id «живого» пузыря со стримингом токенов
   // Refs: отслеживаем ожидаем ли результат ответа на текущий вопрос
   const pendingAnswer = useRef(null)       // текст отправленного ответа
@@ -91,6 +97,21 @@ export default function App() {
   useEffect(() => {
     currentRef.current = current
   }, [current])
+
+  // Политика источников — тоже зеркалим в ref (stable-замыкание handleEvent)
+  useEffect(() => {
+    sourcePolicyRef.current = sourcePolicy
+  }, [sourcePolicy])
+
+  // Политика источников: подгружаем при смене ученика
+  useEffect(() => {
+    if (!student.student_id) return
+    let cancelled = false
+    api.getSourcePolicy(student.student_id)
+      .then((p) => !cancelled && setSourcePolicy(p))
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [student.student_id])
 
   // Загрузка настроек из localStorage при старте
   useEffect(() => {
@@ -320,6 +341,11 @@ export default function App() {
             setCurrent(null)
           }
           push('error', d.message)
+          // Белый список: поиск не нашёл ничего по разрешённым доменам —
+          // предлагаем включить любые источники или изменить список.
+          if (d.reason === 'whitelist_blocked') {
+            setSourceProposal({ type: 'whitelist_blocked', message: d.message })
+          }
           break
         case 'graph.ready':
           refreshGraph()
@@ -337,6 +363,11 @@ export default function App() {
             setCurrent(null)
           }
           push('system', d.message)
+          // Белый список активен, а материала в разрешённых источниках нет —
+          // предлагаем включить любые источники.
+          if (d.kind === 'content.empty' && sourcePolicyRef.current && !sourcePolicyRef.current.allow_any_sources) {
+            setSourceProposal({ type: 'content_empty', message: d.message })
+          }
           break
         case 'intake.completed':
           // Исправление #3: обработка завершения intake процесса
@@ -722,6 +753,24 @@ export default function App() {
     setQuickAnswer((v) => !v)
   }
 
+  // «Включить любые источники» из предложения: сохраняем политику и повторяем поиск
+  async function enableAnySources() {
+    if (!student.student_id || !sessionId) return
+    try {
+      const updated = await api.putSourcePolicy(student.student_id, { allow_any_sources: true })
+      setSourcePolicy(updated)
+      setSourceProposal(null)
+      await handleFind()
+    } catch (e) {
+      push('error', String(e.message || e))
+    }
+  }
+
+  function openSourcesPanel() {
+    setSourceProposal(null)
+    setSourcePanelSignal((k) => k + 1)
+  }
+
   // Ресайз боковой панели: pointer-drag по ручке, сохраняем ширину в localStorage
   useEffect(() => {
     const el = sidebarDragRef.current
@@ -794,6 +843,7 @@ export default function App() {
         {/* intake.complete — истинен, когда карточка заполнена (статус из intakeStatus) */}
         <KnowledgeWikiPanel key={wikiReloadKey} studentId={student.student_id} studentName={student.student_name} intakeComplete={intake.complete} />
         <SessionHistoryPanel studentId={student.student_id} reloadKey={sessionHistoryReloadKey} />
+        <SourceWhitelistPanel studentId={student.student_id} openSignal={sourcePanelSignal} onChanged={setSourcePolicy} />
         <KnowledgeGraphPanel
           nodes={graph.nodes}
           edges={graph.edges}
@@ -846,6 +896,17 @@ export default function App() {
             Вы выбрали: <strong>{confirmedOption}</strong>
             <button className="btn-confirm" onClick={handleConfirmOption}>Подтвердить</button>
             <button className="btn-cancel" onClick={handleCancelOption}>Отмена</button>
+          </div>
+        )}
+        {sourceProposal && (
+          <div className="source-proposal">
+            <div className="source-proposal__icon">🔎</div>
+            <div className="source-proposal__text">{sourceProposal.message}</div>
+            <div className="source-proposal__actions">
+              <button className="btn small" onClick={enableAnySources}>Включить любые источники</button>
+              <button className="btn small ghost" onClick={openSourcesPanel}>Изменить источники</button>
+              <button className="btn small ghost" onClick={() => setSourceProposal(null)}>Позже</button>
+            </div>
           </div>
         )}
         <div className="answerbar">

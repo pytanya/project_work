@@ -30,6 +30,8 @@ vi.mock('../api', async () => {
       deleteSession: actual.api.deleteSession,
       sourceStatus: actual.api.sourceStatus,
       history: actual.api.history,
+      getSourcePolicy: vi.fn().mockResolvedValue({ allow_any_sources: true, whitelist: [] }),
+      putSourcePolicy: vi.fn().mockResolvedValue({ allow_any_sources: true, whitelist: [] }),
     },
     wsUrl: vi.fn(() => 'ws://fake/ws'),
   }

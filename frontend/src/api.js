@@ -67,6 +67,15 @@ export const api = {
 
   getStudentSessions: (studentId) =>
     jsonFetch(`/api/students/${encodeURIComponent(studentId)}/sessions`),
+
+  getSourcePolicy: (studentId) =>
+    jsonFetch(`/api/students/${encodeURIComponent(studentId)}/sources`),
+
+  putSourcePolicy: (studentId, body) =>
+    jsonFetch(`/api/students/${encodeURIComponent(studentId)}/sources`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
 }
 
 export function wsUrl(sessionId) {
