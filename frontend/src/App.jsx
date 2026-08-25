@@ -841,7 +841,7 @@ export default function App() {
         </div>
         {sessionId && <div className="session-id">сессия: {sessionId}</div>}
         {/* intake.complete — истинен, когда карточка заполнена (статус из intakeStatus) */}
-        <KnowledgeWikiPanel key={wikiReloadKey} studentId={student.student_id} studentName={student.student_name} />
+        <KnowledgeWikiPanel key={wikiReloadKey} studentId={student.student_id} studentName={student.student_name} intakeComplete={intake.complete} />
         <SessionHistoryPanel studentId={student.student_id} reloadKey={sessionHistoryReloadKey} />
         <SourceWhitelistPanel studentId={student.student_id} openSignal={sourcePanelSignal} onChanged={setSourcePolicy} />
         <KnowledgeGraphPanel

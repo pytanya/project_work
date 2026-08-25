@@ -41,7 +41,7 @@ function isJunkTopic(title) {
   return false
 }
 
-export default function KnowledgeWikiPanel({ studentId = '', studentName = '' }) {
+export default function KnowledgeWikiPanel({ studentId = '', studentName = '', intakeComplete = false }) {
   const [data, setData] = useState(null)
   const [error, setError] = useState(null)
   const [expandedSubject, setExpandedSubject] = useState(null)
@@ -51,10 +51,11 @@ export default function KnowledgeWikiPanel({ studentId = '', studentName = '' })
   const [filter, setFilter] = useState('')
 
   useEffect(() => {
-    // База знаний персональна и живёт дольше одной сессии: у вернувшегося
-    // ученика (есть student_id) она доступна сразу, без ожидания карточки —
-    // данные копятся из материалов/уроков/квизов прошлых занятий.
-    if (!studentId) return
+    // База знаний строится по материалам темы: загружаем, когда карточка
+    // заполнена (ученик/тема/класс сопоставлены) — вернувшийся ученик сразу
+    // видит свою закешированную базу, новые темы добавляются после сбора
+    // материалов и урока/квиза.
+    if (!studentId || !intakeComplete) return
     let cancelled = false
     // Персональная база знаний: ?student_id= изолирует данные разных учеников
     const q = studentId ? `?student_id=${encodeURIComponent(studentId)}` : ''
@@ -63,7 +64,7 @@ export default function KnowledgeWikiPanel({ studentId = '', studentName = '' })
       .then((body) => !cancelled && setData(body.subjects || []))
       .catch((e) => !cancelled && setError(String(e.message || e)))
     return () => { cancelled = true }
-  }, [studentId])
+  }, [studentId, intakeComplete])
 
   // Отсев URL-мусора от веб-скрапинга (multiurok.ru, footer#toggle и т.п.)
   const subjects = useMemo(() => (data || [])
@@ -142,17 +143,18 @@ export default function KnowledgeWikiPanel({ studentId = '', studentName = '' })
     setEnriching(false)
   }
 
-  // Нет профиля ученика (ещё не начато занятие) — данных для показа нет
-  if (!studentId) {
+  // Карточка не заполнена (ученик/тема/класс ещё не сопоставлены) — база знаний
+  // строится из собранных по теме материалов, поэтому пока пустой экран.
+  if (!intakeComplete) {
     return (
       <div className="card wiki-panel">
         <h3>База знаний</h3>
         <div className="wiki-empty">
           <div className="wiki-empty__icon">📝</div>
-          <div className="wiki-empty__title">Знания накапливаются</div>
+          <div className="wiki-empty__title">Заполните карточку ученика</div>
           <div className="wiki-empty__text">
-            База знаний появится после сбора материалов и урока/квиза по теме — здесь будут
-            темы, понятия и ваш прогресс.
+            Сопоставим вас с темой и классом, соберём материалы — и здесь появятся темы,
+            понятия и ваш прогресс.
           </div>
         </div>
       </div>

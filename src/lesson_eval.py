@@ -79,10 +79,42 @@ def _score_structure(lesson: Lesson) -> float:
     return round(s, 3)
 
 
+def _has_literary_quote(text: str) -> bool:
+    """Проверяет наличие литературной цитаты в тексте.
+    
+    Ищет классические русские кавычки «...», «...» и авторские слова
+    с тире (— говорит, — добавил). Это индикатор того, что в секции
+    есть цитата из произведения, а не просто пересказ.
+    """
+    if not text:
+        return False
+    # Русские кавычки «...», „..."
+    if "«" in text or "„" in text or '"' in text:
+        # Проверяем, что кавычки окружают текст (не одиночные)
+        import re
+        # Ищем паттерны типа «слово» или «несколько слов»
+        if re.search(r'[«"]\s*\S.*?\s*[»"]', text):
+            return True
+        # Или дефис диалога — авторская речь
+        if re.search(r'\s—\s+\S', text):
+            return True
+    return False
+
+
 def _score_citations(lesson: Lesson) -> float:
     if not lesson.sections:
         return 0.0
-    with_cit = sum(1 for s in lesson.sections if (s.citation or "").strip())
+    with_cit = 0
+    for s in lesson.sections:
+        # Секция считается «с цитатой» если:
+        # 1. Есть поле citation (номер параграфа §N)
+        # 2. ИЛИ есть литературная цитата в body («...»)
+        has_explicit = bool((s.citation or "").strip())
+        has_body_quote = _has_literary_quote(s.body or "")
+        # check_question тоже может содержать цитату-вопрос
+        has_check_quote = _has_literary_quote(s.check_question or "")
+        if has_explicit or has_body_quote or has_check_quote:
+            with_cit += 1
     return round(with_cit / len(lesson.sections), 3)
 
 
