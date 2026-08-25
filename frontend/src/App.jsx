@@ -249,13 +249,12 @@ export default function App() {
             topic: d.topic,
             difficulty: d.difficulty,
             questionId: d.question_id,
+            excerpt: d.excerpt || '',
           })
           break
         case 'tutor.explanation':
           finalizeStream('explanation', d.message, d)
           setCurrent(null)
-          // Логирование для отладки LaTeX
-          console.log('tutor.explanation message:', JSON.stringify(d.message?.substring(0, 200)))
           break
         case 'tutor.lesson':
           finalizeStream('lesson', d.text, { topic: d.topic, lesson: d.lesson })
@@ -591,7 +590,7 @@ export default function App() {
     setAnswer(opt)
     if (quickAnswer) {
       setConfirmedOption(null)
-      submitAnswer()
+      sendMessage(opt)
     } else {
       setConfirmedOption(opt)
     }
@@ -739,7 +738,8 @@ export default function App() {
           </div>
         </div>
         {sessionId && <div className="session-id">сессия: {sessionId}</div>}
-        <KnowledgeWikiPanel key={wikiReloadKey} studentId={student.student_id} studentName={student.student_name} />
+        {/* intake.complete — истинен, когда карточка заполнена (статус из intakeStatus) */}
+        <KnowledgeWikiPanel key={wikiReloadKey} studentId={student.student_id} studentName={student.student_name} intakeComplete={intake.complete} />
         <KnowledgeGraphPanel
           nodes={graph.nodes}
           edges={graph.edges}

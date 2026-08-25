@@ -199,7 +199,7 @@ def generate_quiz(args: Dict[str, Any], ctx: AgentToolContext) -> Tuple[str, Tut
     threshold = getattr(getattr(ctx.deps, "settings", None), "QUESTION_DEDUPE_THRESHOLD", 0.85)
     card = None
     for _ in range(retries + 1):
-        card = tutor_mod.generate_question(topic, context, difficulty, st, llm_call=ctx.llm_call, on_token=ctx.on_token)
+        card = tutor_mod.generate_question(topic, context, difficulty, st, llm_call=ctx.llm_call)
         if not prev_asked or not tutor_mod.is_duplicate_question(
             getattr(ctx.deps, "embedder", None), card.question, prev_asked, threshold
         ):

@@ -62,6 +62,7 @@ def deps(make_settings, tmp_path):
         OCR_MIN_TEXT_CHARS=20,
         KNOWLEDGE_GRAPH_DIR=str(tmp_path / "kg"),
         KNOWLEDGE_WIKI_DIR=str(tmp_path / "wiki"),
+        SOURCES_CACHE_DIR=str(tmp_path / "sources_cache"),
     )
     embedder = FakeEmbedder()
     store = NumpyVectorStore("t", embedder)
@@ -713,6 +714,7 @@ class TestWebSourceFlow:
             OCR_MIN_TEXT_CHARS=20,
             KNOWLEDGE_GRAPH_DIR=str(tmp_path / "kg"),
             KNOWLEDGE_WIKI_DIR=str(tmp_path / "wiki"),
+            SOURCES_CACHE_DIR=str(tmp_path / "sources_cache"),
         )
         embedder = FakeEmbedder()
         store = NumpyVectorStore("web", embedder)

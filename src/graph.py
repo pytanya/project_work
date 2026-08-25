@@ -608,8 +608,11 @@ def reuse_materials_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     """Гейт переиспользования: если по теме уже есть разобранные материалы ученика —
     спрашиваем, использовать ли их (поиск других — только по явному решению).
 
-    Поиск остаётся опциональным: по умолчанию (если не выбрано «искать другие»)
-    используем существующие, чтобы не гонять веб-поиск каждый раз.
+    Улучшение (6.3): на первом входе проверяет кэш материалов по (subject, topic, grade).
+    Если в кэше есть данные — сразу устанавливает st.sources, st.collection_id,
+    st.source_status = "ready" и пропускает NODE_FIND_TEXTBOOK.
+
+    Также проверяет RAG-хранилище на наличие чанков по теме.
     """
     st = state.model_copy(deep=True)
 
@@ -632,7 +635,27 @@ def reuse_materials_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
             _emit(deps, "system", message=st.source_note, kind="source.reused")
         return st.model_dump()
 
-    # Первый вход: есть ли уже чанки ученика по предмету/теме?
+    # Первый вход:
+    
+    # A) Проверяем кэш материалов по (subject::topic::grade)
+    cache_key = f"{st.subject}::{st.topic or ''}::{st.grade or ''}"
+    from . import source_finder as _sf
+    cached = _sf._get_cached_materials(cache_key, cache_dir=deps.settings.SOURCES_CACHE_DIR)
+    if cached is not None:
+        cached_sources = cached.get("sources", [])
+        cached_collection = cached.get("collection_id")
+        if cached_sources:
+            st.sources = cached_sources
+            st.source_status = "ready"
+            st.source_note = f"Кэшированные материалы: {len(cached_sources)} источников"
+            if cached_collection:
+                st.collection_id = cached_collection
+            _finalize_source(st, web_sources=True)
+            _emit(deps, "system", message=st.source_note, kind="source.cached")
+            logger.info("reuse_gate: использован кэш материалов %s", cache_key)
+            return st.model_dump()
+    
+    # B) Проверяем RAG-хранилище на наличие чанков по теме
     if st.reuse_pending:
         return st.model_dump()  # вопрос задан, ждём ответ (route_reuse → END)
     query = st.topic or st.subject or ""
@@ -800,9 +823,9 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     # Генерируем материал по активной теме и режиму
     topic = st.topic or st.subject or "общая тема"
     if st.active_topic:
-        from .knowledge_graph import KnowledgeGraph, _node_title as _kg_node_title
-        kg = KnowledgeGraph.from_dict(st.knowledge_graph or {})
-        title = _kg_node_title(kg, st.active_topic)
+        from .knowledge_graph import KnowledgeGraph as _KG2
+        kg = _KG2.from_dict(st.knowledge_graph or {})
+        title = _node_title(kg, st.active_topic)
         if title:
             topic = title
     # deep_dive берёт больше контекста (несколько разделов, 7.3.4); lesson/explain — k=5
@@ -1106,6 +1129,15 @@ def find_textbook_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         deps.store.add(chunks)
         st.collection_id = "web"
         st.sources = col.sources
+        
+        # Сохраняем в кэш материалов (6.3)
+        cache_key = f"{st.subject}::{search_topic or ''}::{st.grade or ''}"
+        try:
+            from . import source_finder as _sf_cache
+            _sf_cache._set_cached_materials(cache_key, col.sources, collection_id="web",
+                                            cache_dir=deps.settings.SOURCES_CACHE_DIR)
+        except Exception:
+            logger.warning("Кэш материалов не сохранён: %s", cache_key, exc_info=True)
         st.source_status = "ready"
         st.source_note = f"Собрано материалов: {len(col.sources)} источников"
         _emit(deps, "source.progress", stage="index", url="", status="done",
@@ -1251,7 +1283,7 @@ def generate_question_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]
     card = None
     for attempt in range(retries + 1):
         card = tutor_mod.generate_question(
-            topic, context, st.difficulty, st, llm_call=deps.tutor_llm, on_token=deps.on_token
+            topic, context, st.difficulty, st, llm_call=deps.tutor_llm
         )
         if not prev_asked or not tutor_mod.is_duplicate_question(
             deps.embedder, card.question, prev_asked, threshold
