@@ -8,6 +8,7 @@ import SourceSearchPanel from './components/SourceSearchPanel'
 import FileUpload from './components/FileUpload'
 import KnowledgeGraphPanel from './components/KnowledgeGraphPanel'
 import KnowledgeWikiPanel from './components/KnowledgeWikiPanel'
+import SessionHistoryPanel from './components/SessionHistoryPanel'
 import './index.css'
 
 const STORAGE_KEY = 'edututor_settings'
@@ -56,6 +57,7 @@ export default function App() {
   const [graph, setGraph] = useState({ nodes: [], edges: [], activeTopic: null })
   const [knowledge, setKnowledge] = useState({})
   const [wikiReloadKey, setWikiReloadKey] = useState(0)
+  const [sessionHistoryReloadKey, setSessionHistoryReloadKey] = useState(0)
   const [score, setScore] = useState({ correct: 0, total: 0 })
   const [quizCount, setQuizCount] = useState(0)
   const [answer, setAnswer] = useState('')
@@ -278,6 +280,8 @@ export default function App() {
           setScore({ correct: d.correct || 0, total: d.total || 0 })
           setQuizCount(d.total || 0)
           setQuestionNum(d.total || 0)
+          // Квиз завершён — освежаем историю занятий ученика
+          setSessionHistoryReloadKey((k) => k + 1)
           break
         case 'source.progress':
           endStream()
@@ -789,6 +793,7 @@ export default function App() {
         {sessionId && <div className="session-id">сессия: {sessionId}</div>}
         {/* intake.complete — истинен, когда карточка заполнена (статус из intakeStatus) */}
         <KnowledgeWikiPanel key={wikiReloadKey} studentId={student.student_id} studentName={student.student_name} intakeComplete={intake.complete} />
+        <SessionHistoryPanel studentId={student.student_id} reloadKey={sessionHistoryReloadKey} />
         <KnowledgeGraphPanel
           nodes={graph.nodes}
           edges={graph.edges}

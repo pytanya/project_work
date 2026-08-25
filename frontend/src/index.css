@@ -724,6 +724,35 @@ body.resizing .sidebar-resizer::after {
 }
 body.resizing { cursor: col-resize; user-select: none; }
 body.resizing * { cursor: col-resize !important; }
+
+/* --- История занятий ученика --- */
+.session-history { padding: 10px 12px; }
+.session-history__toggle {
+  width: 100%; display: flex; align-items: center; justify-content: space-between;
+  background: none; border: none; cursor: pointer; padding: 0; color: var(--ink);
+  font-family: var(--font-display); font-weight: 600; font-size: 13px; letter-spacing: 0.02em;
+}
+.session-history__caret { opacity: 0.55; font-size: 11px; }
+.session-history__body { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
+.session-history__item {
+  border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px;
+  background: rgba(255, 255, 255, 0.55);
+}
+.session-history__row { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
+.session-history__date { font-size: 11px; color: var(--muted); }
+.session-history__mode {
+  font-size: 10px; font-weight: 600; color: var(--ink);
+  background: rgba(199, 69, 59, 0.08); border: 1px solid rgba(199, 69, 59, 0.18);
+  border-radius: 20px; padding: 1px 7px; white-space: nowrap;
+}
+.session-history__topic {
+  font-size: 12.5px; color: var(--ink); margin-top: 3px; display: flex; gap: 5px; align-items: center;
+  line-height: 1.35; overflow: hidden; text-overflow: ellipsis;
+}
+.session-history__icon { font-size: 12px; }
+.session-history__score { margin-top: 4px; font-size: 11px; color: var(--muted); }
+.session-history__correct { font-weight: 700; color: var(--green); font-size: 13px; }
+.session-history__score-label { margin-left: 5px; }
 .chatstream { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 4px 2px; }
 .chatstream::-webkit-scrollbar { width: 8px; }
 .chatstream::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }

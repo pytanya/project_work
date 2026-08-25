@@ -64,6 +64,9 @@ export const api = {
     jsonFetch(`/api/sessions/${id}/topic`, { method: 'POST', body: JSON.stringify({ topic_id: topicId }) }),
 
   history: (id) => jsonFetch(`/api/sessions/${id}/history`),
+
+  getStudentSessions: (studentId) =>
+    jsonFetch(`/api/students/${encodeURIComponent(studentId)}/sessions`),
 }
 
 export function wsUrl(sessionId) {

@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
 
 from .engine import SessionStore
-from .routes import documents, graph, intake, messages, sessions, source, wiki
+from .routes import documents, graph, intake, messages, sessions, source, students, wiki
 
 
 def create_app(store: Optional[SessionStore] = None) -> FastAPI:
@@ -27,6 +27,7 @@ def create_app(store: Optional[SessionStore] = None) -> FastAPI:
     app.include_router(messages.router)
     app.include_router(graph.router)
     app.include_router(wiki.router)
+    app.include_router(students.router)
 
     @app.get("/api/health", tags=["monitoring"])
     def health():

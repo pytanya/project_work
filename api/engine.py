@@ -376,7 +376,30 @@ class SessionStore:
             session = self._sessions.pop(session_id, None)
         if session is not None:
             _close_logger(session.step_logger)
+            self._log_session_history(session)
         return session is not None
+
+    def _log_session_history(self, session: SessionData) -> None:
+        """Сводка закрытой сессии → история занятий ученика (студенты/sessions/)."""
+        try:
+            st = session.state
+            if not st or not getattr(st, "student_id", None):
+                return
+            if not (st.subject or st.topic or st.answered_count or st.lesson_done):
+                return  # пустой сеанс (только создали и закрыли) — не пишем
+            self.student_store.log_session(st.student_id, {
+                "session_id": session.id,
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "subject": st.subject or "",
+                "topic": st.topic or "",
+                "mode": st.mode or "",
+                "lesson_done": bool(st.lesson_done),
+                "correct": st.correct_count or 0,
+                "answered": st.answered_count or 0,
+                "total": st.num_questions or st.answered_count or 0,
+            })
+        except Exception:
+            logger.exception("log_session_history: не удалось сохранить сводку")
 
     def all_ids(self) -> list:
         with self._lock:

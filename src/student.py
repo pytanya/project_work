@@ -121,3 +121,44 @@ class StudentStore:
 
     def count(self) -> int:
         return len(self.list_ids())
+
+    # ────────────────────────────────────────────────────────────────
+    # История занятий ученика (data/students/sessions/<sid>.json)
+    # Лог пишется при закрытии сессии (DELETE /api/sessions/{id}) —
+    # лёгкая сводка: дата, предмет/тема, режим, счёт квиза, был ли урок.
+    # ────────────────────────────────────────────────────────────────
+
+    def _log_path(self, student_id: str) -> Path:
+        return self.root / "sessions" / f"{student_id}.json"
+
+    def log_session(self, student_id: str, entry: Dict[str, Any]) -> None:
+        if not student_id:
+            return
+        p = self._log_path(student_id)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            items = json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
+            if not isinstance(items, list):
+                items = []
+        except Exception:
+            items = []
+        items.append(entry)
+        items = items[-50:]
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(p)
+
+    def list_sessions(self, student_id: str, limit: int = 20) -> List[Dict[str, Any]]:
+        if not student_id:
+            return []
+        p = self._log_path(student_id)
+        if not p.exists():
+            return []
+        try:
+            items = json.loads(p.read_text(encoding="utf-8"))
+            if not isinstance(items, list):
+                return []
+            return items[-limit:][::-1]  # последние сверху
+        except Exception:
+            logger.warning("Не удалось прочитать историю занятий %s", student_id)
+            return []
