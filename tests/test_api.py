@@ -689,3 +689,39 @@ class TestWikiEnrich:
                         json={"subject": "физика", "topic": "Нет такой темы"})
         assert r.status_code == 200
         assert "Нет материалов по теме" in r.json()["note"]
+
+
+class TestSourcePolicy:
+    """Политика источников ученика: GET/PUT /api/students/{id}/sources."""
+
+    def test_get_default_allow_any(self, client):
+        r = client.get("/api/students/stu_xyz/sources")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["allow_any_sources"] is True
+        assert body["whitelist"] == []
+
+    def test_put_updates_and_normalizes(self, client):
+        r = client.put("/api/students/stu_xyz/sources", json={
+            "allow_any_sources": False,
+            "whitelist": ["https://ru.wikibooks.org/wiki/X", "WWW.YAKLASS.BY/p/1", "bad domain", "lc.rt.ru"],
+        })
+        assert r.status_code == 200
+        body = r.json()
+        assert body["allow_any_sources"] is False
+        # нормализация: scheme/пути/www убраны, мусор отброшен
+        assert "wikibooks.org" in body["whitelist"]
+        assert "yaklass.by" in body["whitelist"]
+        assert "lc.rt.ru" in body["whitelist"]
+        assert "bad domain" not in body["whitelist"]
+
+    def test_put_applies_to_new_session(self, client):
+        # политика сохраняется в профиль → новая сессия префиллит её в state
+        client.put("/api/students/stu_pref/sources", json={
+            "allow_any_sources": False, "whitelist": ["wikibooks.org"],
+        })
+        r = client.post("/api/sessions", json={"student_id": "stu_pref"})
+        sid = r.json()["session_id"]
+        st = client.get(f"/api/sessions/{sid}").json()
+        assert st["allow_any_sources"] is False
+        assert st["source_whitelist"] == ["wikibooks.org"]

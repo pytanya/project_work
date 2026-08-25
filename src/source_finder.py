@@ -831,6 +831,20 @@ async def crawl_textbook_catalog(
 # ----------------------------------------------------------------------
 # Fallback-цепочка сбора материалов (6.2)
 # ----------------------------------------------------------------------
+def _domain_allowed(url: str, allowed_domains: Optional[List[str]]) -> bool:
+    """Разрешён ли URL белым списком доменов.
+
+    Сопоставление по суффиксу домена (wikibooks.org пускает ru.wikibooks.org).
+    Пустой/None список = «любые источники».
+    """
+    if not allowed_domains:
+        return True
+    d = _domain_of(url)
+    if not d:
+        return False
+    return any(d == a or d.endswith("." + a) for a in allowed_domains if a)
+
+
 def collect_source_materials(
     subject: str,
     topic: str,
@@ -842,6 +856,8 @@ def collect_source_materials(
     *,
     use_cache: bool = True,
     student_id: str = "",
+    allowed_domains: Optional[List[str]] = None,
+    allow_any: bool = True,
     on_sources_collected: Optional[Callable[[List[Dict[str, Any]], Optional[str]], None]] = None,
 ) -> SourceCollection:
     """Основная fallback-цепочка (6.2): локальные PDF → веб-материалы по теме.
@@ -849,7 +865,12 @@ def collect_source_materials(
     1. Локальные PDF-учебники (Plan B/Plan A) — не требует авто-поиска (В-2).
     2. Поиск страниц-конспектов по теме (search_web) + fetch_url (Plan A).
     3. Ничего → status="failed" (узел source_failed, В-3).
-    
+
+    Белый список (политика источников): при allow_any=False в ход идут только
+    домены из allowed_domains; если поиск нашёл результаты, но ни один не в
+    списке — status="failed", failed_reason="whitelist_blocked" (фронт предложит
+    включить любые источники). Кэш материалов, нарушающий whitelist, игнорируется.
+
     Кэширование (6.3): если use_cache=True и материалы уже есть в кэше по ключу
     "subject::topic::grade" — возвращается SourceCollection из кэша без поиска.
     При успешном поисходе результаты сохраняются в кэш. Если передан student_id,
@@ -868,13 +889,16 @@ def collect_source_materials(
     if use_cache and cache_key:
         cached = _get_cached_materials(cache_key, cache_dir)
         if cached is not None:
-            sources = cached["sources"]
-            collection_id = cached.get("collection_id")
-            return SourceCollection(
-                status="ready",
-                sources=sources,
-                message=f"Кэшированные материалы по теме: {len(sources)} источников (collection={collection_id})",
-            )
+            cached_sources = cached["sources"]
+            # Политика источников: не отдаём кэш, нарушающий белый список
+            if allow_any or all(_domain_allowed(x.get("url", ""), allowed_domains) for x in cached_sources):
+                sources = cached_sources
+                collection_id = cached.get("collection_id")
+                return SourceCollection(
+                    status="ready",
+                    sources=sources,
+                    message=f"Кэшированные материалы по теме: {len(sources)} источников (collection={collection_id})",
+                )
 
     # 1) Локальные учебники
     local = find_local_textbooks(s, subject=subject, author=author, grade=grade)
@@ -900,6 +924,27 @@ def collect_source_materials(
                 message="Материалы по теме не найдены",
                 failed_reason="empty_result",
             )
+        # Политика источников: если белый список активен — оставляем только его домены
+        if not allow_any:
+            if not allowed_domains:
+                # Пустой список при выключенных «любых источниках» = ничего не разрешено
+                return SourceCollection(
+                    status="failed",
+                    message="Ничего не разрешено: включите «любые источники» или добавьте сайты в белый список.",
+                    failed_reason="whitelist_blocked",
+                )
+            whitelisted = [r for r in results if _domain_allowed(r.url, allowed_domains)]
+            if not whitelisted:
+                # Результаты были, но ни один не проходит whitelist — фронт предложит выбор
+                return SourceCollection(
+                    status="failed",
+                    message=(
+                        "По разрешённым источникам ничего не найдено. "
+                        "Можно включить любые источники или добавить сайты в белый список."
+                    ),
+                    failed_reason="whitelist_blocked",
+                )
+            results = whitelisted
         for r in results:
             allowed, reason = license_check(r.url, for_download=False)
             if not allowed:

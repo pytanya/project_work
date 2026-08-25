@@ -673,7 +673,10 @@ def reuse_materials_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     if cached is not None:
         cached_sources = cached.get("sources", [])
         cached_collection = cached.get("collection_id")
-        if cached_sources:
+        # Политика источников: кэш, нарушающий белый список, не подставляем
+        _wl_ok = (st.allow_any_sources
+                  or all(_sf._domain_allowed(x.get("url", ""), st.source_whitelist) for x in cached_sources))
+        if _wl_ok and cached_sources:
             st.sources = cached_sources
             st.source_status = "ready"
             st.source_note = f"Кэшированные материалы: {len(cached_sources)} источников"
@@ -684,9 +687,13 @@ def reuse_materials_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
             logger.info("reuse_gate: использован кэш материалов %s", cache_key)
             return st.model_dump()
     
-    # B) Проверяем RAG-хранилище на наличие чанков по теме
+    # B) Проверяем RAG-хранилище на наличие чанков по теме. При активном белом
+    # списке старые материалы не предлагаем — они собраны под другую политику
+    # источников; идём в свежий поиск по whitelist.
     if st.reuse_pending:
         return st.model_dump()  # вопрос задан, ждём ответ (route_reuse → END)
+    if not st.allow_any_sources:
+        return st.model_dump()
     query = st.topic or st.subject or ""
     if query:
         try:
@@ -1137,6 +1144,8 @@ def find_textbook_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         http=deps.http,
         student_id=st.student_id or "",
         use_cache=not st.force_source_refresh,
+        allowed_domains=None if st.allow_any_sources else (st.source_whitelist or None),
+        allow_any=st.allow_any_sources,
     )
     if col.status == "ready":
         local_pdf = [s for s in col.sources if s.get("type") == "local_pdf"]

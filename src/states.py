@@ -70,6 +70,10 @@ class TutorState(IntakeState):
     # Явная команда «Найти учебник»: обходим кэш материалов и ищем заново
     # (кэш мог содержать мусорные/устаревшие источники).
     force_source_refresh: bool = False
+    # Политика источников (пер-студентная, префилл из профиля при создании сессии).
+    # allow_any_sources=True → whitelist игнорируется при поиске.
+    source_whitelist: List[str] = Field(default_factory=list)
+    allow_any_sources: bool = True
 
     # --- RAG ---
     collection_id: Optional[str] = None

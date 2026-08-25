@@ -138,6 +138,69 @@ class TestSearchWeb:
         assert urls.index("https://www.yaklass.by/p/geografia/lesson") < urls.index("https://some-site.ru/article")
         assert urls[-1] == "https://multiurok.ru/blog/lesson"
 
+    def test_domain_allowed_suffix(self):
+        from src.source_finder import _domain_allowed
+
+        assert _domain_allowed("https://ru.wikibooks.org/wiki/x", ["wikibooks.org"])
+        assert _domain_allowed("https://wikibooks.org/x", ["wikibooks.org"])
+        assert _domain_allowed("https://lc.rt.ru/classbook", ["lc.rt.ru"])
+        assert not _domain_allowed("https://multiurok.ru/x", ["wikibooks.org"])
+        assert _domain_allowed("https://any.ru", [])  # пустой список = любые
+        assert _domain_allowed("https://any.ru", None)
+
+    def test_whitelist_filters_results_and_blocks(self, make_settings, monkeypatch, tmp_path):
+        from src.source_finder import collect_source_materials, _set_cached_materials
+
+        cache_dir = tmp_path / "wl_cache"
+        s = make_settings()
+        monkeypatch.setattr(
+            "src.source_finder.search_web",
+            lambda q, settings=None: [
+                SearchResult(title="вне списка", url="https://multiurok.ru/lesson"),
+                SearchResult(title="в списке", url="https://ru.wikibooks.org/wiki/География"),
+            ],
+        )
+        monkeypatch.setattr(
+            "src.source_finder.fetch_url",
+            lambda url, client=None: ("Конспект по теме.", "OK"),
+        )
+        # allow_any=False + whitelist → в коллекцию попадает только wikibooks
+        col = collect_source_materials("география", "Атмосфера", settings=s, cache_dir=cache_dir,
+                                       allowed_domains=["wikibooks.org"], allow_any=False)
+        assert col.status == "ready"
+        assert all("wikibooks.org" in x["url"] for x in col.sources)
+
+    def test_whitelist_blocked_when_no_match(self, make_settings, monkeypatch, tmp_path):
+        from src.source_finder import collect_source_materials
+
+        cache_dir = tmp_path / "wl_cache2"
+        s = make_settings()
+        monkeypatch.setattr(
+            "src.source_finder.search_web",
+            lambda q, settings=None: [SearchResult(title="x", url="https://multiurok.ru/lesson")],
+        )
+        col = collect_source_materials("география", "Атмосфера", settings=s, cache_dir=cache_dir,
+                                       allowed_domains=["wikibooks.org"], allow_any=False)
+        assert col.status == "failed"
+        assert col.failed_reason == "whitelist_blocked"
+        # результат нашёлся, но не в белом списке — сообщение подсказывает действие
+        assert "разрешённым источникам" in col.message
+
+    def test_whitelist_ignores_violating_cache(self, make_settings, monkeypatch, tmp_path):
+        from src.source_finder import collect_source_materials, _set_cached_materials
+
+        cache_dir = tmp_path / "wl_cache3"
+        s = make_settings()
+        _set_cached_materials("география::Атмосфера::", [{"type": "page", "url": "https://multiurok.ru/x"}],
+                              collection_id="web", cache_dir=cache_dir)
+        called = []
+        monkeypatch.setattr("src.source_finder.search_web", lambda q, settings=None: called.append(1) or [])
+        col = collect_source_materials("география", "Атмосфера", settings=s, cache_dir=cache_dir,
+                                       allowed_domains=["wikibooks.org"], allow_any=False)
+        # кэш нарушает whitelist → игнорируется, идёт свежий поиск (пустой → failed)
+        assert called
+        assert col.status == "failed"
+
 
 class TestFetchUrl:
     def _client_with(self, body: bytes, status: int = 200) -> httpx.Client:

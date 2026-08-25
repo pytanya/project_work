@@ -371,6 +371,27 @@ class SessionStore:
                 session.last_activity = time.monotonic()
             return session
 
+    def apply_source_policy_to_sessions(self, student_id: str, allow_any: bool, whitelist: List[str]) -> int:
+        """Применить политику источников к активным сессиям ученика.
+
+        Возвращает число обновлённых сессий. Следующий поиск уже пойдёт по новой политике.
+        """
+        updated = 0
+        with self._lock:
+            for sid, s in self._sessions.items():
+                st = getattr(s, "state", None)
+                if st is None or getattr(st, "student_id", None) != student_id:
+                    continue
+                try:
+                    s.state = st.model_copy(update={
+                        "allow_any_sources": bool(allow_any),
+                        "source_whitelist": list(whitelist),
+                    })
+                    updated += 1
+                except Exception:
+                    logger.exception("apply_source_policy: сессия %s", sid)
+        return updated
+
     def delete(self, session_id: str) -> bool:
         with self._lock:
             session = self._sessions.pop(session_id, None)

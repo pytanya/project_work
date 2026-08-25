@@ -46,6 +46,10 @@ class StudentProfile(BaseModel):
     grade: Optional[str] = None
     created_at: str = ""
     updated_at: str = ""
+    # Политика источников: белый список доменов + флаг «любые источники».
+    # allow_any_sources=True → whitelist игнорируется при поиске.
+    source_whitelist: List[str] = Field(default_factory=list)
+    allow_any_sources: bool = True
 
     def touch(self) -> None:
         self.updated_at = _now_iso()
@@ -61,6 +65,9 @@ class StudentProfile(BaseModel):
             out["learner_type"] = self.learner_type
         if self.grade:
             out["grade"] = self.grade
+        if self.source_whitelist:
+            out["source_whitelist"] = list(self.source_whitelist)
+        out["allow_any_sources"] = bool(self.allow_any_sources)
         return out
 
 
