@@ -441,6 +441,32 @@ class TestLessonQualityGate:
         ))
         assert ok, reason
 
+    def test_rejects_portal_title_fragments(self):
+        """Заголовки-портала вместо объяснения («Тест „Творцы…“», «Литературная
+        гостиная …») без прозы и без структуры — не урок."""
+        from src.tutor import lesson_quality_ok
+
+        ok, reason = lesson_quality_ok(self._lesson(
+            title="Поэты серебряного века",
+            definition="Тест «Творцы Серебряного века»",
+            sections=[{"body": "Литературная гостиная «Уроки нравственности»"},
+                      {"body": "Тест «Серебряный век»"}],
+        ))
+        assert not ok
+        assert reason == "fragments"
+
+    def test_accepts_lesson_with_hook_and_terms(self):
+        """Хук + термины — структурное обогащение: урок принимается."""
+        from src.tutor import lesson_quality_ok
+
+        ok, reason = lesson_quality_ok(self._lesson(
+            title="Поэты серебряного века",
+            hook="Кто из поэтов считал себя акмеистом?",
+            definition="Серебряный век — период русской культуры.",
+            key_terms=[{"term": "акмеизм", "definition": "течение"}],
+        ))
+        assert ok, reason
+
     def test_generate_lesson_diagram_bad_kind_defaults(self):
         """Неизвестный kind → flow; битая диаграмма → None (не роняет урок)."""
         state = _state()

@@ -629,11 +629,14 @@ def _repair_lesson_from_text(text: str, topic: str) -> Lesson:
 def lesson_quality_ok(lesson: Lesson) -> Tuple[bool, str]:
     """Синхронный гейт качества урока перед показом (защита от «выплюнутого» контекста).
 
-    Отклоняем не короткие уроки, а мусор-сигнатуры слайд-шоу:
-      - служебный хром презентации («Часть N», «Презентация онлайн», размеры файлов) в
-        определении/заголовке;
-      - «выплюнутый» контекст: много коротких секций без заголовков и без связного текста.
-    Такой урок невозможно «открыть» как описание — его не показываем.
+    Урок принимается, если есть:
+      - структурное обогащение (заголовки секций / «проверь себя» / цитаты /
+        ключевые термины / хук) — признак осмысленного урока, либо
+      - связная проза (определение ≥50 символов или секция ≥100 символов).
+
+    Голые фрагменты-заголовки («Тест „Творцы Серебряного века“», «Литературная
+    гостиная …») и служебный хром слайд-шоу не проходят — такой урок невозможно
+    «открыть» как описание, его не показываем.
     """
     from .knowledge import _is_slide_chrome, _is_slideshow_text, _is_web_noise
 
@@ -646,26 +649,30 @@ def lesson_quality_ok(lesson: Lesson) -> Tuple[bool, str]:
         lines = [ln for ln in text.splitlines() if ln.strip() and not _is_web_noise(ln)]
         return "\n".join(lines) if lines else None
 
-    title = _clean_prose(lesson.title) or ""
     definition = _clean_prose(lesson.definition) or ""
-    sections = [s for s in (_clean_prose(s.body) for s in (lesson.sections or [])) if s]
+    section_pairs = [(s, _clean_prose(s.body)) for s in (lesson.sections or [])]
+    section_pairs = [(s, b) for s, b in section_pairs if b]
+    sections = [b for _, b in section_pairs]
     if not definition and not sections:
         return False, "no_content"
     # Служебный хром слайдов в определении/заголовке — источник-презентация.
     # Проверяем «сырые» поля: _clean_prose может вычистить мусорную строку в пустоту.
     if _is_slide_chrome(lesson.definition) or _is_slide_chrome(lesson.title):
         return False, "slideshow_chrome"
+    # Структурное обогащение — урок составлен, а не скопирован из контекста
+    structural = (
+        any((s.heading or "").strip() for s, _ in section_pairs)
+        or any((s.check_question or "").strip() for s, _ in section_pairs)
+        or any((s.citation or "").strip() for s, _ in section_pairs)
+        or bool(lesson.key_terms)
+        or bool(_clean_prose(lesson.hook))
+    )
+    # Связная проза — реальное объяснение, а не заголовок
+    prose = bool(definition and len(definition) >= 50) or any(len(b) >= 100 for b in sections)
+    if structural or prose:
+        return True, "ok"
     if sections:
-        # «Выплюнутые» фрагменты без заголовков и без длинного текста — не урок
-        has_heading = any((s.heading or "").strip() for s in (lesson.sections or []))
-        if not has_heading and len(sections) >= 4 and all(len(s) < 60 for s in sections):
-            return False, "fragments"
-        return True, "ok"
-    # Нет пригодных секций (все вычистились в шум/пустоту) — урок держится только
-    # на определении. Оно должно быть содержательным предложением, а не скрапленным
-    # заголовком страницы («Слои атмосферы — урок. География, 6 класс. Вход»).
-    if len(definition) >= 60:
-        return True, "ok"
+        return False, "fragments"
     return False, "definition_only_shallow"
 
 

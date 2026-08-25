@@ -43,8 +43,10 @@ _gh/
 *.png
 .roo/
 .roomodes
+node_modules/
 frontend/node_modules/
 frontend/dist/
+.playwright-cli/
 
 # --- IDE ---
 .vscode/

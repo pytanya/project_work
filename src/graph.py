@@ -32,6 +32,7 @@ from .judge import judge_evaluation
 from .knowledge import (
     Embedder,
     VectorStore,
+    _clean_text_lines,
     _make_chunks,
     detect_text_layer,
     make_collection_name,
@@ -174,7 +175,7 @@ def _wiki_extract_from_graph(
             if art is not None and (art.body or "").strip():
                 continue  # конспект уже есть
             chunks = _rag_chunks(deps.store, title, st, k=3)
-            context = [c.chunk.text for c in chunks]
+            context = [_clean_text_lines(c.chunk.text) for c in chunks]
             if not context:
                 continue
             if llm_call is None:
@@ -294,22 +295,34 @@ def _rag_chunks(store: VectorStore, query: str, state: TutorState, k: int = 3) -
 
 
 def _chunk_has_meaningful_content(text: str) -> bool:
-    """Чанк — учебный контент, а не навигация/промо-мусор страницы.
+    """Чанк — учебный контент, а не навигация/заголовки портала.
 
-    Считаем строки с реальными предложениями (длина ≥ 40 символов и не шум).
-    Если таких нет — чанк бесполезен для урока/квиза.
+    Заголовки-агрегаторов («Литературная гостиная …», «Тест …») длиной 30-50
+    символов проходят старый фильтр, но урок из них не собрать. Требуем прозу:
+      - длинное предложение (≥80 символов), либо
+      - несколько строк ≥40 символов, хотя бы с точкой/вопросом в конце, либо
+      - несколько коротких предложений с пунктуацией (абзац-конспект).
     """
     from .knowledge import _is_web_noise
 
     lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
     if not lines:
         return False
-    long_meaningful = [ln for ln in lines if len(ln) >= 40 and not _is_web_noise(ln)]
-    if long_meaningful:
+    meaningful = [ln for ln in lines if not _is_web_noise(ln)]
+    if not meaningful:
+        return False
+    # Длинное предложение — точно контент
+    if any(len(ln) >= 80 for ln in meaningful):
         return True
-    # Несколько средних предложений (25-39 символов) тоже годятся
-    medium = [ln for ln in lines if len(ln) >= 25 and not _is_web_noise(ln)]
-    return len(medium) >= 3
+    # Прозные предложения заканчиваются точкой/вопросом (а не заголовки-списки)
+    def _is_sentence(ln: str) -> bool:
+        return bool(ln) and ln.rstrip("…\"»")[-1:] in (".", "!", "?")
+    long_enough = [ln for ln in meaningful if len(ln) >= 40]
+    if len(long_enough) >= 2 and any(_is_sentence(ln) for ln in long_enough):
+        return True
+    # Короткий абзац: несколько предложений с пунктуацией
+    small = [ln for ln in meaningful if len(ln) >= 25 and _is_sentence(ln)]
+    return len(small) >= 2
 
 
 def _active_topic_section(state: TutorState) -> Optional[str]:
@@ -320,23 +333,6 @@ def _active_topic_section(state: TutorState) -> Optional[str]:
         if n.get("id") == state.active_topic:
             return n.get("section_number")
     return None
-
-
-def _context_has_prose(results: List[Any]) -> bool:
-    """RAG-контекст содержит связную прозу, а не фрагменты-слайды.
-
-    Чанк-слайд (короткие строки/заголовок) проходит _chunk_has_meaningful_content,
-    но урок из него не собрать. Требуем хотя бы один чанк с длинным предложением
-    (≥80 символов) либо достаточный объём нешумового текста.
-    """
-    for r in results:
-        lines = [ln.strip() for ln in (r.chunk.text or "").splitlines() if ln.strip()]
-        if any(len(ln) >= 80 for ln in lines):
-            return True
-        total = sum(len(ln) for ln in lines if ln)
-        if total >= 300 and len(lines) >= 3:
-            return True
-    return False
 
 
 def _rag_context(store: VectorStore, query: str, state: TutorState, k: int = 3) -> List[str]:
@@ -556,18 +552,7 @@ def agent_tutor_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
                   message=st.agent_message)
             _emit(deps, "system", message=st.agent_message, kind="content.empty")
             return st.model_dump()
-        # Гейт прозы: фрагменты-слайды без связного текста не дадут урок
-        if not _context_has_prose(chunks):
-            st.agent_message = (
-                f"По теме «{topic}» источники содержат только фрагменты-слайды без связного текста. "
-                "Загрузите учебник (PDF/DOCX) или нажмите «Найти учебник» — и я подготовлю урок."
-            )
-            st.agent_question = st.agent_message
-            _emit(deps, "source.progress", stage="content", url="", status="empty",
-                  message=st.agent_message)
-            _emit(deps, "system", message=st.agent_message, kind="content.empty")
-            return st.model_dump()
-        context = [c.chunk.text for c in chunks]
+        context = [_clean_text_lines(c.chunk.text) for c in chunks]
         _emit(deps, "source.progress", stage="content", url="", status="generating",
               message=f"Генерирую урок по теме «{topic}» ({len(context)} фрагментов)…")
         # Урок — структурированный JSON: без on_token (не стримим сырой JSON)
@@ -578,9 +563,9 @@ def agent_tutor_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         ok, _reason = tutor_mod.lesson_quality_ok(lesson)
         if not ok:
             st.agent_message = (
-                f"По теме «{topic}» не удалось собрать связный урок: материал оказался "
-                "презентацией/фрагментами. Загрузите учебник (PDF/DOCX) или нажмите "
-                "«Найти учебник» — и я подготовлю материал."
+                f"По теме «{topic}» не удалось собрать связный урок из найденных источников — "
+                "они содержат фрагменты без связного объяснения. Загрузите учебник "
+                "(PDF/DOCX) или нажмите «Найти учебник» для поиска других источников."
             )
             st.agent_question = st.agent_message
             _emit(deps, "source.progress", stage="content", url="", status="empty",
@@ -668,6 +653,55 @@ def _reuse_decision(answer: Optional[str]) -> str:
     return "reuse"
 
 
+def _reindex_cached_sources(st: TutorState, deps: GraphDeps, sources: List[Dict[str, Any]]) -> int:
+    """Переиндексация кэшированных веб-материалов в векторный стор.
+
+    Читает тексты из по-URL кэша (SOURCES_CACHE_DIR), режет на чанки текущим
+    кодом (слайд-шоу отсекаются, student_id проставляется) и добавляет в стор.
+    Возвращает число проиндексированных источников.
+    """
+    from . import source_finder as _sf
+
+    added = 0
+    chunks: List[Any] = []
+    for s in sources:
+        url = s.get("url", "")
+        if not url:
+            continue
+        try:
+            text = _sf._cache_read(url, deps.settings.SOURCES_CACHE_DIR)
+        except Exception:
+            text = None
+        if not text:
+            continue
+        sc = _make_chunks(text, source=url, subject=st.subject, grade=st.grade,
+                          student_id=getattr(st, "student_id", None) or None)
+        if not sc:
+            continue
+        chunks.extend(sc)
+        added += 1
+    if chunks:
+        deps.store.add(chunks)
+        logger.info("reuse_gate: переиндексировано %d источников (%d чанков)", added, len(chunks))
+    return added
+
+
+def _student_has_chunks(st: TutorState, deps: GraphDeps) -> bool:
+    """Есть ли в хранилище чанки ученика по теме (для переиспользования материалов)."""
+    query = (st.topic or st.subject or "").strip()
+    if not query:
+        return False
+    filters: Dict[str, Any] = {}
+    if st.subject:
+        filters["subject"] = st.subject
+    if getattr(st, "student_id", None):
+        filters["student_id"] = st.student_id
+    try:
+        return bool(deps.store.search(query, k=1, filters=filters or None))
+    except Exception:
+        return False
+
+
 def reuse_materials_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     """Гейт переиспользования: если по теме уже есть разобранные материалы ученика —
     спрашиваем, использовать ли их (поиск других — только по явному решению).
@@ -719,6 +753,13 @@ def reuse_materials_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         _wl_ok = (st.allow_any_sources
                   or all(_sf._domain_allowed(x.get("url", ""), st.source_whitelist) for x in cached_sources))
         if _wl_ok and cached_sources:
+            # Кэш материалов + векторный стор должны быть согласованы. Если в сторе
+            # нет чанков ученика (кэш создан старой версией / коллекция пересоздана),
+            # переиндексируем тексты из по-URL кэша — иначе RAG-поиск вернёт пусто.
+            if not _student_has_chunks(st, deps):
+                logger.info("reuse_gate: чанки ученика не найдены в сторе — переиндексация из кэша %s",
+                            cache_key)
+                _reindex_cached_sources(st, deps, cached_sources)
             st.sources = cached_sources
             st.source_status = "ready"
             st.source_note = f"Кэшированные материалы: {len(cached_sources)} источников"
@@ -926,21 +967,7 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         _emit(deps, "system", message=st.agent_message, kind="content.empty")
         _emit(deps, "intake.question", question=st.agent_question, missing_fields=["textbook_file"])
         return st.model_dump()
-    # Гейт прозы: найденные фрагменты — только слайды/служебные строки без связного
-    # текста? Такой контекст не даст урок — честно просим другой источник.
-    if not _context_has_prose(chunks):
-        st.lesson_done = False
-        st.agent_message = (
-            f"По теме «{topic}» источники содержат только фрагменты-слайды без связного текста. "
-            "Загрузите учебник (PDF/DOCX) или нажмите «Найти учебник» — и я подготовлю материал."
-        )
-        st.agent_question = st.agent_message
-        _emit(deps, "source.progress", stage="content", url="", status="empty",
-              message=st.agent_message)
-        _emit(deps, "system", message=st.agent_message, kind="content.empty")
-        _emit(deps, "intake.question", question=st.agent_question, missing_fields=["textbook_file"])
-        return st.model_dump()
-    context = [c.chunk.text for c in chunks]
+    context = [_clean_text_lines(c.chunk.text) for c in chunks]
     _emit(deps, "source.progress", stage="content", url="", status="generating",
           message=f"Генерирую {_MODE_LABELS.get(mode, 'материал')} по теме «{topic}» ({len(context)} фрагментов)…")
     on_token = deps.on_token  # реальный стриминг токенов в браузер (stream=True)
@@ -960,9 +987,9 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         if not ok:
             st.lesson_done = False
             st.agent_message = (
-                f"По теме «{topic}» не удалось собрать связный урок: материал оказался "
-                "презентацией/фрагментами. Загрузите учебник (PDF/DOCX) или нажмите "
-                "«Найти учебник» — и я подготовлю материал."
+                f"По теме «{topic}» не удалось собрать связный урок из найденных источников — "
+                "они содержат фрагменты без связного объяснения. Загрузите учебник "
+                "(PDF/DOCX) или нажмите «Найти учебник» для поиска других источников."
             )
             st.agent_question = st.agent_message
             _emit(deps, "source.progress", stage="content", url="", status="empty",
@@ -1235,6 +1262,7 @@ def find_textbook_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
               message=f"Индексация материалов: {len(col.sources)} источников…")
         # Источники без осмысленных чанков (слайд-шоу, пустые скрапы) не индексируем.
         # _make_chunks возвращает [] для страниц-презентаций — такие источники отпадают.
+        # Качество чанков дополнительно проверяется на ретривеле (_chunk_has_meaningful_content).
         kept_sources: List[Dict[str, Any]] = []
         kept_texts: List[str] = []
         chunks: List[Any] = []
@@ -1410,7 +1438,7 @@ def generate_question_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]
     _emit(deps, "source.progress", stage="quiz", url="", status="generating",
           message=f"Генерирую вопрос по теме «{topic}»…")
     chunks = _rag_chunks(deps.store, topic, st, k=3)
-    context = [c.chunk.text for c in chunks]
+    context = [_clean_text_lines(c.chunk.text) for c in chunks]
     if not context:
         context = ["Нет контекста по теме."]
     # Антидубликат (7.3.2): тексты уже заданных вопросов → в промпт; при семантическом
