@@ -873,6 +873,37 @@ class TestWebSourceFlow:
         assert intents, "intent-сообщение не отправлено"
         assert any("квиз" in m and "Кант" in m for m in intents)
 
+    def test_force_refresh_bypasses_cached_materials(self, web_deps):
+        """Явный клик «Найти учебник» (force_source_refresh) обходит кэш материалов
+        и запускает новый поиск, а не подставляет мусорные источники из кэша."""
+        from src import source_finder as sf
+
+        # 1) Кэшируем мусорные источники под студента
+        sid = "stu_force"
+        cache_key = f"{sid}::философия::Кант::"
+        sf._set_cached_materials(
+            cache_key,
+            [{"type": "page", "url": "https://multiurok.ru/junk", "license": "ok"}],
+            collection_id="web", cache_dir=web_deps.settings.SOURCES_CACHE_DIR,
+        )
+        calls = []
+        orig = web_deps.source_collector
+        web_deps.source_collector = lambda **kw: calls.append(1) or orig(**kw)
+        graph = build_graph(web_deps)
+        state = TutorState(num_questions=3, student_id=sid)
+
+        # 2) Обычный поток — кэш подставляет источники, коллектор НЕ вызывается
+        res = _feed(graph, state, ["студент", "философия", "Кант", "нет", "квиз"])
+        assert res.source_status == "ready"
+        assert not calls, "кэш-путь не должен вызывать коллектор"
+
+        # 3) force_source_refresh=True — кэш игнорируется, коллектор вызывается заново
+        res2 = _invoke(graph, {**res.model_dump(), "force_source_refresh": True,
+                               "sources": [], "source_status": None, "collection_id": None})
+        assert calls, "force_source_refresh обязан запустить свежий поиск (коллектор вызван)"
+        assert res2.source_status == "ready"
+        assert res2.sources and res2.sources[0]["url"] != "https://multiurok.ru/junk"
+
 
 class TestTopicKeyConsistency:
     """Единый ключ темы (title узла) между графом, knowledge_map и wiki:

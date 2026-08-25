@@ -23,7 +23,9 @@ class FindTextbookBody(BaseModel):
 async def find_textbook(session_id: str, body: Optional[FindTextbookBody] = None, store: SessionStore = Depends(get_store)):
     session = get_session(store, session_id)
     body = body or FindTextbookBody()
-    update = {"has_textbook": False, "textbook_file": None, "sources": [], "source_status": None}
+    update = {"has_textbook": False, "textbook_file": None, "sources": [], "source_status": None,
+              "collection_id": None, "knowledge_graph": None, "active_topic": None,
+              "force_source_refresh": True}
     if body.subject:
         update["subject"] = body.subject
     if body.grade:

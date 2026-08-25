@@ -662,11 +662,14 @@ def reuse_materials_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     # A) Проверяем кэш материалов по (subject::topic::grade). Ключ включает
     # student_id — материалы учеников изолированы (из одного предмета/темы у
     # разных детей могут быть разные учебники и источники).
+    # force_source_refresh (явный клик «Найти учебник») обходит кэш — мусорные
+    # или устаревшие материалы не подставляются повторно.
     _sid = st.student_id or "anon"
     cache_key = f"{st.subject}::{st.topic or ''}::{st.grade or ''}"
     _cache_key_student = f"{_sid}::{cache_key}"
     from . import source_finder as _sf
-    cached = _sf._get_cached_materials(_cache_key_student, cache_dir=deps.settings.SOURCES_CACHE_DIR)
+    cached = None if st.force_source_refresh else _sf._get_cached_materials(
+        _cache_key_student, cache_dir=deps.settings.SOURCES_CACHE_DIR)
     if cached is not None:
         cached_sources = cached.get("sources", [])
         cached_collection = cached.get("collection_id")
@@ -1133,6 +1136,7 @@ def find_textbook_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         settings=deps.settings,
         http=deps.http,
         student_id=st.student_id or "",
+        use_cache=not st.force_source_refresh,
     )
     if col.status == "ready":
         local_pdf = [s for s in col.sources if s.get("type") == "local_pdf"]
@@ -1156,6 +1160,7 @@ def find_textbook_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         deps.store.add(chunks)
         st.collection_id = "web"
         st.sources = col.sources
+        st.force_source_refresh = False  # свежий поиск выполнен — кэш снова разрешён
         
         # Сохраняем в кэш материалов (6.3). Ключ включает student_id — кэш
         # персональный по ученику, а не общий для всех.
