@@ -1171,6 +1171,49 @@ edututor.session                            ← корневой (session_id, to
 > 4. Приёмка считается пройденной, если **≥ 80% ответов партии прошли с Δ ≤ 1** и проверено не менее 10 ответов.
 > 5. Фиксация: таблица «ответ → judge score → ручная оценка → Δ» в чек-листе Этапа 6 и `project_report.md`.
 
+### 10.4. Учёт стоимости и бюджета прогона (В-7)
+
+Стоимость LLM-вызовов и лимиты считаются на **каждом прогоне** (сессия урока/сценарий), в двух контурах:
+
+**Контур 1 — учёт расходов и жёсткий лимит: `BudgetGuard` (`src/guardrails.py`)**
+- Отдельный экземпляр создаётся на каждую сессию/прогон: `api/engine.py` (`_session_deps`, `budget = BudgetGuard(deps.settings)`), консольный прогон — `main.py`.
+- Накопительные счётчики по ролям `cheap/tutor/expert/judge`: `_spent`, `_calls`, `_calls_total`.
+- `record(role, cost_usd)` вызывается из `LLMClient` после каждого успешного ответа и увеличивает счётчик роли и общее число вызовов.
+- `exceeded(role)` — превышен ли бюджет:
+  - ролевая корзина: **`tutor` и `expert` делят `TUTOR_ALLOWANCE_USD`** (сумма по обеим ролям не должна превысить allowance);
+  - общий лимит сессии `MAX_COST_USD`;
+  - лимит числа LLM-вызовов сессии `MAX_LLM_CALLS_PER_SESSION`.
+- Если `allowed(role)` → false, `LLMClient.chat`/`chat_stream` бросает `BudgetExceededError` (`src/llm_client.py`) — `api/engine.py` превращает его в сообщение пользователю «исчерпан бюджет AI-запросов сессии».
+- Экспорт среза: `to_dict()` → `spent_by_role`, `calls_by_role`, `spent_total_usd`, `max_cost_usd`, `max_calls_per_session`.
+
+**Контур 2 — аналитика прогона: `MetricsCollector` (`src/metrics.py`)**
+- `add_llm_call(...)` фиксирует каждый вызов: роль, `prompt_tokens`/`completion_tokens`, `cost_usd`, провайдер, длительность, статус (`OK`/`refused`).
+- Агрегаты: `total_cost`, `cost_by_role`, `num_llm_calls_by_role`, `total_tokens`, `num_steps`, `cheap_refusal_rate`, `elapsed_sec`.
+- `to_dict()` — полный срез сессии для отчёта; шаги (`add_step`) тоже могут нести `cost_usd`.
+
+**Как считается стоимость одного вызова (`src/llm_client.py`, `_make_request`)**
+1. **RouterAI**: `resp.cost` (рубли) → `cost = cost_raw * RUB_TO_USD_RATE`.
+2. **OpenRouter**: `usage.total_cost`, если провайдер вернул поле.
+3. **Fallback по токенам** (`_estimate_cost`): по прайсам `COST_PER_1M_PROMPT` / `COST_PER_1M_COMPLETION` (USD); для RouterAI — рублёвые цены `ROUTERAI_COST_PER_1M_PROMPT_RUB`/`COMPLETION_RUB` и отдельно `QWEN_COST_PER_1M_*` для qwen-моделей, с пересчётом в USD через `RUB_TO_USD_RATE`.
+4. **Стриминг** (`chat_stream` → `_stream_one`) — оценка только по токенам (провайдерский `cost` в чанках не приходит).
+
+**Экспорт отчёта прогона**
+- `src/export.py`: CSV/JSON-сводка с колонками `total_cost_usd`, `elapsed_sec` → папка `output/run_<timestamp>/`.
+- Консольный прогон печатает итоговую стоимость (`main.py`: `total_cost_usd=metrics.total_cost`).
+
+**Бюджеты по умолчанию (раздел 14)**
+- `MAX_COST_USD=1.0` — суммарный бюджет сессии;
+- `CHEAP_ALLOWANCE_USD=0.3` — дешёвые/локальные роли;
+- `TUTOR_ALLOWANCE_USD=0.5` — тьютор **и** эксперт (общая корзина);
+- `JUDGE_ALLOWANCE_USD=0.5` — судья;
+- `MAX_LLM_CALLS_PER_SESSION=90` — страховка от зацикливания графа.
+
+**Важно: не путать два разных «бюджета»**
+- Денежный бюджет В-7 (этот раздел) — стоимость LLM-вызовов в USD.
+- `grade_budget` в `src/lesson_eval.py` — **не деньги**: класс обучаемого (`student`/`school`), определяющий мягкость критериев качества текста урока (средняя длина предложения и объём «в пределах бюджета класса»).
+
+**Тесты:** `tests/test_guardrails.py` (превышение ролевого/общего бюджета, общая корзина `tutor`+`expert`), `tests/test_llm_client.py` (стоимость фиксируется в бюджете, `BudgetExceededError`), `tests/test_metrics.py` (`total_cost`, `cost_by_role`).
+
 ---
 
 ## 11. Структура проекта
