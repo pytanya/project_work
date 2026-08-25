@@ -453,7 +453,7 @@ class TestLessonQualityGate:
                       {"body": "Тест «Серебряный век»"}],
         ))
         assert not ok
-        assert reason == "fragments"
+        assert reason in ("title_definition", "fragments")
 
     def test_accepts_lesson_with_hook_and_terms(self):
         """Хук + термины — структурное обогащение: урок принимается."""

@@ -598,6 +598,20 @@ def _lesson_from_data(data: Dict[str, Any], topic: str) -> Lesson:
 
 MAX_REPAIR_SECTIONS = 6
 
+# Заголовки-портала, которые слабая LLM выдаёт за «определение»/секцию:
+# «Презентация …», «Тест …», «Литературная гостиная …», «Урок …» и т.п.
+_TITLE_PREFIX_RE = re.compile(
+    r"^(презентаци[яию]|тест\b|реферат|доклад|сообщение|литературная гостиная|"
+    r"сценарий|конспект|план[- ]конспект|методическая разработка|проект|"
+    r"контрольная работа|самостоятельная работа|слайд\b)",
+    re.IGNORECASE,
+)
+
+
+def _is_title_fragment(text: str) -> bool:
+    """Фрагмент выглядит как заголовок публикации/презентации, а не объяснение."""
+    return bool(_TITLE_PREFIX_RE.match((text or "").strip()))
+
 
 def _repair_lesson_from_text(text: str, topic: str) -> Lesson:
     """Собирает Lesson из сплошного текста (LLM проигнорировал JSON).
@@ -659,6 +673,12 @@ def lesson_quality_ok(lesson: Lesson) -> Tuple[bool, str]:
     # Проверяем «сырые» поля: _clean_prose может вычистить мусорную строку в пустоту.
     if _is_slide_chrome(lesson.definition) or _is_slide_chrome(lesson.title):
         return False, "slideshow_chrome"
+    # Заголовок публикации («Презентация …», «Тест …», «Литературная гостиная …»)
+    # — не объяснение темы
+    if _is_title_fragment(definition):
+        return False, "title_definition"
+    if definition and len(definition) < 30:
+        return False, "definition_short"
     # Структурное обогащение — урок составлен, а не скопирован из контекста
     structural = (
         any((s.heading or "").strip() for s, _ in section_pairs)
@@ -674,6 +694,96 @@ def lesson_quality_ok(lesson: Lesson) -> Tuple[bool, str]:
     if sections:
         return False, "fragments"
     return False, "definition_only_shallow"
+
+
+def _lesson_retry_prompt(topic: str, context: List[str], grade: Optional[str],
+                         curriculum: Optional[str], previous: str) -> List[Dict[str, str]]:
+    """Корректирующая инструкция для второй попытки синтеза урока.
+
+    Слабая LLM копирует заголовки-портала вместо объяснения. Даём явную обратную
+    связь: определение — целое предложение, секции — объяснение своими словами,
+    заголовки/названия тестов/нав-строки не включать.
+    """
+    messages = _lesson_prompt(topic, context, grade, curriculum)
+    hint = (
+        "\n\n--- ПРЕДЫДУЩАЯ ПОПЫТКА НЕ ПОДОШЛА ---\n"
+        "Ты вернул(а) заголовки и фрагменты вместо объяснения:\n"
+        f"«{str(previous or '')[:300]}»\n\n"
+        "Сделай УРОК ЗАНОВО, строго по правилам:\n"
+        "1. \"definition\" — целое предложение (минимум 8 слов), объясняющее тему "
+        "своими словами.\n"
+        "2. Каждая секция \"body\" — объяснение 2-3 предложениями (минимум 100 "
+        "символов), НЕ цитата и НЕ заголовок.\n"
+        "3. НЕ включай: названия тестов, «литературная гостиная», имена докладчиков, "
+        "«презентация онлайн», навигацию сайтов.\n"
+        "4. Если по контексту нельзя объяснить — верни JSON с пустыми полями."
+    )
+    messages = messages + [{"role": "user", "content": hint}]
+    return messages
+
+
+def _synthesize_lesson_from_context(topic: str, context: List[str]) -> Lesson:
+    """Детерминированная сборка урока из связных предложений контекста.
+
+    Фолбэк, когда LLM не смогла структурировать урок. Берём длинные предложения
+    (≥55 символов, с пунктуацией, не шум): первое — определение, остальные
+    группируем в секции ~140 символов. Пользователь получает реальный контент,
+    а не «нет материала» или заголовки.
+    """
+    from .knowledge import _is_web_noise
+
+    def _is_sentence(c: str) -> bool:
+        return c.endswith((".", "!", "?")) and c.rstrip("…\"»")[-1:] in (".", "!", "?")
+
+    sentences: List[str] = []
+    for block in context or []:
+        for line in (block or "").splitlines():
+            line = " ".join(line.split()).strip()
+            if not line or _is_web_noise(line) or len(line) < 55 or _is_title_fragment(line):
+                continue
+            for part in re.split(r"(?<=[.!?])\s+", line):
+                c = " ".join(part.split()).strip()
+                if (len(c) >= 55 and not _is_web_noise(c) and _is_sentence(c)
+                        and not _is_title_fragment(c)):
+                    sentences.append(c)
+    seen: set = set()
+    unique: List[str] = []
+    for s in sentences:
+        key = s[:25].lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(s)
+    if not unique:
+        return Lesson(title=topic)
+    # Определением выбираем «объяснительное» предложение: с темой/ключевыми
+    # словами («период», «называют», «литературы» и т.п.), а не цитату-стихи
+    # или случайный отрывок.
+    _topic_words = (topic or "").lower().split()
+    _signal_words = ("период", "это", "является", "представляет собой", "называют",
+                     "направление", "течение", "эпоха", "истории русской", "культур",
+                     "литератур", "поэзи", "искусств", "время", "начала")
+    definition = unique[0]
+    best = 0
+    for s in unique:
+        low = s.lower()
+        score = sum(1 for w in _topic_words if w in low) * 2
+        score += sum(1 for w in _signal_words if w in low)
+        if score > best:
+            best = score
+            definition = s
+    rest = [s for s in unique if s != definition]
+    sections: List[LessonSection] = []
+    buf = ""
+    for s in rest:
+        if buf and len(buf) + len(s) > 140:
+            sections.append(LessonSection(body=buf))
+            buf = ""
+        buf = (buf + " " + s).strip()
+    if buf:
+        sections.append(LessonSection(body=buf))
+    sections = sections[:3]
+    summary = unique[-1] if len(unique) >= 5 else ""
+    return Lesson(title=topic, definition=definition, sections=sections, summary=summary)
 
 
 def generate_lesson(
@@ -726,6 +836,27 @@ def generate_lesson(
         if len(text) < 40:
             text = (context[0] if context else f"Материалы по теме «{topic}» ещё пополняются.")[:1200]
         lesson = _repair_lesson_from_text(text, topic)
+    # Синхронный гейт качества: если урок — заголовки/фрагменты без объяснения,
+    # пробуем повторную генерацию с корректировкой, затем детерминированную сборку.
+    if not lesson_quality_ok(lesson)[0]:
+        try:
+            retry_raw = generate_text(
+                _lesson_retry_prompt(topic, context, state.grade, state.curriculum, raw),
+                llm_call=llm_call, on_token=on_token, role="tutor",
+                temperature=0.3, max_tokens=1200,
+            )
+            retry_data = parse_llm_json(retry_raw)
+            retry_lesson = _lesson_from_data(retry_data, topic)
+            if lesson_quality_ok(retry_lesson)[0]:
+                logger.info("generate_lesson[%s]: повторная генерация прошла гейт качества", topic)
+                return retry_lesson
+        except Exception as exc:
+            logger.warning("generate_lesson[%s]: повторная попытка не удалась: %s", topic, exc)
+        fallback = _synthesize_lesson_from_context(topic, context)
+        if lesson_quality_ok(fallback)[0]:
+            logger.info("generate_lesson[%s]: детерминированная сборка урока (%d секций)",
+                        topic, len(fallback.sections))
+            return fallback
     return lesson
 
 

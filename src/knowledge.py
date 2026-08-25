@@ -436,11 +436,14 @@ def _clean_text_lines(text: str) -> str:
 
     Скрапленные страницы порталов содержат строки «Написать комментарий»,
     «Похожие публикации», «Скачать материал» — слабая LLM цепляет их как
-    «определение». Такие строки вычищаются до передачи модели.
+    «определение». Такие строки вычищаются до передачи модели; HTML-сущности
+    (&#171; и т.п.) декодируются в символы.
     """
+    import html
+
     if not text:
         return ""
-    lines = [ln.strip() for ln in (text or "").splitlines()]
+    lines = [ln.strip() for ln in html.unescape(text).splitlines()]
     kept = [ln for ln in lines if ln and not _is_web_noise(ln)]
     return "\n".join(kept).strip()
 
