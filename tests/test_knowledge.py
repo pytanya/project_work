@@ -161,6 +161,63 @@ class TestChunking:
         assert not _is_web_noise("Атмосфера — воздушная оболочка Земли")
         assert not _is_web_noise("Кислород составляет 21%")
 
+    def test_slide_chrome_detected(self):
+        from src.knowledge import _is_slide_chrome, _is_web_noise
+
+        assert _is_slide_chrome("Часть 5")
+        assert _is_slide_chrome("Слайд 12")
+        assert _is_slide_chrome("Вернуться в меню")
+        assert _is_slide_chrome("Поэты Серебряного Века - презентация онлайн")
+        assert _is_slide_chrome("Категория: Литература")
+        assert _is_slide_chrome("ВЫПОЛНИЛА: РЯЗАНЦЕВА С. М.")
+        assert _is_slide_chrome("565.99K")
+        assert not _is_slide_chrome("Серебряный век — период в русской культуре")
+
+        assert _is_web_noise("Часть 3")
+        assert _is_web_noise("Вернуться в меню")
+        assert _is_web_noise("Категория: Литература")
+        assert _is_web_noise("565.99K")
+        assert not _is_web_noise("Серебряный век — период в русской культуре")
+
+    def test_slideshow_text_rejected_from_chunks(self):
+        from src.knowledge import _is_slideshow_text, _make_chunks
+
+        slides = (
+            "Поэты Серебряного Века - презентация онлайн\n"
+            "565.99K\n"
+            "Категория: Литература\n"
+            "Часть 1\n"
+            "Вернуться в меню\n"
+            "ВЫПОЛНИЛА: РЯЗАНЦЕВА С. М.\n"
+            "Часть 2\n"
+            "Символизм\n"
+            "Часть 3\n"
+            "Похожие презентации:\n"
+        )
+        assert _is_slideshow_text(slides)
+        assert _make_chunks(slides, source="https://ppt-online.org/x", subject="литература", grade="11") == []
+
+    def test_slideshow_detects_many_short_lines(self):
+        from src.knowledge import _is_slideshow_text
+
+        text = "\n".join(
+            ["Символизм", "Акмеизм", "Футуризм", "Имажинизм",
+             "Серебряный век", "Русская поэзия", "Введение", "Заключение",
+             "Источники", "Содержание", "Основные черты", "Темы"]
+        )
+        # много коротких строк и почти нет длинных предложений — слайд-шоу
+        assert _is_slideshow_text(text)
+
+    def test_real_paragraph_not_slideshow(self):
+        from src.knowledge import _is_slideshow_text
+
+        prose = (
+            "Серебряный век — период в истории русской культуры с 1890-х по начало 1920-х годов. "
+            "Название является поэтическим и отражает расцвет модернизма в литературе и искусстве.\n"
+            "Поэты серебряного века стремились обновить литературный язык и отойти от реализма XIX века."
+        )
+        assert not _is_slideshow_text(prose)
+
 
 class TestVectorStore:
     def test_add_search_and_filter(self):

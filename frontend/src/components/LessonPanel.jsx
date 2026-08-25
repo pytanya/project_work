@@ -214,23 +214,29 @@ function ContentSections({ sections }) {
     return !isNoiseSection(heading, body)
   })
   if (cleanSections.length === 0) return null
-  return cleanSections.map((s, i) => {
-    const heading = s.heading || s.title || `Часть ${i + 1}`
-    const body = s.body || s.content || ''
-    return (
-      <div className="lesson-section lesson-section--content" key={i}>
-        <div className="lesson-section__header">
-          <span className="lesson-section__number">{i + 1}</span>
-          <h3 className="lesson-section__title"><LatexText text={heading} /></h3>
-        </div>
-        <p className="lesson-section-body"><LatexText text={body} /></p>
-        {s.citation && <div className="lesson-citation">📖 {s.citation}</div>}
-        {s.check_question && (
-          <div className="lesson-check">💭 Проверь себя: <LatexText text={s.check_question} /></div>
-        )}
-      </div>
-    )
-  })
+  return (
+    <div className="lesson-sections">
+      {cleanSections.map((s, i) => {
+        const heading = s.heading || s.title || `Часть ${i + 1}`
+        const body = s.body || s.content || ''
+        return (
+          <details className="lesson-section lesson-section--content" key={i} open={i === 0}>
+            <summary className="lesson-section__header">
+              <span className="lesson-section__number">{i + 1}</span>
+              <h3 className="lesson-section__title"><LatexText text={heading} /></h3>
+            </summary>
+            <div className="lesson-section__body">
+              <p className="lesson-section-body"><LatexText text={body} /></p>
+              {s.citation && <div className="lesson-citation">📖 {s.citation}</div>}
+              {s.check_question && (
+                <div className="lesson-check">💭 Проверь себя: <LatexText text={s.check_question} /></div>
+              )}
+            </div>
+          </details>
+        )
+      })}
+    </div>
+  )
 }
 
 /* ═══════════════════════════════════════════

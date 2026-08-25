@@ -322,6 +322,23 @@ def _active_topic_section(state: TutorState) -> Optional[str]:
     return None
 
 
+def _context_has_prose(results: List[Any]) -> bool:
+    """RAG-контекст содержит связную прозу, а не фрагменты-слайды.
+
+    Чанк-слайд (короткие строки/заголовок) проходит _chunk_has_meaningful_content,
+    но урок из него не собрать. Требуем хотя бы один чанк с длинным предложением
+    (≥80 символов) либо достаточный объём нешумового текста.
+    """
+    for r in results:
+        lines = [ln.strip() for ln in (r.chunk.text or "").splitlines() if ln.strip()]
+        if any(len(ln) >= 80 for ln in lines):
+            return True
+        total = sum(len(ln) for ln in lines if ln)
+        if total >= 300 and len(lines) >= 3:
+            return True
+    return False
+
+
 def _rag_context(store: VectorStore, query: str, state: TutorState, k: int = 3) -> List[str]:
     return [r.chunk.text for r in _rag_chunks(store, query, state, k)]
 
@@ -539,13 +556,38 @@ def agent_tutor_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
                   message=st.agent_message)
             _emit(deps, "system", message=st.agent_message, kind="content.empty")
             return st.model_dump()
+        # Гейт прозы: фрагменты-слайды без связного текста не дадут урок
+        if not _context_has_prose(chunks):
+            st.agent_message = (
+                f"По теме «{topic}» источники содержат только фрагменты-слайды без связного текста. "
+                "Загрузите учебник (PDF/DOCX) или нажмите «Найти учебник» — и я подготовлю урок."
+            )
+            st.agent_question = st.agent_message
+            _emit(deps, "source.progress", stage="content", url="", status="empty",
+                  message=st.agent_message)
+            _emit(deps, "system", message=st.agent_message, kind="content.empty")
+            return st.model_dump()
         context = [c.chunk.text for c in chunks]
         _emit(deps, "source.progress", stage="content", url="", status="generating",
               message=f"Генерирую урок по теме «{topic}» ({len(context)} фрагментов)…")
         # Урок — структурированный JSON: без on_token (не стримим сырой JSON)
-        st.set_lesson(tutor_mod.generate_lesson(
+        lesson = tutor_mod.generate_lesson(
             topic, context, st, llm_call=deps.tutor_llm
-        ))
+        )
+        # Синхронный гейт качества (аналогично content_node): мусор-контекст не показываем
+        ok, _reason = tutor_mod.lesson_quality_ok(lesson)
+        if not ok:
+            st.agent_message = (
+                f"По теме «{topic}» не удалось собрать связный урок: материал оказался "
+                "презентацией/фрагментами. Загрузите учебник (PDF/DOCX) или нажмите "
+                "«Найти учебник» — и я подготовлю материал."
+            )
+            st.agent_question = st.agent_message
+            _emit(deps, "source.progress", stage="content", url="", status="empty",
+                  message=st.agent_message)
+            _emit(deps, "system", message=st.agent_message, kind="content.empty")
+            return st.model_dump()
+        st.set_lesson(lesson)
         st.lesson_done = True
         _emit(deps, "tutor.lesson", **st.lesson_payload(topic))
         _emit(deps, "system", message="Урок готов.", kind="lesson.ready")
@@ -884,6 +926,20 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         _emit(deps, "system", message=st.agent_message, kind="content.empty")
         _emit(deps, "intake.question", question=st.agent_question, missing_fields=["textbook_file"])
         return st.model_dump()
+    # Гейт прозы: найденные фрагменты — только слайды/служебные строки без связного
+    # текста? Такой контекст не даст урок — честно просим другой источник.
+    if not _context_has_prose(chunks):
+        st.lesson_done = False
+        st.agent_message = (
+            f"По теме «{topic}» источники содержат только фрагменты-слайды без связного текста. "
+            "Загрузите учебник (PDF/DOCX) или нажмите «Найти учебник» — и я подготовлю материал."
+        )
+        st.agent_question = st.agent_message
+        _emit(deps, "source.progress", stage="content", url="", status="empty",
+              message=st.agent_message)
+        _emit(deps, "system", message=st.agent_message, kind="content.empty")
+        _emit(deps, "intake.question", question=st.agent_question, missing_fields=["textbook_file"])
+        return st.model_dump()
     context = [c.chunk.text for c in chunks]
     _emit(deps, "source.progress", stage="content", url="", status="generating",
           message=f"Генерирую {_MODE_LABELS.get(mode, 'материал')} по теме «{topic}» ({len(context)} фрагментов)…")
@@ -897,7 +953,24 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     else:
         # Урок — структурированный JSON: НЕ стримим сырые токены (со скобками/без абзацев),
         # карточки приходят целиком после генерации (пользователь видит «Генерирую урок…»).
-        st.set_lesson(tutor_mod.generate_lesson(topic, context, st, llm_call=deps.tutor_llm))
+        lesson = tutor_mod.generate_lesson(topic, context, st, llm_call=deps.tutor_llm)
+        # Синхронный гейт качества: фрагменты-слайды/«выплюнутый» контекст не показываем —
+        # честно сообщаем и ждём другой источник (а не выдаём бессмысленные «Часть N»).
+        ok, _reason = tutor_mod.lesson_quality_ok(lesson)
+        if not ok:
+            st.lesson_done = False
+            st.agent_message = (
+                f"По теме «{topic}» не удалось собрать связный урок: материал оказался "
+                "презентацией/фрагментами. Загрузите учебник (PDF/DOCX) или нажмите "
+                "«Найти учебник» — и я подготовлю материал."
+            )
+            st.agent_question = st.agent_message
+            _emit(deps, "source.progress", stage="content", url="", status="empty",
+                  message=st.agent_message)
+            _emit(deps, "system", message=st.agent_message, kind="content.empty")
+            _emit(deps, "intake.question", question=st.agent_question, missing_fields=["textbook_file"])
+            return st.model_dump()
+        st.set_lesson(lesson)
         st.agent_message = "Урок по теме готов. Можно задать вопрос или перейти к квизу."
     st.lesson_done = True
     # Ключевые понятия урока → wiki-статья темы (roadmap #3: drill-down в графе)
@@ -1160,12 +1233,34 @@ def find_textbook_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         # материалы по теме → индексация
         _emit(deps, "source.progress", stage="index", url="", status="indexing",
               message=f"Индексация материалов: {len(col.sources)} источников…")
+        # Источники без осмысленных чанков (слайд-шоу, пустые скрапы) не индексируем.
+        # _make_chunks возвращает [] для страниц-презентаций — такие источники отпадают.
+        kept_sources: List[Dict[str, Any]] = []
+        kept_texts: List[str] = []
         chunks: List[Any] = []
         for s, t in zip(col.sources, col.texts):
-            chunks.extend(
-                _make_chunks(t, source=s.get("url", "web"), subject=st.subject, grade=st.grade,
-                             student_id=getattr(st, "student_id", None) or None)
+            sc = _make_chunks(t, source=s.get("url", "web"), subject=st.subject, grade=st.grade,
+                              student_id=getattr(st, "student_id", None) or None)
+            if not sc:
+                logger.info("Источник %s: нет осмысленных чанков — пропускаем",
+                            s.get("url", "web"))
+                continue
+            chunks.extend(sc)
+            kept_sources.append(s)
+            kept_texts.append(t)
+        col.sources = kept_sources
+        col.texts = kept_texts
+        if not chunks:
+            st.source_status = "failed"
+            st.agent_message = (
+                f"По теме «{st.topic or st.subject or ''}» источники оказались презентациями/фрагментами "
+                "без связного текста. Загрузите учебник (PDF/DOCX) или попробуйте другой источник."
             )
+            st.agent_question = st.agent_message
+            _emit(deps, "source.progress", stage="content", url="", status="empty",
+                  message=st.agent_message)
+            _emit(deps, "system", message=st.agent_message, kind="content.empty")
+            return st.model_dump()
         deps.store.add(chunks)
         st.collection_id = "web"
         st.sources = col.sources

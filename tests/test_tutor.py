@@ -347,6 +347,100 @@ class TestEvaluateAnswer:
         assert len(diag.edges) == 2
         assert diag.edges[0].color == "warm"
 
+
+class TestLessonQualityGate:
+    def _lesson(self, **kw) -> Lesson:
+        from api.schemas import Lesson
+
+        return Lesson(**kw)
+
+    def test_accepts_structured_lesson(self):
+        from src.tutor import lesson_quality_ok
+
+        ok, reason = lesson_quality_ok(self._lesson(
+            title="Атмосфера",
+            definition="Атмосфера — газовая оболочка Земли.",
+            sections=[{"heading": "Состав", "body": "В атмосфере есть азот и кислород."}],
+        ))
+        assert ok, reason
+
+    def test_rejects_short_definition_only(self):
+        """Секции вычистились в пустоту, определение — короткий скрап-заголовок."""
+        from src.tutor import lesson_quality_ok
+
+        ok, reason = lesson_quality_ok(self._lesson(
+            title="Атмосфера",
+            definition="Слои атмосферы — урок. География, 6 класс. Вход",
+        ))
+        assert not ok
+        assert reason in ("no_content", "definition_only_shallow", "slideshow_chrome")
+
+    def test_accepts_long_definition_only(self):
+        """Определение — содержательное предложение, даже без секций."""
+        from src.tutor import lesson_quality_ok
+
+        long_def = ("Атмосфера — воздушная оболочка Земли, которая защищает планету "
+                    "от солнечной радиации и метеоритов.")
+        ok, reason = lesson_quality_ok(self._lesson(
+            title="Атмосфера",
+            definition=long_def,
+        ))
+        assert ok, reason
+
+    def test_rejects_portal_title_chrome_in_definition(self):
+        from src.tutor import lesson_quality_ok
+
+        ok, reason = lesson_quality_ok(self._lesson(
+            title="Поэты серебряного века",
+            definition="Поэты Серебряного Века — презентация онлайн",
+            sections=[{"body": "Символизм"}, {"body": "Акмеизм"}],
+        ))
+        assert not ok
+        assert reason == "slideshow_chrome"
+
+    def test_rejects_slideshow_chrome_in_definition(self):
+        from src.tutor import lesson_quality_ok
+
+        ok, reason = lesson_quality_ok(self._lesson(
+            title="Поэты серебряного века",
+            definition="Поэты Серебряного Века - презентация онлайн",
+            sections=[{"body": "Символизм"}, {"body": "Акмеизм"}],
+        ))
+        assert not ok
+        assert reason == "slideshow_chrome"
+
+    def test_rejects_fragment_echo(self):
+        """«Выплюнутый» контекст: короткие секции без заголовков — не урок."""
+        from src.tutor import lesson_quality_ok
+
+        ok, reason = lesson_quality_ok(self._lesson(
+            title="Поэты серебряного века",
+            definition="Серебряный век — период в русской культуре.",
+            sections=[{"body": "Символизм"}, {"body": "Акмеизм"},
+                      {"body": "Футуризм"}, {"body": "Имажинизм"}],
+        ))
+        assert not ok
+        assert reason == "fragments"
+
+    def test_rejects_no_content(self):
+        from src.tutor import lesson_quality_ok
+
+        ok, reason = lesson_quality_ok(self._lesson(title="Тема"))
+        assert not ok
+        assert reason == "no_content"
+
+    def test_accepts_long_headless_sections(self):
+        """Связные абзацы без заголовков (repair из текста) — принимаются."""
+        from src.tutor import lesson_quality_ok
+
+        long = "Серебряный век — период в истории русской культуры с 1890-х по начало 1920-х годов."
+        ok, reason = lesson_quality_ok(self._lesson(
+            title="Поэты серебряного века",
+            definition=long,
+            sections=[{"body": long}, {"body": long}],
+        ))
+        assert ok, reason
+
     def test_generate_lesson_diagram_bad_kind_defaults(self):
         """Неизвестный kind → flow; битая диаграмма → None (не роняет урок)."""
         state = _state()
@@ -545,3 +639,67 @@ class TestRealTutorIntegration:
 
         explanation = explain_error(card.question, "не знаю", context, state)
         assert explanation["text"]
+
+
+# ----------------------------------------------------------------------
+# parse_llm_json — edge cases (Фаза 5 тестов)
+# ----------------------------------------------------------------------
+class TestParseLlmJson:
+    """Тесты улучшенной функции parse_llm_json с балансировкой скобок."""
+
+    @pytest.mark.parametrize(
+        ("input_str,expected_keys"),
+        [
+            # Простой валидный JSON
+            ('{"title": "test", "sections": []}', ["title", "sections"]),
+            # Markdown обёртка ```json ... ```
+            ('```json\n{"title": "markdown_test"}\n```', ["title"]),
+            # Текст вокруг JSON
+            ("Some intro text {\"title\": \"wrapped\"} trailing text", ["title"]),
+            # Вложенные объекты (проверка что скобки внутри строк не мешают)
+            ('{"title": "nested", "meta": {"a": 1, "b": 2}}', ["title", "meta"]),
+            # Секции с телами
+            ('{\n  "sections": [\n    {"body": "hello world"}\n  ]\n}', ["sections"]),
+            # Пустой ввод
+            ("", []),
+            # None-подобный
+            (None, []),
+            # Нет открывающей скобки
+            ("Not valid JSON {{{", []),
+            # Не закрытая скобка
+            ('{"broken": true', []),
+            # JSON с фигурной скобкой внутри строкового значения
+            ('{"title": "\u0437\u043d\u0430\u0447\u0435\u043d\u0438\u0435 \u0441 } \u0432\u043d\u0443\u0442\u0440\u0438", "hook": "\u0432\u043e\u043f\u0440\u043e\u0441?"}', ["title", "hook"]),
+            # JSON с экранированными кавычками (валидный JSON)
+            ('{"definition": "This is an \\\"explanation\\\" in quotes"}', ["definition"]),
+            # JSON с вложенным JSON-подобным значением (типичная ошибка модели — esc escaped)
+            ('{"section": "body with {inner}", "ok": 1}', ["section", "ok"]),
+            # Array вместо объекта — должно вернуть {}
+            ('[1, 2, 3]', []),
+        ],
+    )
+    def test_parse_llm_json_various_inputs(self, input_str, expected_keys):
+        result = parse_llm_json(input_str)
+        assert isinstance(result, dict)
+        for key in expected_keys:
+            assert key in result, f"Expected key '{key}' not found in {result}"
+
+    def test_parse_llm_json_with_citations(self):
+        """JSON с цитатами типа §12 содержит спецсимволы."""
+        data = parse_llm_json('{"title": "Атмосфера", "sections": [{"body": "Определение тела.", "citation": "§12"}]}')
+        assert data["title"] == "Атмосфера"
+        assert data["sections"][0]["citation"] == "§12"
+
+    def test_parse_llm_json_russian_text(self):
+        """JSON с русским текстом должен парситься корректно."""
+        data = parse_llm_json('{"title": "Атмосфера Земли", "hook": "Вы знаете, почему небо голубое?"}')
+        assert data["title"] == "Атмосфера Земли"
+        assert data["hook"] == "Вы знаете, почему небо голубое?"
+
+    def test_parse_llm_json_deeply_nested_braces_in_string(self):
+        """Много фигурных скобок внутри строки не должны ломать парсинг."""
+        s = '{"a": "xxx{yyy{zzz", "b": "aaa}bbb}ccc", "c": true}'
+        data = parse_llm_json(s)
+        assert data["a"] == "xxx{yyy{zzz"
+        assert data["b"] == "aaa}bbb}ccc"
+        assert data["c"] is True

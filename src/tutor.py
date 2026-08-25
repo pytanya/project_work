@@ -19,7 +19,7 @@ import logging
 import math
 import re
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from api.schemas import DiagramEdge, DiagramNode, Lesson, LessonDiagram, LessonSection, QuizCard
 from .states import TutorState
@@ -35,25 +35,112 @@ MAX_EXPLANATION_CHARS = 2500
 # ----------------------------------------------------------------------
 # JSON-парсинг ответа LLM (с fallback)
 # ----------------------------------------------------------------------
+def _extract_json_block(text: str) -> Optional[str]:
+    """Извлекает JSON из fenced code block (```json ... ```)."""
+    m = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.S)
+    return m.group(1).strip() if m else None
+
+
+def _find_json_bounds(text: str) -> Optional[Tuple[int, int]]:
+    """Находит границы JSON ({...}) в тексте с балансировкой скобок.
+
+    Учитывает строковые литералы и экранирование (\\", \\\\), чтобы не
+    среагировать на «}» внутри строкового значения.
+
+    Возвращает (start, end) или None.
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+
+    depth = 0
+    end = -1
+    in_string = False
+    escape_next = False
+
+    for i in range(start, len(text)):
+        c = text[i]
+        if escape_next:
+            escape_next = False
+            continue
+        if c == '\\' and in_string:
+            escape_next = True
+            continue
+        if c == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c == '{':
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+
+    return (start, end + 1) if (end != -1 and end > start) else None
+
+
+def _clean_markdown_json(text: str) -> str:
+    """Очищает текст от markdown-обёрток вокруг JSON."""
+    text = text.strip()
+    # Убираем fenced code block
+    inner = _extract_json_block(text)
+    if inner:
+        return inner
+    # Если текст начинается с { — убираем всё до него
+    if text.startswith("{"):
+        return text
+    return text.strip()
+
+
 def parse_llm_json(text: str) -> Dict[str, Any]:
-    """Извлечение JSON из ответа LLM (возможен текст вокруг / ```json ```)."""
+    """Извлечение JSON из ответа LLM (возможен текст вокруг / ```json ```).
+
+    Использует балансировку скобок с учётом строковых литералов и экранирования,
+    чтобы корректно находить конец JSON даже при наличии закрывающих фигурных
+    скобок внутри строк (например в escaped HTML или вложенных JSON-подобных значениях).
+
+    Retry-логика: если первый parse не удался, очищаем markdown-обёртки и пробуем заново.
+    """
     text = (text or "").strip()
     if not text:
         return {}
-    # Убираем fenced code block
-    m = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.S)
-    if m:
-        text = m.group(1).strip()
-    # Ищем первую { ... } (или [ ... ])
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        text = text[start : end + 1]
+
+    # Попытка 1: прямой парсинг с балансировкой скобок
+    bounds = _find_json_bounds(text)
+    if bounds:
+        candidate = text[bounds[0]:bounds[1]]
+        try:
+            data = json.loads(candidate)
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            pass
+
+    # Попытка 2: очистить markdown и распарсить заново
+    cleaned = _clean_markdown_json(text)
+    if cleaned != text:
+        bounds2 = _find_json_bounds(cleaned)
+        if bounds2:
+            candidate2 = cleaned[bounds2[0]:bounds2[1]]
+            try:
+                data2 = json.loads(candidate2)
+                if isinstance(data2, dict):
+                    return data2
+            except json.JSONDecodeError:
+                pass
+
+    # Попытка 3: попробовать json.loads напрямую (на случай если текст — чистый JSON)
     try:
-        data = json.loads(text)
-        return data if isinstance(data, dict) else {}
-    except json.JSONDecodeError:
-        return {}
+        data3 = json.loads(cleaned)
+        if isinstance(data3, dict):
+            return data3
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    return {}
 
 
 def _score01(value: Any) -> float:
@@ -188,12 +275,14 @@ def _question_prompt(
         + (
             " Верни строго JSON: {\"question\": \"...\", \"options\": [\"...\"] или null, "
             "\"answer_type\": \"single\"|\"multiple\"|\"open\", \"topic\": \"<тема>\", "
-            "\"correct_answers\": [\"правильный вариант/модельный ответ\"]}. "
+            "\"correct_answers\": [\"правильный вариант/модельный ответ\"], "
+            "\"excerpt\": \"<короткий отрывок текста из контекста, на который ссылается вопрос, до 3 строк>\"}. "
             "Для open-вопроса options=null, correct_answers = [\"эталонный ответ\"]. "
             "Для single — ровно 1 правильный вариант, для multiple — все правильные. "
             "ВАЖНО: варианты-дистракторы делай правдоподобными — они должны быть похожи "
             "на правильный по теме/форме, но неверны по смыслу (никакой очевидной абсурдности, "
-            "одинаковой длины и стиля с правильным)."
+            "одинаковой длины и стиля с правильным). "
+            "Поле excerpt ОБЯЗАТЕЛЬНО — это цитата из контекста (до 3 строк), на которую ссылается вопрос."
         )
     )
     if asked:
@@ -253,15 +342,33 @@ def generate_question(
             "options": None,
             "answer_type": "open",
             "topic": topic,
+            "excerpt": (context[0] if context else topic)[:200],
         }
+
+    # Защита от вырожденных/пустых вариантов ответа:
+    # Если options был указан, но пустой массив или массив строк с пустыми строками — убираем
+    raw_options = data.get("options")
+    cleaned_options = None
+    if isinstance(raw_options, list) and len(raw_options) > 0:
+        cleaned_options = [str(o).strip() for o in raw_options if str(o).strip()]
+        if len(cleaned_options) < 2 and difficulty != "easy":
+            # Для single/open с < 2 вариантами — генерируем из контекста
+            cleaned_options = None
+    if not cleaned_options and raw_options is not None and difficulty == "easy":
+        # Генерируем простые дефолтные варианты для easy из контекста
+        cleaned_options = ["Да", "Нет", "Затрудняюсь ответить"]
+
     qid = question_id or f"q{len(state.asked_questions) + 1}"
+    excerpt_raw = data.get("excerpt")
+    excerpt = str(excerpt_raw).strip() if excerpt_raw else ""
     card = QuizCard(
         question_id=qid,
         question=str(data.get("question", "")).strip(),
-        options=data.get("options") if isinstance(data.get("options"), list) else None,
+        options=cleaned_options,
         answer_type=data.get("answer_type") if data.get("answer_type") in ("single", "multiple", "open") else "open",
         difficulty=difficulty,
         topic=str(data.get("topic") or topic),
+        excerpt=excerpt,
     )
     # Эталонные ответы генерирует LLM (мозг); они НЕ входят в QuizCard/UI.
     refs = data.get("correct_answers")
@@ -314,36 +421,51 @@ def _lesson_prompt(topic: str, context: List[str], grade: Optional[str], curricu
             f" Учебная программа: {curriculum}." if curriculum else ""
         )
         + (
-            " Построй урок как хороший учебник: 1) hook — короткий вопрос-зацепка "
-            "в 1 предложении, который вызывает интерес; 2) definition — определение темы "
-            "в 1-2 простых предложениях; 3) key_terms — 2-4 ключевых термина с краткими "
-            "определениями; 4) 2-3 секции, каждая — ОДИН под-вопрос темы: заголовок + "
-            "короткое объяснение простыми словами (2-4 предложения) + check_question — один "
-            "вопрос «Проверь себя» на понимание этой секции; 5) summary — итог в 1-2 предложения. "
-            "Предложения короткие, без канцелярита, без заголовков-эмодзи. "
-            "НЕ выдумывай факты за пределами контекста. "
-            "Верни строго JSON: {\"title\": \"...\", \"hook\": \"...\", \"definition\": \"...\", "
-            "\"key_terms\": [{\"term\": \"...\", \"definition\": \"...\"}], "
-            "\"diagram\": {..., см. ниже}, "
-            "\"sections\": [{\"heading\": \"...\", \"body\": \"...\", \"citation\": \"§N или ''\", "
-            "\"check_question\": \"...\"}], \"summary\": \"...\"}. "
-            "citation — номер параграфа/страницы из контекста, если он виден в источнике, иначе пустая строка."
+            "\n\nОБЯЗАТЕЛЬНАЯ СТРУКТУРА ОТВЕТА — строго JSON-объект:\n"
+            "{\n"
+            '  "title": "Заголовок урока",\n'
+            '  "hook": "Интересный вопрос-зацепка?",\n'
+            '  "definition": "Краткое определение темы в 1-2 простых предложениях.",\n'
+            '  "key_terms": [\n'
+            '    {"term": "термин1", "definition": "краткое определение"},\n'
+            '    {"term": "термин2", "definition": "краткое определение"}\n'
+            "  ],\n"
+            '  "sections": [\n'
+            '    {\n'
+            '      "heading": "Подтема 1",\n'
+            '      "body": "Объяснение 2-4 предложения простыми словами.",\n'
+            '      "citation": "§5",\n'
+            '      "check_question": "Вопрос на понимание после этой секции?"\n'
+            "    }\n"
+            "  ],\n"
+            '  "summary": "Итог в 1-2 предложениях."\n'
+            "}\n\n"
+            "--- ПРАВИЛА ---\n"
+            "- Каждая секция ОБЯЗАТЕЛЬНО должна иметь непустое поле \"body\"\n"
+            "- Минимум 1 секция, максимум 3 (не больше!)\n"
+            "- Каждое поле — обычная строка, НЕ вкладывай JSON-строки внутрь\n"
+            "- Предложения короткие, простые, без канцелярита\n"
+            "- НЕ выдумывай факты за пределами контекста\n"
+            "- Если в контексте нет информации для какого-то поля — оставь его пустым \"\"\n"
+            "- Поле \"citation\" — номер параграфа/страницы из контекста, если виден (§N), иначе \"\"\n"
+            "- КОНТЕКСТ МОЖЕТ СОДЕРЖАТЬ МУСОР СЛАЙД-ШОУ: строки вида «Часть N», «Слайд N», "
+            "«Вернуться в меню», «Презентация онлайн», «Категория: …», размеры файлов («565.99K»), "
+            "имена докладчиков. Игнорируй такой мусор и НЕ включай его в урок.\n"
+            "- Если в контексте нет ни одного связного предложения — верни JSON с пустыми "
+            "полями (\"definition\": \"\", \"sections\": []), не пересказывай фрагменты.\n"
+            "- НЕ копируй контекст дословно: секции — это твой пересказ, а не цитата фрагмента.\n"
         )
         + _diagram_grade_hint(grade)
         + (
-            " Обязательно добавь diagram — схему-иллюстрацию к теме. "
-            "Диаграмма отражает ТОЛЬКО те же факты и термины, что и секции/ключевые термины урока — "
-            "никаких новых понятий, чтобы не было противоречий с текстом. "
-            "kind: 'flow' (этапы / причина→следствие) | 'cycle' (цикл/круговорот) | "
-            "'map' (пространственная схема по координатам). "
-            "Формат diagram: {\"kind\": \"flow\"|\"cycle\"|\"map\", \"title\": \"короткий заголовок\", "
-            "\"nodes\": [{\"id\": \"n1\", \"label\": \"подпись 1-3 слова\"}], "
-            "\"edges\": [{\"source\": \"n1\", \"target\": \"n2\", \"label\": \"подпись стрелки\"}]}. "
-            "Для kind='map' каждый узел — объект с координатами на схеме (0..1, лево-верх → право-низ): "
-            "{\"id\": \"n1\", \"label\": \"Точка A\", \"x\": 0.7, \"y\": 0.35}. "
-            "Для противопоставленных ролей стрелок (тёплое/холодное, причина/следствие и т.п.) "
-            "укажи цвет: \"color\": \"warm\" или \"cold\". "
-            "2-5 узлов, не больше 6 связей."
+            "\n\nДИАГРАММА (обязательно добавь):\n"
+            "Добавь поле \"diagram\": {\n"
+            '  "kind": "flow",\n'
+            '  "title": "Название схемы",\n'
+            '  "nodes": [{"id": "n1", "label": "Термин 1-3 слова"}],\n'
+            '  "edges": [{"source": "n1", "target": "n2", "label": "связь"}]\n'
+            "}\n"
+            "kind: 'flow' (этапы) | 'cycle' (цикл) | 'map' (координаты 0..1).\n"
+            "2-5 узлов, не больше 6 связей. Диаграмма отражает ТОЛЬКО то, что в секциях."
         )
     )
     ctx = "\n---\n".join(context)[:MAX_EXPLANATION_CHARS]
@@ -453,15 +575,28 @@ def _lesson_from_data(data: Dict[str, Any], topic: str) -> Lesson:
             tdef = _clean_plain_field(t.get("definition"))
             if term and tdef:
                 key_terms.append({"term": term, "definition": tdef})
+    title = _clean_plain_field(data.get("title")) or topic
+    hook = _clean_plain_field(data.get("hook"))
+    definition = _clean_plain_field(data.get("definition"))
+    summary = _clean_plain_field(data.get("summary"))
+    
+    # Fallback: если LLM вернул hook/definition но не создал секции —
+    # используем определение как первую секцию, чтобы контент не терялся
+    if not sections and definition:
+        sections = [LessonSection(body=definition)]
+    
     return Lesson(
-        title=_clean_plain_field(data.get("title")) or topic,
-        hook=_clean_plain_field(data.get("hook")),
-        definition=_clean_plain_field(data.get("definition")),
+        title=title,
+        hook=hook,
+        definition=definition,
         key_terms=key_terms,
         diagram=_diagram_from_data(data.get("diagram")),
         sections=sections,
-        summary=_clean_plain_field(data.get("summary")),
+        summary=summary,
     )
+
+
+MAX_REPAIR_SECTIONS = 6
 
 
 def _repair_lesson_from_text(text: str, topic: str) -> Lesson:
@@ -470,7 +605,8 @@ def _repair_lesson_from_text(text: str, topic: str) -> Lesson:
     Параграфы (по переводам строк) становятся секциями; первый абзац — определение,
     последний — итог (при 4+ абзацах). Консервативно: не выдумываем заголовки.
     JSON-абзацы (вложенный объект) отбрасываются — сырой JSON никогда не попадает
-    в карточки.
+    в карточки. Секции ограничены (MAX_REPAIR_SECTIONS): «выплюнутый» контекст не
+    превращается в бесконечный список фрагментов.
     """
     paragraphs = [_clean_plain_field(p) for p in re.split(r"\n+", (text or "").strip()) if p.strip()]
     paragraphs = [p for p in paragraphs if p]
@@ -478,16 +614,59 @@ def _repair_lesson_from_text(text: str, topic: str) -> Lesson:
         return Lesson(
             title=topic,
             definition=paragraphs[0],
-            sections=[LessonSection(body=p) for p in paragraphs[1:-1]],
+            sections=[LessonSection(body=p) for p in paragraphs[1:-1]][:MAX_REPAIR_SECTIONS],
             summary=paragraphs[-1],
         )
     if len(paragraphs) >= 2:
         return Lesson(
             title=topic,
             definition=paragraphs[0],
-            sections=[LessonSection(body=p) for p in paragraphs[1:]],
+            sections=[LessonSection(body=p) for p in paragraphs[1:]][:MAX_REPAIR_SECTIONS],
         )
     return Lesson(title=topic, sections=[LessonSection(body=_clean_plain_field(text))])
+
+
+def lesson_quality_ok(lesson: Lesson) -> Tuple[bool, str]:
+    """Синхронный гейт качества урока перед показом (защита от «выплюнутого» контекста).
+
+    Отклоняем не короткие уроки, а мусор-сигнатуры слайд-шоу:
+      - служебный хром презентации («Часть N», «Презентация онлайн», размеры файлов) в
+        определении/заголовке;
+      - «выплюнутый» контекст: много коротких секций без заголовков и без связного текста.
+    Такой урок невозможно «открыть» как описание — его не показываем.
+    """
+    from .knowledge import _is_slide_chrome, _is_slideshow_text, _is_web_noise
+
+    def _clean_prose(t: Optional[str]) -> Optional[str]:
+        text = (t or "").strip()
+        if not text:
+            return None
+        if _is_slideshow_text(text):
+            return None
+        lines = [ln for ln in text.splitlines() if ln.strip() and not _is_web_noise(ln)]
+        return "\n".join(lines) if lines else None
+
+    title = _clean_prose(lesson.title) or ""
+    definition = _clean_prose(lesson.definition) or ""
+    sections = [s for s in (_clean_prose(s.body) for s in (lesson.sections or [])) if s]
+    if not definition and not sections:
+        return False, "no_content"
+    # Служебный хром слайдов в определении/заголовке — источник-презентация.
+    # Проверяем «сырые» поля: _clean_prose может вычистить мусорную строку в пустоту.
+    if _is_slide_chrome(lesson.definition) or _is_slide_chrome(lesson.title):
+        return False, "slideshow_chrome"
+    if sections:
+        # «Выплюнутые» фрагменты без заголовков и без длинного текста — не урок
+        has_heading = any((s.heading or "").strip() for s in (lesson.sections or []))
+        if not has_heading and len(sections) >= 4 and all(len(s) < 60 for s in sections):
+            return False, "fragments"
+        return True, "ok"
+    # Нет пригодных секций (все вычистились в шум/пустоту) — урок держится только
+    # на определении. Оно должно быть содержательным предложением, а не скрапленным
+    # заголовком страницы («Слои атмосферы — урок. География, 6 класс. Вход»).
+    if len(definition) >= 60:
+        return True, "ok"
+    return False, "definition_only_shallow"
 
 
 def generate_lesson(
@@ -506,18 +685,37 @@ def generate_lesson(
     messages = _lesson_prompt(topic, context, state.grade, state.curriculum)
     raw = generate_text(messages, llm_call=llm_call, on_token=on_token,
                         role="tutor", temperature=0.4, max_tokens=1200)
+    logger.info("generate_lesson[%s]: raw_len=%d starts_with=%r", topic, len(raw), raw[:30] if raw else "")
     data = parse_llm_json(raw)
+    logger.info("generate_lesson[%s]: parsed_keys=%r sections_count=%d has_def=%r has_hook=%r",
+                topic, list(data.keys()), len(data.get("sections", [])) if isinstance(data.get("sections"), list) else 0,
+                bool(data.get("definition")), bool(data.get("hook")))
     lesson = _lesson_from_data(data, topic)
+    logger.info("generate_lesson[%s]: lesson_title=%r sections=%d hook=%r def=%r",
+                topic, lesson.title, len(lesson.sections), bool(lesson.hook), bool(lesson.definition))
     # Repair: модель вернула не-JSON / JSON без структуры — собираем из сплошного текста.
     if not lesson.sections and not lesson.definition and not lesson.hook:
         text = str(data.get("text") or "").strip()
         if not text and not data:
             # LLM вернул сплошной текст (не JSON) — используем его напрямую
             text = (raw or "").strip()
-        # Модель вернула JSON, который не удалось разобрать — сырой JSON в урок не попадает,
-        # используем контекст как fallback (иначе в UI появится «стена» из JSON).
-        if text.startswith("{") or text.startswith("[") or text.startswith("\ufeff"):
+        
+        # Если текст начинается с { или [ — это JSON, который parse_llm_json не распарсил.
+        # Попробуем очистить от markdown-обёрток и распарсить заново.
+        if text.startswith("{") or text.startswith("["):
+            cleaned = re.sub(r'^```(?:json)?\s*', '', text).rstrip('`').strip()
+            try:
+                retry_data = json.loads(cleaned)
+                if isinstance(retry_data, dict):
+                    retry_lesson = _lesson_from_data(retry_data, topic)
+                    if retry_lesson.sections or retry_lesson.definition or retry_lesson.hook:
+                        logger.info("generate_lesson[%s]: retry-parse succeeded after markdown cleanup", topic)
+                        return retry_lesson
+            except json.JSONDecodeError:
+                pass
+            # Не удалось распарлить — очищаем, чтобы не показывать сырой JSON в UI
             text = ""
+        
         if len(text) < 40:
             text = (context[0] if context else f"Материалы по теме «{topic}» ещё пополняются.")[:1200]
         lesson = _repair_lesson_from_text(text, topic)

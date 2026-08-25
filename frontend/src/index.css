@@ -1098,6 +1098,29 @@ body.resizing * { cursor: col-resize !important; }
   background: var(--card);
   border-color: var(--line);
 }
+/* Аккордеон секций урока (details/summary): заголовок виден, тело открывается кликом */
+.lesson-section--content > .lesson-section__header {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+.lesson-section--content > .lesson-section__header::-webkit-details-marker {
+  display: none;
+}
+.lesson-section--content > .lesson-section__header::after {
+  content: '▾';
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+  transition: transform 0.15s ease;
+  flex-shrink: 0;
+}
+.lesson-section--content[open] > .lesson-section__header::after {
+  transform: rotate(180deg);
+}
+.lesson-section--content > .lesson-section__body {
+  padding-top: 2px;
+}
 .lesson-section--diagram {
   background: var(--paper);
   border-color: var(--line);

@@ -357,6 +357,45 @@ _WEB_NOISE_ACTIONS = (
     r"зарегистрироваться", r"создать сайт", r"войти", r"выйти",
     r"подписаться", r"поделиться", r"скачать",
 )
+# Хром слайд-шоу (презентаций): служебные строки скрапленных слайдов, которые не
+# являются учебным контентом. Проверяются и по строке, и по всему тексту источника.
+_SLIDE_CHROME_RE = re.compile(
+    r"часть\s+\d+"
+    r"|слайд\s+\d+"
+    r"|вернуться?\s+в\s+меню"
+    r"|презентаци[яию]\s+онлайн"
+    r"|похожие\s+презентации"
+    r"|выполнила\s*:"
+    r"|категория\s*:"
+    r"|[-–—]\s*урок\b"
+    r"|конспект урока"
+    r"|^\d{1,4}(?:[.,]\d+)?\s*(?:кб|мб|kb|mb|k|м)\b"
+    r"|^\d+(?:[.,]\d+)?\s*к\b",
+    re.IGNORECASE,
+)
+
+
+def _is_slide_chrome(text: str) -> bool:
+    """Строка/фрагмент похож на служебный слайд (презентации), а не на контент."""
+    return bool(_SLIDE_CHROME_RE.search(text or ""))
+
+
+def _is_slideshow_text(text: str) -> bool:
+    """Текст скрапленной страницы — слайд-шоу (презентация), а не учебный конспект.
+
+    Такие страницы дают фрагменты по слайду («Часть N», «Вернуться в меню», размеры
+    файлов) без связной прозы. Несколько маркеров слайдов или много коротких строк
+    с почти полным отсутствием длинных предложений → источник в RAG не идёт.
+    """
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return False
+    if sum(1 for ln in lines if _is_slide_chrome(ln)) >= 3:
+        return True
+    long_lines = [ln for ln in lines if len(ln) >= 40 and not _is_web_noise(ln)]
+    if len(lines) >= 10 and len(long_lines) < 3:
+        return True
+    return False
 
 
 def _is_web_noise(line: str) -> bool:
@@ -367,6 +406,8 @@ def _is_web_noise(line: str) -> bool:
     if _WEB_NOISE_RE.match(s):
         return True
     if len(s) < 3:
+        return True
+    if _is_slide_chrome(s):
         return True
     low = s.lower()
     if low in _WEB_NOISE_EXACT:
@@ -383,8 +424,11 @@ def _make_chunks(text: str, source: str, subject: Optional[str], grade: Optional
     """Нарезка текста на чанки с обогащением «Параграф N: название» (13.2).
 
     Строки-шум (навигация сайтов, «-->», промо) отсекаются, чтобы мусор не
-    попадал в RAG-контекст урока/квиза.
+    попадал в RAG-контекст урока/квиза. Страницы-слайд-шоу (презентации)
+    отбрасываются целиком — их фрагменты не образуют связный контент.
     """
+    if _is_slideshow_text(text):
+        return []
     chunks: List[DocChunk] = []
     idx = 0
     sections = extract_sections(text)

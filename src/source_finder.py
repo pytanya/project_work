@@ -645,8 +645,14 @@ _PREFERRED_DOMAINS = (
     "wikibooks.org", "wikipedia.org", "yaklass.", "lc.rt.ru", "resh.edu.ru",
     "openedu.ru", "school-collection.edu.ru", "foxford.ru", "uchi.ru", "onlineschool-1.ru",
 )
-# Домены, дающие мусорный контент (промо-лендинги, порталы учителей) — в самый низ.
-_AVOIDED_DOMAINS = ("multiurok.ru", "infourok.ru", "kopilkaurokov.ru", "nsportal.ru", "prodlenka.org")
+# Домены, дающие мусорный контент (промо-лендинги, порталы учителей, слайд-шоу) — в самый низ.
+_AVOIDED_DOMAINS = (
+    "multiurok.ru", "infourok.ru", "kopilkaurokov.ru", "nsportal.ru", "prodlenka.org",
+    # сайты-слайд-шоу: чанки по слайдам без связной прозы
+    "ppt-online.org", "prezentacii.org", "ppt4web.ru", "myslide.ru", "pptcloud.ru",
+    "slideshare.net", "ppt-online.com", "myshared.ru", "infourokprezentacii.ru",
+    "pptstore.ru", "prezentacii.com",
+)
 
 
 def _domain_of(url: str) -> str:
