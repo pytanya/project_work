@@ -688,7 +688,7 @@ def lesson_quality_ok(lesson: Lesson) -> Tuple[bool, str]:
     гостиная …») и служебный хром слайд-шоу не проходят — такой урок невозможно
     «открыть» как описание, его не показываем.
     """
-    from .knowledge import _is_author_chrome, _is_slide_chrome, _is_slideshow_text, _is_web_noise
+    from .knowledge import _is_publication_metadata, _is_slide_chrome, _is_slideshow_text, _is_web_noise
 
     def _clean_prose(t: Optional[str]) -> Optional[str]:
         text = (t or "").strip()
@@ -697,7 +697,7 @@ def lesson_quality_ok(lesson: Lesson) -> Tuple[bool, str]:
         if _is_slideshow_text(text):
             return None
         # Убираем строки с метаданными авторов публикаций
-        lines = [ln for ln in text.splitlines() if ln.strip() and not _is_web_noise(ln) and not _is_author_chrome(ln)]
+        lines = [ln for ln in text.splitlines() if ln.strip() and not _is_web_noise(ln) and not _is_publication_metadata(ln)]
         return "\n".join(lines) if lines else None
 
     definition = _clean_prose(lesson.definition) or ""
@@ -706,12 +706,12 @@ def lesson_quality_ok(lesson: Lesson) -> Tuple[bool, str]:
     sections = [b for _, b in section_pairs]
     if not definition and not sections:
         return False, "no_content"
-    # Служебный хром слайдов/авторов в определении/заголовке — источник-презентация или
+    # Служебные строки слайдов/метаданные авторов в определении/заголовке — источник-презентация или
     # чужая публикация. Проверяем «сырые» поля: _clean_prose может вычистить мусор.
     if _is_slide_chrome(lesson.definition) or _is_slide_chrome(lesson.title):
         return False, "slideshow_chrome"
-    if _is_author_chrome(lesson.definition) or _is_author_chrome(lesson.title):
-        return False, "author_chrome"
+    if _is_publication_metadata(lesson.definition) or _is_publication_metadata(lesson.title):
+        return False, "pub_metadata"
     # Заголовок публикации («Презентация …», «Тест …», «Литературная гостиная …»)
     # — не объяснение темы
     if _is_title_fragment(definition):
