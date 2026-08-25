@@ -489,6 +489,44 @@ class TestRagFilterFallback:
         assert chunks and "оболочка" in chunks[0].chunk.text
 
 
+class TestChunkQualityFilter:
+    """Шумовые чанки (навигация сайтов) не должны попадать в RAG-контекст урока."""
+
+    def test_meaningful_content_passes(self, deps, tmp_path):
+        from src.graph import _chunk_has_meaningful_content
+
+        good = (
+            "Атмосфера — воздушная оболочка Земли.\n"
+            "Она состоит из азота (78%) и кислорода (21%).\n"
+            "Атмосфера защищает живые организмы от вредного излучения Солнца."
+        )
+        assert _chunk_has_meaningful_content(good)
+
+    def test_navigation_only_rejected(self, deps, tmp_path):
+        from src.graph import _chunk_has_meaningful_content
+
+        nav = (
+            "Войти\n"
+            "-->\n"
+            "Зарегистрироваться\n"
+            "Все блоги\n"
+            "Все тесты\n"
+            "Скидки до 50% на комплекты\n"
+            "Выбрать материалы\n"
+        )
+        assert not _chunk_has_meaningful_content(nav)
+
+    def test_mixed_chunk_passes_on_long_lines(self, deps, tmp_path):
+        from src.graph import _chunk_has_meaningful_content
+
+        mixed = (
+            "Войти\n"
+            "Атмосфера — воздушная оболочка Земли, которая защищает планету от солнечного излучения.\n"
+            "Верхние слои атмосферы переходят в космическое пространство постепенно.\n"
+        )
+        assert _chunk_has_meaningful_content(mixed)
+
+
 class TestSourceFlow:
     def test_source_failed_path(self, deps, monkeypatch):
         class Failed:

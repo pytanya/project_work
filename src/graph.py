@@ -276,6 +276,9 @@ def _rag_chunks(store: VectorStore, query: str, state: TutorState, k: int = 3) -
     Прогрессивное ослабление фильтров: строгий фильтр (класс/раздел) может обнулить
     результат при переиспользовании коллекции между сессиями/классами — тогда
     повторяем без класса, затем без раздела. Предмет не сбрасываем (корректность темы).
+
+    Шумовые чанки (навигация сайтов, «-->», промо) отсекаются, чтобы урок/квиз
+    не строились по мусору; если всё отсеяно — контент считается отсутствующим.
     """
     from .knowledge import SearchResult
 
@@ -287,7 +290,26 @@ def _rag_chunks(store: VectorStore, query: str, state: TutorState, k: int = 3) -
             results = store.search(query, k=k, filters=relaxed or None)
             if results:
                 break
-    return results
+    return [r for r in results if _chunk_has_meaningful_content(r.chunk.text)]
+
+
+def _chunk_has_meaningful_content(text: str) -> bool:
+    """Чанк — учебный контент, а не навигация/промо-мусор страницы.
+
+    Считаем строки с реальными предложениями (длина ≥ 40 символов и не шум).
+    Если таких нет — чанк бесполезен для урока/квиза.
+    """
+    from .knowledge import _is_web_noise
+
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return False
+    long_meaningful = [ln for ln in lines if len(ln) >= 40 and not _is_web_noise(ln)]
+    if long_meaningful:
+        return True
+    # Несколько средних предложений (25-39 символов) тоже годятся
+    medium = [ln for ln in lines if len(ln) >= 25 and not _is_web_noise(ln)]
+    return len(medium) >= 3
 
 
 def _active_topic_section(state: TutorState) -> Optional[str]:
