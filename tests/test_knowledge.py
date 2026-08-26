@@ -199,6 +199,72 @@ class TestChunking:
         assert _is_web_noise("565.99K")
         assert not _is_web_noise("Серебряный век — период в русской культуре")
 
+    def test_research_methodology_detected(self):
+        """Методология исследовательских/проектных работ — НЕ учебный контент (баг #1)."""
+        from src.knowledge import _is_research_methodology
+
+        for line in (
+            "МЕТОДЫ ПРОВЕДЕНИЯ ИССЛЕДОВАНИЯ",
+            "Материал исследования — произведения русской поэзии",
+            "Предмет исследования — поэты XIX–XX веков",
+            "Объект исследования",
+            "Методика обработки полученных данных:",
+            "Актуальность работы",
+            "Задачи исследования",
+            "Теоретический:",
+            "Практический:",
+            "создание презентации, которая сопровождается",
+            "сбор материала по теме;",
+            "Подбор иллюстративного материала",
+            "Доказать причастность поэтов Серебряного века к образу России.",
+            "Учебный проект для 7 класса",
+        ):
+            assert _is_research_methodology(line), line
+        for line in (
+            "Атмосфера — воздушная оболочка Земли.",
+            "Поэты серебряного века искали новые пути в поэзии.",
+            "А.А. Блок родился в 1880 году в Петербурге.",
+        ):
+            assert not _is_research_methodology(line), line
+
+    def test_research_paper_text_rejected_from_chunks(self):
+        """Весь документ — исследовательская/проектная работа → не индексируется (баг #1)."""
+        from src.knowledge import _is_research_paper_text, _make_chunks
+
+        research = (
+            "Учебный проект по литературе\n"
+            "Цель работы: доказать причастность поэтов Серебряного века к образу России.\n"
+            "МЕТОДЫ ПРОВЕДЕНИЯ ИССЛЕДОВАНИЯ\n"
+            "Теоретический: знакомство с материалами литературоведов.\n"
+            "Практический: погружение в текст, рассмотрение портретов поэтов.\n"
+            "Гипотеза: Серебряный век — явление русской культуры.\n"
+        )
+        assert _is_research_paper_text(research)
+        assert _make_chunks(research, source="https://project.ru", subject="литература", grade="7") == []
+
+    def test_normal_text_not_research_paper(self):
+        from src.knowledge import _is_research_paper_text
+
+        normal = (
+            "Параграф 12: Атмосфера\n"
+            "Атмосфера — воздушная оболочка Земли. Она защищает планету от радиации.\n"
+            "Воздух состоит из азота (78%) и кислорода (21%).\n"
+        )
+        assert not _is_research_paper_text(normal)
+
+    def test_clean_text_lines_removes_research_methodology(self):
+        from src.knowledge import _clean_text_lines
+
+        text = (
+            "МЕТОДЫ ПРОВЕДЕНИЯ ИССЛЕДОВАНИЯ\n"
+            "Предмет исследования — поэты\n"
+            "Серебряный век — период расцвета русской поэзии.\n"
+        )
+        cleaned = _clean_text_lines(text)
+        assert "МЕТОДЫ ПРОВЕДЕНИЯ" not in cleaned
+        assert "Предмет исследования" not in cleaned
+        assert "Серебряный век" in cleaned
+
     def test_slideshow_text_rejected_from_chunks(self):
         from src.knowledge import _is_slideshow_text, _make_chunks
 

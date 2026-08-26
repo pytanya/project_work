@@ -318,6 +318,41 @@ class TestEvaluateAnswer:
         assert "sections" not in rendered.lower()
         assert "Контекст" in rendered  # fallback на контекст
 
+    def test_sections_without_heading_get_body_fallback(self):
+        """Секции без heading получают содержательный fallback из body (баг #5)."""
+        from src.tutor import _lesson_from_data
+
+        lesson = _lesson_from_data({
+            "title": "Атмосфера",
+            "sections": [
+                {"body": "Воздух содержит азот и кислород, а также углекислый газ и водяной пар."},
+                {"heading": "Часть 2",
+                 "body": "Стратосфера содержит озоновый слой, защищающий от радиации."},
+            ],
+        }, "Атмосфера")
+        assert lesson.sections[0].heading.startswith("Воздух содержит")
+        assert lesson.sections[0].heading != "Раздел 1"
+        # «Часть 2», написанная моделью, тоже заменяется на содержательный заголовок
+        assert lesson.sections[1].heading.startswith("Стратосфера")
+        assert lesson.sections[1].heading != "Часть 2"
+
+    def test_synthesize_lesson_sections_get_headings(self):
+        """Fallback-синтез тоже даёт секциям заголовки из body (баг #5)."""
+        from src.tutor import _synthesize_lesson_from_context
+
+        lesson = _synthesize_lesson_from_context("Атмосфера", [
+            "Атмосфера — воздушная оболочка Земли. Она защищает планету от солнечной "
+            "радиации и метеоритов, а также участвует в формировании климата.\n"
+            "Воздух состоит из азота (78%) и кислорода (21%). Углекислый газ и водяной "
+            "пар влияют на температуру и погодные условия нашей планеты.\n"
+            "Тропосфера — нижний слой атмосферы. Здесь формируются облака и осадки, "
+            "поэтому именно тропосфера определяет погоду на Земле.\n",
+        ])
+        if lesson.sections:
+            for s in lesson.sections:
+                assert s.heading.strip(), "секция без заголовка"
+                assert not s.heading.lower().startswith(("часть ", "раздел "))
+
     def test_generate_lesson_diagram_map(self):
         """Map-диаграмма с координатами и цветами течений; санитизация."""
         state = _state(grade="7")
@@ -391,6 +426,34 @@ class TestLessonQualityGate:
             definition=long_def,
         ))
         assert ok, reason
+
+    def test_rejects_research_methodology_lesson(self):
+        """Урок из методологии исследовательской работы не показывается (баг #1)."""
+        from src.tutor import lesson_quality_ok
+
+        ok, reason = lesson_quality_ok(self._lesson(
+            title="Поэты серебряного века",
+            definition="МЕТОДЫ ПРОВЕДЕНИЯ ИССЛЕДОВАНИЯ. Материал исследования — поэзия.",
+            sections=[{"heading": "Методы", "body": "Предмет исследования — поэты XIX–XX веков."}],
+        ))
+        assert not ok
+        assert reason == "research_methodology"
+
+    def test_prepare_lesson_context_filters_research_methodology(self):
+        from src.tutor import _prepare_lesson_context
+
+        context = [
+            "МЕТОДЫ ПРОВЕДЕНИЯ ИССЛЕДОВАНИЯ\n"
+            "Предмет исследования — поэты\n"
+            "Серебряный век — период расцвета русской поэзии в начале XX века.",
+            "А.А. Блок — один из главных поэтов-символистов этого периода.",
+        ]
+        cleaned = _prepare_lesson_context(context)
+        joined = "\n".join(cleaned)
+        assert "МЕТОДЫ ПРОВЕДЕНИЯ" not in joined
+        assert "Предмет исследования" not in joined
+        assert "Серебряный век" in joined
+        assert "Блок" in joined
 
     def test_rejects_portal_title_chrome_in_definition(self):
         from src.tutor import lesson_quality_ok

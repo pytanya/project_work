@@ -291,8 +291,7 @@ class TestRunTutorAgent:
         ]))
         st = TutorState.model_validate(run_tutor_agent(_quiz_state(), deps)[0])
         deps.agent_llm = FakeAgentLLM([
-            tool_response(tc("generate_quiz", {"topic": "Атмосфера"}, "c2")),
-            text_response("Продолжаем!"),
+            tool_response(tc("generate_quiz", {"topic": "Атмосфера"}, "c2")),            text_response("Продолжаем!"),
         ])
         st = TutorState.model_validate({**st.model_dump(), "pending_answer": "газ"})
         st_new, _ = run_tutor_agent(st, deps)
@@ -333,6 +332,41 @@ class TestGraphAgentTutor:
         res = TutorState.model_validate(graph.invoke(st.model_dump()))
         assert res.lesson_confirmed is True
         assert res.current_question is not None  # квиз начался
+
+    def test_agent_tutor_fallback_generates_next_question(self):
+        """Баг #3: агент оценил ответ, но НЕ вызвал generate_quiz → следующий вопрос
+        генерируется детерминированно (страховка в agent_tutor_node), квиз не зависает."""
+        from src.graph import agent_tutor_node
+        from api.schemas import QuizCard
+
+        agent = FakeAgentLLM([
+            tool_response(tc("evaluate_answer", {"answer": "воздушная газовая оболочка"}, "c1")),
+            text_response("Оценено!"),  # финальный текст БЕЗ generate_quiz
+        ])
+        deps = _tutor_deps(agent, gen_llm=_GEN_Q, eval_llm=_EVAL_OK)
+        events = []
+        deps.on_event = lambda e, d: events.append(e)
+        state = TutorState(
+            num_questions=3, mode="quiz", subject="география", topic="Атмосфера",
+            learner_type="student", has_textbook=False,
+            sources=[{"type": "web", "url": "x"}], collection_id="web", source_status="ready",
+            current_question=QuizCard(
+                question_id="q1", question="Что такое атмосфера?", options=None,
+                answer_type="open", difficulty="medium", topic="Атмосфера",
+            ),
+            pending_answer="газ", answered_count=1, correct_count=0,
+            asked_questions=["Что такое атмосфера?"],
+        )
+        res = agent_tutor_node(state, deps)
+        st = TutorState.model_validate(res)
+        # страховка сработала: ответ оценён + следующий вопрос появился
+        assert st.correct_count >= 1
+        assert st.current_question is not None
+        assert st.current_question.question_id != "q1"
+        # quiz.card опубликован для фронтенда
+        assert "quiz.card" in events
+        # квиз не завис: есть активный вопрос, ждём ответ ученика
+        assert not st.quiz_complete
 
 
 class TestObservability:

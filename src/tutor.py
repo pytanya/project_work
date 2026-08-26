@@ -159,10 +159,16 @@ def _prepare_lesson_context(context: List[str]) -> List[str]:
     """Очистка RAG-контекста от мусора ПЕРЕД передачей в LLM.
 
     Применяет _clean_text_lines() к каждому чанку, дополнительно фильтрует
-    метаданные публикаций построчно и удаляет обрывки навигации (строки
-    короче 20 символов без пунктуации). Блоки короче 40 символов отбрасываются.
+    метаданные публикаций построчно, методологию исследовательских работ и
+    удаляет обрывки навигации (строки короче 20 символов без пунктуации).
+    Блоки короче 40 символов отбрасываются.
     """
-    from .knowledge import _clean_text_lines, _is_publication_metadata, _is_web_noise
+    from .knowledge import (
+        _clean_text_lines,
+        _is_publication_metadata,
+        _is_research_methodology,
+        _is_web_noise,
+    )
 
     cleaned: List[str] = []
     for block in context or []:
@@ -173,6 +179,7 @@ def _prepare_lesson_context(context: List[str]) -> List[str]:
             if ln.strip()
             and not _is_publication_metadata(ln)
             and not _is_web_noise(ln)
+            and not _is_research_methodology(ln)
             and (len(ln.strip()) >= 20 or ln.rstrip("…\"»")[-1:] in (".", "!", "?"))
         ]
         text = "\n".join(lines).strip()
@@ -517,6 +524,11 @@ def _lesson_prompt(topic: str, context: List[str], grade: Optional[str], curricu
             "- КОНТЕКСТ МОЖЕТ СОДЕРЖАТЬ МУСОР СЛАЙД-ШОУ: строки вида «Часть N», «Слайд N», "
             "«Вернуться в меню», «Презентация онлайн», «Категория: …», размеры файлов («565.99K»), "
             "имена докладчиков. Игнорируй такой мусор и НЕ включай его в урок.\n"
+            "- КОНТЕКСТ МОЖЕТ СОДЕРЖАТЬ ИССЛЕДОВАТЕЛЬСКИЕ/ПРОЕКТНЫЕ РАБОТЫ: «методы проведения "
+            "исследования», «предмет исследования», «актуальность», «задачи работы», «методика "
+            "обработки данных», «подбор иллюстративного материала», «этапы работы». Это НЕ учебный "
+            "контент — ПОЛНОСТЬЮ ИГНОРИРУЙ такой мусор. Используй ТОЛЬКО объяснительные и "
+            "описательные фрагменты.\n"
             "- Если в контексте нет ни одного связного предложения — верни JSON с пустыми "
             "полями (\"definition\": \"\", \"sections\": []), не пересказывай фрагменты.\n"
             "- НЕ копируй контекст дословно: секции — это твой пересказ, а не цитата фрагмента.\n"
@@ -647,11 +659,6 @@ def _lesson_from_data(data: Dict[str, Any], topic: str) -> Lesson:
             source=_clean_plain_field(s.get("source")),
             check_question=_clean_plain_field(s.get("check_question")),
         ))
-    # Секции без heading → авто-заголовок «Раздел N» (см. 1.3: модель обязана дать
-    # содержательный heading, но деградируем мягко, а не теряем контент).
-    for i, s in enumerate(sections):
-        if not s.heading:
-            s.heading = f"Раздел {i + 1}"
     key_terms = []
     raw_terms = data.get("key_terms") if isinstance(data.get("key_terms"), list) else []
     for t in raw_terms[:5]:
@@ -675,7 +682,7 @@ def _lesson_from_data(data: Dict[str, Any], topic: str) -> Lesson:
     if not sections and definition:
         sections = [LessonSection(body=definition)]
     
-    return Lesson(
+    return _ensure_section_headings(Lesson(
         title=title,
         hook=hook,
         definition=definition,
@@ -683,7 +690,28 @@ def _lesson_from_data(data: Dict[str, Any], topic: str) -> Lesson:
         diagram=_diagram_from_data(data.get("diagram")),
         sections=sections,
         summary=summary,
-    )
+    ))
+
+
+# «Часть N»/«Раздел N» — не содержательный заголовок секции (баг #5)
+_GENERIC_HEADING_RE = re.compile(r"^(?:часть|раздел)\s*\d+$", re.IGNORECASE)
+
+
+def _ensure_section_headings(lesson: Lesson) -> Lesson:
+    """Заполняет секциям содержательные заголовки из body (первые 6-7 слов).
+
+    Применяется ко ВСЕМ путям сборки урока (JSON, repair, синтез из контекста):
+    секции без heading или с «Часть N»/«Раздел N» получают fallback из первых слов
+    body, чтобы в UI не было «Часть 1», «Часть 2»… (баг #5).
+    """
+    for i, s in enumerate(lesson.sections):
+        heading = (s.heading or "").strip()
+        if heading and not _GENERIC_HEADING_RE.match(heading):
+            continue
+        words = [w for w in (s.body or "").split() if w][:7]
+        candidate = " ".join(words).rstrip(".,;:…") if words else ""
+        s.heading = (candidate + "…" if len(words) == 7 else candidate) or f"Раздел {i + 1}"
+    return lesson
 
 
 MAX_REPAIR_SECTIONS = 6
@@ -715,19 +743,19 @@ def _repair_lesson_from_text(text: str, topic: str) -> Lesson:
     paragraphs = [_clean_plain_field(p) for p in re.split(r"\n+", (text or "").strip()) if p.strip()]
     paragraphs = [p for p in paragraphs if p]
     if len(paragraphs) >= 4:
-        return Lesson(
+        return _ensure_section_headings(Lesson(
             title=topic,
             definition=paragraphs[0],
             sections=[LessonSection(body=p) for p in paragraphs[1:-1]][:MAX_REPAIR_SECTIONS],
             summary=paragraphs[-1],
-        )
+        ))
     if len(paragraphs) >= 2:
-        return Lesson(
+        return _ensure_section_headings(Lesson(
             title=topic,
             definition=paragraphs[0],
             sections=[LessonSection(body=p) for p in paragraphs[1:]][:MAX_REPAIR_SECTIONS],
-        )
-    return Lesson(title=topic, sections=[LessonSection(body=_clean_plain_field(text))])
+        ))
+    return _ensure_section_headings(Lesson(title=topic, sections=[LessonSection(body=_clean_plain_field(text))]))
 
 
 def lesson_quality_ok(lesson: Lesson) -> Tuple[bool, str]:
@@ -742,7 +770,17 @@ def lesson_quality_ok(lesson: Lesson) -> Tuple[bool, str]:
     гостиная …») и служебный хром слайд-шоу не проходят — такой урок невозможно
     «открыть» как описание, его не показываем.
     """
-    from .knowledge import _is_publication_metadata, _is_slide_chrome, _is_slideshow_text, _is_web_noise
+    from .knowledge import _is_publication_metadata, _is_research_methodology, _is_slide_chrome, _is_slideshow_text, _is_web_noise
+
+    # Урок из методологии исследовательской работы (≥30% строк) — не объяснение темы.
+    # Проверяем СЫРЫЕ поля (до _clean_prose), иначе урок уже вычистился бы в «пусто».
+    raw_lines = [ln for ln in
+                 ((lesson.definition or "") + "\n" + "\n".join(s.body or "" for s in (lesson.sections or []))).splitlines()
+                 if ln.strip()]
+    if raw_lines:
+        research_hits = sum(1 for ln in raw_lines if _is_research_methodology(ln))
+        if research_hits >= max(1, int(len(raw_lines) * 0.3)):
+            return False, "research_methodology"
 
     def _clean_prose(t: Optional[str]) -> Optional[str]:
         text = (t or "").strip()
@@ -750,8 +788,11 @@ def lesson_quality_ok(lesson: Lesson) -> Tuple[bool, str]:
             return None
         if _is_slideshow_text(text):
             return None
-        # Убираем строки с метаданными авторов публикаций
-        lines = [ln for ln in text.splitlines() if ln.strip() and not _is_web_noise(ln) and not _is_publication_metadata(ln)]
+        # Убираем строки с метаданными авторов публикаций и методологией научных работ
+        lines = [ln for ln in text.splitlines() if ln.strip()
+                 and not _is_web_noise(ln)
+                 and not _is_publication_metadata(ln)
+                 and not _is_research_methodology(ln)]
         return "\n".join(lines) if lines else None
 
     definition = _clean_prose(lesson.definition) or ""
@@ -901,7 +942,7 @@ def _synthesize_lesson_from_context(topic: str, context: List[str]) -> Lesson:
         sections.append(LessonSection(body=" ".join(group)))
     sections = sections[:3]
     summary = unique[-1] if len(unique) >= 5 else ""
-    return Lesson(title=topic, definition=definition, sections=sections, summary=summary)
+    return _ensure_section_headings(Lesson(title=topic, definition=definition, sections=sections, summary=summary))
 
 
 def generate_lesson(

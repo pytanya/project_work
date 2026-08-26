@@ -65,6 +65,18 @@ class TestContentFilter:
         # «сос» в слове «состав» не должен срабатывать по profanity
         assert check_inappropriate_content("состав атмосферы")["blocked"] is False
 
+    def test_legit_text_with_еб_не_blocked(self):
+        # Баг: «ебу» внутри «требуя/требует» блокировало обычный учебный текст
+        # (ответ на квиз с вариантом «...требуя внимательного чтения» отклонялся → зависание).
+        assert check_inappropriate_content("Анализ средств, требуя внимательного чтения")["blocked"] is False
+        assert check_inappropriate_content("Задача требует решения")["blocked"] is False
+        assert check_inappropriate_content("сосиска и хлеб")["blocked"] is False
+
+    def test_real_profanity_still_blocked(self):
+        assert check_inappropriate_content("ты ебал")["blocked"] is True
+        assert check_inappropriate_content("соси")["blocked"] is True
+        assert check_inappropriate_content("ёбаный")["blocked"] is True
+
 
 class TestGuardUserInput:
     def test_clean_text_passes(self):

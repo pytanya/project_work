@@ -118,7 +118,40 @@ def _apply_cached_lesson(st: TutorState, deps: GraphDeps, cached, topic: str) ->
           kind="lesson.cached")
     st.agent_question = "Готов(а) перейти к квизу? (да / нет)"
     _emit(deps, "intake.question", question=st.agent_question, missing_fields=["lesson_confirm"])
-    return st.model_dump()# Тема «весь учебник»/не задана → нужен выбор темы из графа (topic gate).
+    return st.model_dump()
+
+
+def _wiki_articles_for(st: TutorState, deps: GraphDeps) -> List[str]:
+    """Тела wiki-статей тем графа/темы (баг #6): качественный контент добавляем к RAG-контексту.
+
+    Wiki-статьи (накопленные между сессиями) часто содержат лучшее изложение, чем
+    сырые чанки веб-скрапов. Их тела идут ПЕРВЫМИ в контекст урока — LLM получает
+    объяснительный материал, а не только фрагменты источников.
+    """
+    try:
+        from .wiki import KnowledgeWiki
+
+        wiki = KnowledgeWiki(deps.settings.KNOWLEDGE_WIKI_DIR,
+                             student_id=getattr(st, "student_id", None) or "")
+        subject = st.subject or "общая тема"
+        bodies: List[str] = []
+        titles: List[str] = []
+        for n in (st.knowledge_graph or {}).get("nodes", []) or []:
+            title = (n.get("title") or "").strip()
+            if not title or n.get("type") in ("book", "page"):
+                continue
+            titles.append(title)
+        # Тема сессии — приоритет, затем узлы графа
+        if st.topic and st.topic not in titles:
+            titles.insert(0, st.topic)
+        for title in titles[:8]:
+            art = wiki.get(subject, title)
+            if art is not None and (art.body or "").strip():
+                bodies.append(art.body.strip())
+        return bodies
+    except Exception as exc:
+        logger.warning("_wiki_articles_for: %s", exc)
+        return []# Тема «весь учебник»/не задана → нужен выбор темы из графа (topic gate).
 # Конкретная тема (напр. «Дроби») → гейт пропускается (Уровень 1).
 _ALL_TOPIC_MARKERS = {"all", "все", "всё", "вся", "весь", "весь учебник", "все темы"}
 
@@ -613,6 +646,10 @@ def agent_tutor_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
             _emit(deps, "system", message=st.agent_message, kind="content.empty")
             return st.model_dump()
         context = [_clean_text_lines(c.chunk.text) for c in chunks]
+        # Баг #6: wiki-статьи дополняют RAG-контекст урока (качественный контент первым).
+        wiki_bodies = _wiki_articles_for(st, deps)
+        if wiki_bodies:
+            context = wiki_bodies + context
         _emit(deps, "source.progress", stage="content", url="", status="generating",
               message=f"Генерирую урок по теме «{topic}» ({len(context)} фрагментов)…")
         # Урок — структурированный JSON: без on_token (не стримим сырой JSON)
@@ -643,6 +680,13 @@ def agent_tutor_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     _emit(deps, "source.progress", stage="tutor", url="", status="generating",
           message=f"Готовлю задание по теме «{st.topic or st.subject or 'тема'}»…")
     st, final_text = run_tutor_agent(st, deps)
+
+    # СТРАХОВКА (баг #3): ответ оценён, но модель не вызвала generate_quiz —
+    # новый вопрос не появился → генерируем детерминированно, чтобы квиз не завис.
+    if (st.current_question is None or st.current_question.question_id == prev_qid) \
+            and not st.quiz_complete and st.answered_count < (st.num_questions or 10):
+        logger.warning("agent_tutor_node: модель не сгенерировала следующий вопрос — детерминированный fallback")
+        st = TutorState.model_validate(generate_question_node(st, deps))
 
     # Публикуем события для фронтенда по изменениям состояния
     if st.current_question and st.current_question.question_id != prev_qid:
@@ -1081,6 +1125,12 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         _emit(deps, "intake.question", question=st.agent_question, missing_fields=["textbook_file"])
         return st.model_dump()
     context = [_clean_text_lines(c.chunk.text) for c in chunks]
+    # Баг #6: wiki-статьи (накопленные между сессиями) часто качественнее сырых чанков —
+    # добавляем их ПЕРВЫМИ в контекст урока/объяснения.
+    wiki_bodies = _wiki_articles_for(st, deps)
+    if wiki_bodies:
+        context = wiki_bodies + context
+        logger.info("content_node: +%d wiki-статей к контексту темы «%s»", len(wiki_bodies), topic)
     _emit(deps, "source.progress", stage="content", url="", status="generating",
           message=f"Генерирую {_MODE_LABELS.get(mode, 'материал')} по теме «{topic}» ({len(context)} фрагментов)…")
     on_token = deps.on_token  # реальный стриминг токенов в браузер (stream=True)
@@ -1091,8 +1141,19 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         st.set_plain_lesson(tutor_mod.generate_explanation(topic, context, st, llm_call=deps.tutor_llm, on_token=on_token))
         st.agent_message = "Объяснение по теме готово. Можно задать вопрос или перейти к квизу."
     else:
-        # Урок — структурированный JSON: НЕ стримим сырые токены (со скобками/без абзацев),
-        # карточки приходят целиком после генерации (пользователь видит «Генерирую урок…»).
+        # Урок — структурированный JSON: сырые токены JSON стримить нельзя (пользователь
+        # увидит «{"»). Чтобы не было «тишины» на время генерации (баг #2), сначала
+        # стримим текстовое объяснение темы в чат, затем собираем карточку урока.
+        if on_token is not None:
+            _emit(deps, "source.progress", stage="content", url="", status="generating",
+                  message=f"Объясняю тему «{topic}»…")
+            explanation = tutor_mod.generate_explanation(
+                topic, context, st, llm_call=deps.tutor_llm, on_token=on_token
+            )
+            if explanation:
+                _emit(deps, "tutor.explanation", message=explanation)
+            _emit(deps, "source.progress", stage="content", url="", status="generating",
+                  message=f"Собираю урок по теме «{topic}»…")
         lesson = tutor_mod.generate_lesson(topic, context, st, llm_call=deps.tutor_llm)
         # Синхронный гейт качества: фрагменты-слайды/«выплюнутый» контекст не показываем —
         # честно сообщаем и ждём другой источник (а не выдаём бессмысленные «Часть N»).
