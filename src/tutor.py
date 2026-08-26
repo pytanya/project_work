@@ -640,7 +640,7 @@ def _lesson_from_data(data: Dict[str, Any], topic: str) -> Lesson:
     Пост-валидация: секции без heading получают «Раздел N», секции с метаданными
     публикаций или телом короче 50 символов удаляются.
     """
-    from .knowledge import _is_publication_metadata
+    from .knowledge import _is_publication_metadata, _is_web_noise
 
     sections: List[LessonSection] = []
     raw_sections = data.get("sections") if isinstance(data.get("sections"), list) else []
@@ -650,7 +650,8 @@ def _lesson_from_data(data: Dict[str, Any], topic: str) -> Lesson:
         body = _clean_plain_field(s.get("body"))
         if not body:
             continue
-        if _is_publication_metadata(body) or len(body) < 50:
+        # Проверка на веб-шум и минимальную длину тела секции
+        if _is_web_noise(body) or _is_publication_metadata(body) or len(body) < 50:
             continue
         sections.append(LessonSection(
             heading=_clean_plain_field(s.get("heading")),
@@ -731,7 +732,7 @@ def _is_title_fragment(text: str) -> bool:
     return bool(_TITLE_PREFIX_RE.match((text or "").strip()))
 
 
-def _repair_lesson_from_text(text: str, topic: str) -> Lesson:
+def _repair_lesson_from_text(text: str, topic: str, *, raw_text: Optional[str] = None) -> Lesson:
     """Собирает Lesson из сплошного текста (LLM проигнорировал JSON).
 
     Параграфы (по переводам строк) становятся секциями; первый абзац — определение,
@@ -739,23 +740,29 @@ def _repair_lesson_from_text(text: str, topic: str) -> Lesson:
     JSON-абзацы (вложенный объект) отбрасываются — сырой JSON никогда не попадает
     в карточки. Секции ограничены (MAX_REPAIR_SECTIONS): «выплюнутый» контекст не
     превращается в бесконечный список фрагментов.
+    
+    raw_text — исходный текст (сохраняется для отладки и тестов).
     """
     paragraphs = [_clean_plain_field(p) for p in re.split(r"\n+", (text or "").strip()) if p.strip()]
     paragraphs = [p for p in paragraphs if p]
     if len(paragraphs) >= 4:
-        return _ensure_section_headings(Lesson(
+        lesson = _ensure_section_headings(Lesson(
             title=topic,
             definition=paragraphs[0],
             sections=[LessonSection(body=p) for p in paragraphs[1:-1]][:MAX_REPAIR_SECTIONS],
             summary=paragraphs[-1],
         ))
-    if len(paragraphs) >= 2:
-        return _ensure_section_headings(Lesson(
+    elif len(paragraphs) >= 2:
+        lesson = _ensure_section_headings(Lesson(
             title=topic,
             definition=paragraphs[0],
             sections=[LessonSection(body=p) for p in paragraphs[1:]][:MAX_REPAIR_SECTIONS],
         ))
-    return _ensure_section_headings(Lesson(title=topic, sections=[LessonSection(body=_clean_plain_field(text))]))
+    else:
+        lesson = _ensure_section_headings(Lesson(title=topic, sections=[LessonSection(body=_clean_plain_field(text))]))
+    
+    lesson.raw_text = raw_text or text
+    return lesson
 
 
 def lesson_quality_ok(lesson: Lesson) -> Tuple[bool, str]:
@@ -945,6 +952,208 @@ def _synthesize_lesson_from_context(topic: str, context: List[str]) -> Lesson:
     return _ensure_section_headings(Lesson(title=topic, definition=definition, sections=sections, summary=summary))
 
 
+# ----------------------------------------------------------------------
+# Урок: прямой стриминг (markdown → Lesson, без многоступенчатого pipeline)
+# ----------------------------------------------------------------------
+
+# Стандартные markdown-заголовки разделов урока
+_LESSON_HEADINGS = {
+    "определение": "definition",
+    "основные понятия": "terms",
+    "ключевые понятия": "terms",
+    "подробное объяснение": "content",
+    "разбор темы": "content",
+    "примеры": "examples",
+    "проверь себя": "check",
+    "вопросы для самопроверки": "check",
+    "итоги": "summary",
+    "краткий итог": "summary",
+    "заключение": "summary",
+}
+
+
+def _normalize_heading(candidate: str) -> Optional[str]:
+    """Сопоставляет заголовок LLM стандартному ключу."""
+    h = (candidate or "").strip().lower()
+    # Убираем префиксы: эмодзи, цифры, точки, дефисы, скобки
+    # Используем unicode диапазоны для emoji/symbols
+    h = re.sub(r"^[📚💡🤔💭✅🏷️📊0-9\s\.\\\)\\\-–—#*]+", "", h).strip().lower()
+    for key, mapped in _LESSON_HEADINGS.items():
+        if key in h:
+            return mapped
+    # Fuzzy: первые 6 символов совпадают
+    short = h[:12].strip()
+    for key, mapped in _LESSON_HEADINGS.items():
+        if key[:4] in short:
+            return mapped
+    return None
+
+
+def _extract_markdown_sections(text: str) -> Dict[str, str]:
+    """Извлекает секции из markdown-текста по заголовкам # и ##.
+
+    Возвращает словарь {имя_секции: содержимое}.
+    Имя секции берётся из текста заголовка после удаления # и ##.
+    
+    H1 (#) используется ТОЛЬКО для title — контент после h1 не собирается
+    в секцию "title", а игнорируется до первого ##.
+    При нескольких H1 берётся только первый.
+    """
+    sections: Dict[str, str] = {}
+    current_section: Optional[str] = None
+    current_content: List[str] = []
+    awaiting_h2 = False  # флаг: встретили h1, ждём первый h2
+    title_set = False  # флаг: уже видели первый h1
+
+    for line in text.splitlines():
+        # Заголовок уровня 1 (# ...) — только для title (берётся первый)
+        m_h1 = re.match(r'^#\s+(.+)', line)
+        if m_h1:
+            # Сохраняем предыдущую секцию если была
+            if current_section is not None and current_section != "title":
+                sections[current_section] = "\n".join(current_content).strip()
+            # H1: просто title без контента (только первый)
+            if not title_set:
+                sections["title"] = m_h1.group(1).strip()
+                title_set = True
+            current_section = None  # не начинаем новую секцию
+            current_content = []
+            awaiting_h2 = True
+            continue
+
+        # Заголовок уровня 2 (## ...)
+        m_h2 = re.match(r'^##\s+(.+)', line)
+        if m_h2:
+            # Сохраняем предыдущую секцию
+            if current_section is not None:
+                sections[current_section] = "\n".join(current_content).strip()
+            current_section = m_h2.group(1).strip()
+            current_content = []
+            awaiting_h2 = False
+            continue
+
+        # Содержимое секции — только если не ждём h2 (игнорируем текст между h1 и первым h2)
+        if current_section is not None and not awaiting_h2:
+            current_content.append(line)
+
+    # Сохраняем последнюю секцию
+    if current_section is not None:
+        sections[current_section] = "\n".join(current_content).strip()
+
+    return sections
+
+
+def _parse_markdown_lesson(markdown_text: str, topic: str) -> Lesson:
+    """Парсит markdown-текст урока в Lesson-объект.
+
+    Извлекает секции по заголовкам # и ##, распределяет по полям Lesson:
+    - title: из первого # или topic
+    - definition: из секции "Определение"
+    - key_terms: из секции "Основные понятия" (маркированный список)
+    - sections: контентные секции ("Подробное объяснение" и др.)
+    - summary: из секции "Краткий итог"/"Заключение"
+    - raw_text: полный исходный markdown
+
+    Fallback при malformed markdown: вызывает _repair_lesson_from_text().
+    """
+    if not markdown_text or not markdown_text.strip():
+        return Lesson(title=topic)
+
+    try:
+        raw_sections = _extract_markdown_sections(markdown_text)
+    except Exception:
+        # На случай ошибки парсинга — fallback на текст целиком
+        return _repair_lesson_from_text(markdown_text, topic)
+    
+    # Если не нашли ни одной секции (plain text без заголовков) и текст начинается с {
+    # — это сломанный JSON, нужно вернуться к контексту
+    if not raw_sections and markdown_text.strip().startswith("{"):
+        # Вернём пустой Lesson — вызывающий решит что делать
+        return Lesson(title=topic, raw_text=markdown_text)
+    
+    if not raw_sections:
+        return _repair_lesson_from_text(markdown_text, topic, raw_text=markdown_text)
+
+    # Title: из секции "title" (первый #) или topic
+    title = raw_sections.get("title", topic).strip() or topic
+
+    # Определение
+    definition = ""
+    for key in ("Определение", "определение"):
+        if key in raw_sections:
+            definition = raw_sections[key]
+            break
+
+    # Ключевые термины
+    key_terms: List[Dict[str, str]] = []
+    for key in ("Основные понятия", "Ключевые понятия", "основные понятия", "ключевые понятия"):
+        if key in raw_sections:
+            terms_text = raw_sections[key]
+            for line in terms_text.splitlines():
+                line = line.strip()
+                # Формат: **-термин**: определение или - термин: определение
+                m = re.match(r'[-*]\s*\*\*(.+?)\*\*\s*[:：]\s*(.+)', line)
+                if m:
+                    key_terms.append({"term": m.group(1).strip(), "definition": m.group(2).strip()})
+                else:
+                    m2 = re.match(r'[-*]\s+(.+?)[:：]\s*(.+)', line)
+                    if m2:
+                        key_terms.append({"term": m2.group(1).strip(), "definition": m2.group(2).strip()})
+                    elif line.startswith("- ") or line.startswith("* "):
+                        # Простой термин без определения
+                        term_name = line[2:].strip().split(":")[0].strip()
+                        if term_name:
+                            key_terms.append({"term": term_name, "definition": ""})
+            break
+
+    # Контентные секции
+    sections: List[LessonSection] = []
+    recognized_keys = {"Определение", "определение", "Основные понятия", "Ключевые понятия",
+                       "основные понятия", "ключевые понятия", "title"}
+    
+    for section_name, section_body in raw_sections.items():
+        if section_name in recognized_keys:
+            continue
+        if not section_body or len(section_body) < 10:
+            continue
+        # Нормализуем имя для отображения
+        display_name = _normalize_heading(section_name) or section_name
+        sections.append(LessonSection(body=section_body, heading=display_name))
+
+    # Ограничиваем количество секций
+    sections = sections[:4]
+
+    # Вывод/итог
+    summary = ""
+    for key in ("Краткий итог", "Итоги", "заключение", "итоги", "краткий итог", "Заключение"):
+        if key in raw_sections:
+            summary = raw_sections[key]
+            break
+
+    # Hook: первое предложение определения или первая строка текста
+    hook = ""
+    if definition:
+        first_sentence_end = definition.find(".")
+        if first_sentence_end > 0:
+            hook = definition[:first_sentence_end + 1]
+        else:
+            hook = definition[:200]
+
+    # Строим Lesson
+    lesson = Lesson(
+        title=title,
+        hook=hook,
+        definition=definition,
+        key_terms=key_terms[:10],
+        sections=sections,
+        summary=summary,
+        raw_text=markdown_text,
+    )
+
+    # Добавляем заголовки к секциям где их нет
+    return _ensure_section_headings(lesson)
+
+
 def generate_lesson(
     topic: str,
     context: List[str],
@@ -952,71 +1161,116 @@ def generate_lesson(
     llm_call: Optional[Callable[[List[Dict[str, str]]], str]] = None,
     on_token: Optional[Callable[[str], None]] = None,
 ) -> Lesson:
-    """Синтез структурированного урока по RAG-контексту (тьютор-модель).
+    """Генерация урока прямым стримингом (ЧИСТЫЙ ТЕКСТ / MARKDOWN).
 
-    Возвращает Lesson (карточки/секции/термины). Если модель не вернула валидную
-    структуру — repair: сплошной текст разбивается на секции (не теряется контент).
+    Вместо многоступенчатого JSON-pipeline использует простой промпт,
+    запрашивающий ЧИСТЫЙ TEXT ответ с markdown-разметкой. Стриминг работает
+    мгновенно с первого токена — нет задержек на JSON-парсинг/repair/retry.
+    
+    Поддерживает backward-compatibility: если LLM вернул JSON-объект с полями
+    title/definition/sections/hook — строится Lesson из данных (как раньше).
+    
     on_token — стриминг токенов в браузер.
     """
-    messages = _lesson_prompt(topic, context, state.grade, state.curriculum)
+    messages = _lesson_stream_prompt(topic, context, state.grade, state.curriculum)
+    # True streaming: чистый текст идёт сразу, без JSON-обёрток
     raw = generate_text(messages, llm_call=llm_call, on_token=on_token,
-                        role="tutor", temperature=0.4, max_tokens=1200)
-    logger.info("generate_lesson[%s]: raw_len=%d starts_with=%r", topic, len(raw), raw[:30] if raw else "")
+                        role="tutor", temperature=0.3, max_tokens=1500)
+    
+    if not raw or not raw.strip():
+        # Fallback: если модель не ответила — берём контекст
+        raw = context[0][:1500] if context else f"Материалы по теме «{topic}» пополняются."
+    
+    logger.info("generate_lesson[%s]: raw_len=%d first_chars=%r",
+                topic, len(raw or ""), (raw or "")[:40])
+    
+    # Проверяем, вернулся ли JSON (backward-compatibility)
     data = parse_llm_json(raw)
-    logger.info("generate_lesson[%s]: parsed_keys=%r sections_count=%d has_def=%r has_hook=%r",
-                topic, list(data.keys()), len(data.get("sections", [])) if isinstance(data.get("sections"), list) else 0,
-                bool(data.get("definition")), bool(data.get("hook")))
-    lesson = _lesson_from_data(data, topic)
-    logger.info("generate_lesson[%s]: lesson_title=%r sections=%d hook=%r def=%r",
-                topic, lesson.title, len(lesson.sections), bool(lesson.hook), bool(lesson.definition))
-    # Repair: модель вернула не-JSON / JSON без структуры — собираем из сплошного текста.
-    if not lesson.sections and not lesson.definition and not lesson.hook:
-        text = str(data.get("text") or "").strip()
-        if not text and not data:
-            # LLM вернул сплошной текст (не JSON) — используем его напрямую
-            text = (raw or "").strip()
-        
-        # Если текст начинается с { или [ — это JSON, который parse_llm_json не распарсил.
-        # Попробуем очистить от markdown-обёрток и распарсить заново.
-        if text.startswith("{") or text.startswith("["):
-            cleaned = re.sub(r'^```(?:json)?\s*', '', text).rstrip('`').strip()
-            try:
-                retry_data = json.loads(cleaned)
-                if isinstance(retry_data, dict):
-                    retry_lesson = _lesson_from_data(retry_data, topic)
-                    if retry_lesson.sections or retry_lesson.definition or retry_lesson.hook:
-                        logger.info("generate_lesson[%s]: retry-parse succeeded after markdown cleanup", topic)
-                        return retry_lesson
-            except json.JSONDecodeError:
-                pass
-            # Не удалось распарлить — очищаем, чтобы не показывать сырой JSON в UI
-            text = ""
-        
-        if len(text) < 40:
-            text = (context[0] if context else f"Материалы по теме «{topic}» ещё пополняются.")[:1200]
-        lesson = _repair_lesson_from_text(text, topic)
-    # Синхронный гейт качества: если урок — заголовки/фрагменты без объяснения,
-    # пробуем повторную генерацию с корректировкой, затем детерминированную сборку.
-    if not lesson_quality_ok(lesson)[0]:
-        try:
-            retry_raw = generate_text(
-                _lesson_retry_prompt(topic, context, state.grade, state.curriculum, raw),
-                llm_call=llm_call, on_token=on_token, role="tutor",
-                temperature=0.3, max_tokens=1200,
-            )
-            retry_data = parse_llm_json(retry_raw)
-            retry_lesson = _lesson_from_data(retry_data, topic)
-            if lesson_quality_ok(retry_lesson)[0]:
-                logger.info("generate_lesson[%s]: повторная генерация прошла гейт качества", topic)
-                return retry_lesson
-        except Exception as exc:
-            logger.warning("generate_lesson[%s]: повторная попытка не удалась: %s", topic, exc)
-        fallback = _synthesize_lesson_from_context(topic, context)
-        if lesson_quality_ok(fallback)[0]:
-            logger.info("generate_lesson[%s]: детерминированная сборка урока (%d секций)",
-                        topic, len(fallback.sections))
-            return fallback
+    if data:
+        if data.get("title") is not None:
+            # Старый JSON-формат с title — собираем Lesson из данных
+            lesson = _lesson_from_data(data, topic)
+            logger.info("generate_lesson[%s]: JSON path with title, keys=%s",
+                        topic, list(data.keys()))
+            return lesson
+        elif "text" in data and isinstance(data.get("text"), str):
+            # Формат {"text": "..."} — текст ответа в поле text
+            actual_text = data["text"]
+            logger.info("generate_lesson[%s]: JSON path with text field, len=%d",
+                        topic, len(actual_text or ""))
+            if actual_text:
+                return _parse_markdown_lesson(actual_text, topic)
+    
+    # Markdown-формат или сырой текст — парсим как markdown
+    lesson = _parse_markdown_lesson(raw, topic)
+    
+    # Если парсер не смог извлечь контент ИЛИ вернул мусор — используем контекст
+    # Проверяем: нет definition + секции короче 20 символов (мусор)
+    is_empty = not lesson.definition and not lesson.sections
+    is_garbage = lesson.sections and all(len((s.body or "")) < 20 for s in lesson.sections)
+    
+    if context and (is_empty or is_garbage):
+        logger.info("generate_lesson[%s]: empty/garbage parse result, using context via repair", topic)
+        # Собираем текст из контекста и парсим через repair
+        combined = "\n\n".join(context[:3])
+        return _repair_lesson_from_text(combined, topic)
+    
     return lesson
+
+
+def _lesson_stream_prompt(
+    topic: str,
+    context: List[str],
+    grade: Optional[str],
+    curriculum: Optional[str]
+) -> List[Dict[str, str]]:
+    """Упрощённый промпт для прямого стриминга урока (ЧИСТЫЙ ТЕКСТ, без JSON)."""
+    grade_note = grade_prompt(grade)
+    
+    system = (
+        f"Ты — тьютор EduTutor. Составь СТРУКТУРНЫЙ УРОК по теме '{topic}' "
+        f"ТОЛЬКО на основе предоставленного контекста учебника.\n\n"
+        f"{grade_note}"
+        + (f" Учебная программа: {curriculum}." if curriculum else "")
+        + (
+            "\n\nОТВЧАЙ MARKDOWN-ТЕКСТОМ СО СЛЕДУЮЩЕЙ СТРУКТУРОЙ:\n\n"
+            "# [ЗАГОЛОВОК УРОКА — кратко и содержательно]\n\n"
+            
+            "## Определение\n"
+            "[2-3 предложения простыми словами: что это такое, временные рамки, основные черты. "
+            "Минимум 100 символов. НЕ копируй контекст — перефразируй своими словами.]\n\n"
+            
+            "## Основные понятия\n"
+            "- **термин1**: краткое определение\n"
+            "- **термин2**: краткое определение\n"
+            "- **термин3**: краткое определение\n\n"
+            
+            "## Подробное объяснение\n"
+            "[3-5 предложений простыми словами. Объясни «почему это важно». "
+            "Если цитируешь произведение: сначала введение, затем цитата в «кавычках», "
+            "затем 1-2 предложения анализа. Для источников указывай §N.]\n\n"
+            
+            "## Проверь себя\n"
+            "[1-2 вопроса для самопроверки понимания темы.]\n\n"
+            
+            "## Краткий итог\n"
+            "[2-3 предложения: что запомнить.main takeaway.]\n\n"
+            
+            "--- ПРАВИЛА ---\n"
+            "- КАЖДЫЙ раздел ДОЛЖЕН иметь содержательный текст (минимум 60 символов)\n"
+            "- НЕ копируй контекст дословно — перефразируй\n"
+            "- НЕ включай: названия тестов, «литературная гостиная», имена авторов публикаций,\n"
+            "  «материал опубликован пользователем», «презентация онлайн», навигацию сайтов\n"
+            "- Если в контексте нет информации для раздела — пропусти этот раздел полностью\n"
+            "- Предложения короткие, простые, без канцелярита\n"
+            "- НЕ выдумывай факты за пределами контекста\n"
+            "- НЕ используй JSON — только plain markdown текст\n"
+        )
+    )
+    
+    ctx = "\n---\n".join(context)[:MAX_LESSON_CONTEXT_CHARS]
+    user = f"Тема: {topic}\nКонтекст учебника:\n{ctx}"
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
 # ----------------------------------------------------------------------

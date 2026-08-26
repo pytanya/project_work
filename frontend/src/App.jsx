@@ -146,6 +146,14 @@ export default function App() {
     return () => document.removeEventListener('mousedown', handleClick)
   }, [])
 
+  // Паттерн для обнаружения процессных статусов («Ищу...», «Генерирую...», «Объясняю...», «Собираю...»)
+  const PROCESSING_RE = /^(?:Ищу|Генерирую|Объясняю|Собираю|Строю)\b/i
+
+  // Удалить все процессные статусы из feed
+  const removeProcessStatuses = useCallback(() => {
+    setFeed((f) => f.filter((m) => m.kind !== 'source' || !PROCESSING_RE.test(m.text || '')))
+  }, [])
+
   const push = useCallback((kind, text, data) => {
     setFeed((f) => {
       // Глобальная проверка на дубли по тексту (исправляет повторение одного сообщения разными kind)
@@ -180,8 +188,17 @@ export default function App() {
       const id = streamRef.current
       streamRef.current = null
       if (id) {
+        // Стрим-пузырь существует — просто меняем его тип на финальный
         return f.map((m) => (m.id === id ? { ...m, kind, text, data } : m))
       }
+      // Стрим-пузыря нет (on_token не пришёл или был null): создаём сообщение напрямую.
+      // Проверяем, нет уже.stream-пузыря с этим текстом (защита от дубля при race condition).
+      const existingStream = f.find((m) => m.kind === 'stream')
+      if (existingStream) {
+        // Stream-пузырь найден без streamRef — эмулируем финализацию через него
+        return f.map((m) => (m.id === existingStream.id ? { ...m, kind, text, data } : m))
+      }
+      // Ничего нет — создаём новое сообщение
       const normalized = String(text || '').trim().toLowerCase()
       const alreadyExists = f.some((m) => (m.text || '').trim().toLowerCase() === normalized)
       if (alreadyExists) return f
@@ -250,16 +267,18 @@ export default function App() {
       }
 
       // Fire-and-forget подготовка темы: busy держим до финального события
-      // (вопрос/урок/сводка), а прогресс-события обновляют progressPhase.
+      // (вопрос/урок/сводка/объяснение), а прогресс-события обновляют progressPhase.
       if (isPreparingTopic.current) {
         const finalEvents = [
           'quiz.card', 'tutor.lesson', 'tutor.summary', 'intake.question',
-          'source.failed', 'session.error'
+          'tutor.explanation', 'source.failed', 'session.error', 'graph.ready'
         ]
         if (finalEvents.includes(evt.event)) {
           isPreparingTopic.current = false
           setChatBusy(false)
           setProgressPhase(null)
+          // Удалить процессные статусы при завершении подготовки темы
+          removeProcessStatuses()
         }
       }
       
@@ -300,6 +319,8 @@ export default function App() {
         case 'tutor.explanation':
           finalizeStream('explanation', d.message, d)
           setCurrent(null)
+          // Удалить процессные статусы («Объясняю...», «Собираю...») при завершении объяснения
+          removeProcessStatuses()
           // Живой счётчик правильных (6.2): обновляем после каждого ответа
           if (typeof d.correct_count === 'number') {
             setScore({ correct: d.correct_count, total: d.answered_count || 0 })
@@ -307,6 +328,8 @@ export default function App() {
           break
         case 'tutor.lesson':
           finalizeStream('lesson', d.text, { topic: d.topic, lesson: d.lesson })
+          // Удалить процессные статусы («Генерирую урок...», «Собираю урок...») при завершении урока
+          removeProcessStatuses()
           break
         case 'tutor.summary':
           finalizeStream('summary', `Квиз завершён: правильных ${d.correct}/${d.total}`)
@@ -317,6 +340,8 @@ export default function App() {
           setQuestionNum(d.total || 0)
           // Квиз завершён — освежаем историю занятий ученика
           setSessionHistoryReloadKey((k) => k + 1)
+          // Удалить процессные статусы при завершении квиза
+          removeProcessStatuses()
           break
         case 'source.progress':
           endStream()
@@ -331,6 +356,10 @@ export default function App() {
           // Гранулярный прогресс при подготовке темы (оптимизация #1)
           if (isPreparingTopic.current && d.message && d.status !== 'done' && d.status !== 'ready') {
             setProgressPhase({ stage: d.stage, message: d.message, status: d.status })
+          }
+          // Завершение поиска источников — удалить процессные статусы («Ищу...», «Генерирую...»)
+          if (d.status === 'done' || d.status === 'ready') {
+            removeProcessStatuses()
           }
           break
         case 'system.heartbeat':
@@ -355,6 +384,8 @@ export default function App() {
             setCurrent(null)
           }
           push('error', d.message)
+          // Удалить процессные статусы при ошибке поиска
+          removeProcessStatuses()
           // Белый список: поиск не нашёл ничего по разрешённым доменам —
           // предлагаем включить любые источники или изменить список.
           if (d.reason === 'whitelist_blocked') {
@@ -364,6 +395,8 @@ export default function App() {
         case 'graph.ready':
           refreshGraph()
           push('system', `Построен граф знаний: ${d.nodes} тем`)
+          // Удалить процессные статусы («Строю граф...») при завершении построения
+          removeProcessStatuses()
           break
         case 'wiki.updated':
           setWikiReloadKey((k) => k + 1)
@@ -398,12 +431,14 @@ export default function App() {
           break
         case 'session.error':
           push('error', d.message)
+          // Удалить процессные статусы при ошибке сессии
+          removeProcessStatuses()
           break
         default:
           break
       }
     },
-    [push, refreshGraph, pushToken, finalizeStream, endStream, resetBusyAfterTimeout],
+    [push, refreshGraph, pushToken, finalizeStream, endStream, resetBusyAfterTimeout, removeProcessStatuses],
   )
 
   useEffect(() => {
@@ -732,6 +767,8 @@ export default function App() {
       isPreparingTopic.current = false
       setProgressPhase(null)
       setChatBusy(false)
+      // Удалить процессные статусы при ошибке выбора темы
+      removeProcessStatuses()
     }
     // chatBusy сбросится при получении финального WS-события
   }

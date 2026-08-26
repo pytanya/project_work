@@ -159,7 +159,7 @@ def get_knowledge_graph(args: Dict[str, Any], ctx: AgentToolContext) -> Tuple[st
 # Инструменты тьюторинга (7.3)
 # ----------------------------------------------------------------------
 def generate_lesson(args: Dict[str, Any], ctx: AgentToolContext) -> Tuple[str, TutorState]:
-    """Урок: синтез структурированного объяснения темы по RAG-контексту."""
+    """Урок: прямой стриминг markdown текста по RAG-контексту (без JSON-pipeline)."""
     st = ctx.state
     topic = str(args.get("topic") or _active_topic_title(st) or st.topic or st.subject or "общая тема")
     results = _rag_results(ctx, topic, k=5)
@@ -171,8 +171,8 @@ def generate_lesson(args: Dict[str, Any], ctx: AgentToolContext) -> Tuple[str, T
             required_action="route_to_source"
         ), st
     context = [r.chunk.text for r in results]
-    # Урок — структурированный JSON: без on_token (не стримим сырой JSON)
-    lesson = tutor_mod.generate_lesson(topic, context, st, llm_call=ctx.llm_call)
+    # Прямой стриминг: markdown текст идёт мгновенно через on_token → WS event "token"
+    lesson = tutor_mod.generate_lesson(topic, context, st, llm_call=ctx.llm_call, on_token=ctx.on_token)
     st = st.model_copy(deep=True)
     st.set_lesson(lesson)
     st.lesson_done = True

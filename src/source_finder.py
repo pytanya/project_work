@@ -85,6 +85,18 @@ ALLOWED_DOWNLOAD_HOSTS = (
 # Каталоги-«склады» — ТОЛЬКО источник ссылок, прямое скачивание запрещено.
 SCRAPER_DOMAINS = ("11klassov.net", "reshak.ru", "gdz", "obuchalka", "vklasse")
 
+# Blacklist доменов с ненадёжным/нерелевантным образовательным контентом.
+# Включает порталы с рекламой, оплатой, пользовательскими публикациями без модерации,
+# а также общие блоги и рефератные сайты. Эти источники загрязняют уроки навигационными
+# элементами («оплатить», «показать больше», «moderate» и т.п.).
+DISALLOWED_EDUCATIONAL_HOSTS = (
+    "infourok.ru", "nsportal.ru", "multiurok.ru", "stolitsa.online",
+    "videouroki.online", "kopilkaurokov", "volgaedu.ru",
+    "cs.yaklass.ru", "yaklass.ru",  # ЯКласс — много рекламы/оплаты
+    "dzen.ru", "pikabu.ru",          # Общие блоги — не учебный контент
+    "studfile.net", "referat.ru",     # Курсовые/рефераты
+)
+
 
 @dataclass
 class SearchResult:
@@ -232,6 +244,9 @@ def license_check(url: str, for_download: bool = False) -> Tuple[bool, str]:
         return False, "URL не содержит hostname"
     if _host_in(host, SCRAPER_DOMAINS):
         return (False, f"Хост {host} — каталог-«склад», используется только как источник ссылок")
+    # Blacklist: исключённые домены с ненадёжным/мусорным контентом
+    if _host_in(host, DISALLOWED_EDUCATIONAL_HOSTS):
+        return False, f"Хост {host} исключён из источников (ненадёжный контент)"
     if for_download and not _host_in(host, ALLOWED_DOWNLOAD_HOSTS):
         return False, f"Хост {host} не входит в список лицензионно допустимых для скачивания"
     return True, "источник лицензионно допустим"
@@ -958,6 +973,18 @@ def collect_source_materials(
                     failed_reason="whitelist_blocked",
                 )
             results = whitelisted
+        # Фильтрация по blacklist доменов (ненадёжный/мусорный контент)
+        disallowed_hosts_set = set(DISALLOWED_EDUCATIONAL_HOSTS)
+        results = [
+            r for r in results
+            if not any(h in r.url for h in disallowed_hosts_set)
+        ]
+        if not results:
+            return SourceCollection(
+                status="failed",
+                message="Материалы по теме не найдены (все результаты заблокированы blacklist доменов)",
+                failed_reason="blacklist_blocked",
+            )
         for r in results:
             allowed, reason = license_check(r.url, for_download=False)
             if not allowed:

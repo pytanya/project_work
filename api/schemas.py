@@ -80,6 +80,10 @@ class LessonDiagram(BaseModel):
 class Lesson(BaseModel):
     """Структурированный урок (вместо стены текста).
 
+    Для режимов прямого стриминга (markdown) используется поле raw_text,
+    которое рендерится на фронтенде как plain lesson с абзацами.
+    
+    Поля ниже заполняются автоматически из markdown при парсинге:
     - hook — зацепка-вопрос в начале (активация внимания);
     - definition — короткое определение темы;
     - key_terms — ключевые термины с краткими определениями (глоссарий);
@@ -95,6 +99,7 @@ class Lesson(BaseModel):
     diagram: Optional[LessonDiagram] = None
     sections: List[LessonSection] = Field(default_factory=list)
     summary: str = ""
+    raw_text: str = ""  # Сырой markdown-текст урока (для стриминга/резервного рендеринга)
 
     def render_text(self) -> str:
         """Полный текст урока (для lesson_text / стриминга / dedupe / resync)."""

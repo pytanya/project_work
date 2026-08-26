@@ -1,5 +1,5 @@
-// LessonPanel — урок по теме (режим lesson).
-// Карточное представление структурированного урока (LessonSchema).
+﻿// LessonPanel — урок по теме (режим lesson).
+// Поддержка: структурированный Lesson (карточки) ИЛИ plain/markdown текст (новый стриминг).
 import { useMemo, useState } from 'react'
 import LatexText from './LatexText'
 import LessonDiagram from './LessonDiagram'
@@ -16,11 +16,201 @@ function clean(v, field) {
   if (s.startsWith('{') || s.startsWith('[')) {
     return ''
   }
-  const inner = s.replace(/^['"]/, '').replace(/['"]$/, '')
+  const inner = s.replace(/^['"]/g, '').replace(/['"]$/g, '')
   if (inner.startsWith('{') || inner.startsWith('[')) {
     return ''
   }
   return s
+}
+
+/* ═══════════════════════════════════════════
+   Markdown → Paragraphs парсер
+   ═══════════════════════════════════════════ */
+
+/** Парсит markdown текст на секции по заголовкам ## . Возвращает массив {heading, body}. */
+function parseMarkdownSections(mdText) {
+  if (!mdText || typeof mdText !== 'string') return []
+  
+  const lines = mdText.split('\n')
+  const sections = []
+  let currentHeading = null
+  let currentBody = []
+  
+  for (const line of lines) {
+    const m = line.match(/^##+\s+(.+)$/)
+    if (m) {
+      // Сохраняем предыдущую секцию
+      if (currentHeading && currentBody.length > 0) {
+        sections.push({
+          heading: currentHeading,
+          body: currentBody.join('\n').trim()
+        })
+      }
+      currentHeading = m[1].trim()
+      currentBody = []
+    } else if (line.trim() === '') {
+      // Пустая строка — не сбрасываем, но можем пропускать
+      continue
+    } else {
+      currentBody.push(line)
+    }
+  }
+  
+  // Последняя секция
+  if (currentHeading && currentBody.length > 0) {
+    sections.push({
+      heading: currentHeading,
+      body: currentBody.join('\n').trim()
+    })
+  }
+  
+  return sections
+}
+
+/** Извлекает определение (текст после "## Определение" или первый значимый абзац). */
+function extractDefinition(mdText) {
+  if (!mdText) return ''
+  const defMatch = mdText.match(/^##\s*Определение\s*\n([\s\S]*?)(?=^##|$)/m)
+  if (defMatch) {
+    return defMatch[1].trim().split('\n').filter(l => l.trim()).join(' ').trim()
+  }
+  // Fallback: первый значимый абзац
+  const paragraphs = mdText.split(/\n{2,}/).filter(p => p.trim().length > 50)
+  return paragraphs[0]?.trim() || ''
+}
+
+/** Извлекает термины из маркированного списка после "## Основные понятия". */
+function extractTerms(mdText) {
+  if (!mdText) return []
+  const termsMatch = mdText.match(/^##\s*[Оо]сновные\s*[Ппонятия]\s*\n([\s\S]*?)(?=^##|$)/m)
+  if (!termsMatch) return []
+  
+  const lines = termsMatch[1].split('\n')
+  const terms = []
+  for (const line of lines) {
+    const trimmed = line.trim()
+    // Формат: **-термин**: определение
+    const m = trimmed.match(/^[-*]\s*\*\*(.+?)\*\*\s*[:：]\s*(.+)/)
+    if (m) {
+      terms.push({ term: m[1].trim(), definition: m[2].trim() })
+    } else {
+      const m2 = trimmed.match(/^[-*]\s+(.+?)[:：]\s*(.+)/)
+      if (m2) {
+        terms.push({ term: m2[1].trim(), definition: m2[2].trim() })
+      }
+    }
+  }
+  return terms.slice(0, 10)
+}
+
+/** Извлекает вопрос для самопроверки. */
+function extractCheckQuestion(mdText) {
+  if (!mdText) return ''
+  const checkMatch = mdText.match(/^##\s*[Пп]роверь\s*себя\s*\n([\s\S]*?)(?=^##|$)/m)
+  if (checkMatch) {
+    return checkMatch[1].trim().split('\n').filter(l => l.trim()).join(' ').trim()
+  }
+  return ''
+}
+
+/** Извлекает итог. */
+function extractSummary(mdText) {
+  if (!mdText) return ''
+  const sumMatch = mdText.match(/^##\s*(?:Краткий\s+Итог|Заключение|Итого)\s*\n([\s\S]*?)(?=^##|$)/m)
+  if (sumMatch) {
+    return sumMatch[1].trim().split('\n').filter(l => l.trim()).join(' ').trim()
+  }
+  return ''
+}
+
+/* ═══════════════════════════════════════════
+   Markdown Inline-парсер для контента секций
+   ═══════════════════════════════════════════ */
+
+/** Экранирует специальные HTML-символы */
+function escapeHtml(str) {
+  const A = String.fromCharCode(38) + 'amp;'
+  const L = String.fromCharCode(38) + 'lt;'
+  const G = String.fromCharCode(38) + 'gt;'
+  return str
+.replace(/&/gu, A)
+.replace(/</gu, L)
+.replace(/>/gu, G)
+}
+
+function renderMarkdownLine(line) {
+  let html = String(line || '')
+  
+  // Экранируем HTML (порядок важен: & первым!)
+  html = escapeHtml(html)
+  
+  // Жирный текст: **текст** или __текст__
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/__(.+?)__/g, '<strong>$1</strong>')
+  
+  // Курсив: *текст* или _текст_
+  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/(?<!\w)_(.+?)_(?!\w)/g, '<em>$1</em>')
+  
+  // Код: `текст`
+  html = html.replace(/`(.+?)`/g, '<code>$1</code>')
+  
+  return html
+}
+
+/** Парсит блок текста и возвращает массив React-фрагментов (абзацы, списки). */
+function parseInlineMarkdown(text) {
+  if (!text) return null
+  
+  const lines = String(text).split('\n')
+  const fragments = []
+  let inList = false
+  let listItems = []
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    const trimmed = line.trim()
+    
+    // Маркированный список
+    const bulletMatch = trimmed.match(/^[-*•]\s+(.+)$/)
+    if (bulletMatch) {
+      if (!inList) {
+        inList = true
+        listItems = []
+      }
+      listItems.push(renderMarkdownLine(bulletMatch[1]))
+      continue
+    }
+    
+    // Завершаем список если строка не является элементом списка
+    if (inList) {
+      fragments.push(<ul key={`list-${fragments.length}`}>{listItems.map((item, j) => (
+        <li key={j}><span dangerouslySetInnerHTML={{ __html: item }} /></li>
+      ))}</ul>)
+      inList = false
+      listItems = []
+    }
+    
+    // Горизонтальный разделитель
+    if (/^[-*_]{3,}$/.test(trimmed)) {
+      fragments.push(<hr key={`hr-${fragments.length}`} />)
+      continue
+    }
+    
+    // Обычный текст — добавляем как абзац
+    if (trimmed) {
+      fragments.push(<p key={`p-${fragments.length}`}><span dangerouslySetInnerHTML={{ __html: renderMarkdownLine(trimmed) }} /></p>)
+    }
+  }
+  
+  // Завершаем остаток списка
+  if (inList && listItems.length > 0) {
+    fragments.push(<ul key={`list-${fragments.length}`}>{listItems.map((item, j) => (
+      <li key={j}><span dangerouslySetInnerHTML={{ __html: item }} /></li>
+    ))}</ul>)
+  }
+  
+  return fragments.length === 0 ? null : fragments
 }
 
 /* ═══════════════════════════════════════════
@@ -85,6 +275,61 @@ function PlainLesson({ text, topic }) {
         {paragraphs.map((p, i) => (
           <p key={i}><LatexText text={p} /></p>
         ))}
+      </div>
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════
+   MarkdownLesson — рендеринг из raw_text (markdown)
+   ═══════════════════════════════════════════ */
+
+function MarkdownLesson({ rawText, topic, lesson }) {
+  const sections = useMemo(() => parseMarkdownSections(rawText), [rawText])
+  const definition = useMemo(() => extractDefinition(rawText), [rawText])
+  const terms = useMemo(() => extractTerms(rawText), [rawText])
+  const checkQuestion = useMemo(() => extractCheckQuestion(rawText), [rawText])
+  const summary = useMemo(() => extractSummary(rawText), [rawText])
+  
+  // Title из первого заголовка # или lesson.title
+  const title = useMemo(() => {
+    const firstLineH = rawText?.match(/^#\s+(.+)$/m)?.[1]?.trim()
+    return lesson?.title || firstLineH || topic || 'Урок'
+  }, [rawText, lesson?.title, topic])
+  
+  return (
+    <div className="lesson-card">
+      {/* Header */}
+      <div className="lesson-card__header">
+        <span className="lesson-card__icon">📚</span>
+        <div className="lesson-card__header-text">
+          <h2 className="lesson-card__title">{title}</h2>
+          {topic !== title && topic && <span className="lesson-card__subtitle">{topic}</span>}
+        </div>
+      </div>
+      
+      <div className="lesson-card__body">
+        <HookSection hook={definition ? `💡 ${definition.substring(0, 100)}${definition.length > 100 ? '...' : ''}` : ''} />
+        <DefinitionSection definition={definition} />
+        <TermsSection terms={terms.length > 0 ? terms : (lesson?.key_terms || [])} />
+        {sections.length > 0 && (
+          <ContentSections sections={sections.map(s => ({
+            heading: s.heading,
+            body: s.body,
+            citation: lesson?.sections?.[0]?.citation || '',
+            check_question: ''
+          }))} />
+        )}
+        {checkQuestion && (
+          <div className="lesson-section lesson-section--check">
+            <div className="lesson-section__header">
+              <span className="lesson-section__icon">💭</span>
+              <h3 className="lesson-section__title">Проверь себя</h3>
+            </div>
+            <p className="lesson-check"><LatexText text={checkQuestion} /></p>
+          </div>
+        )}
+        <SummarySection summary={summary || lesson?.summary || ''} />
       </div>
     </div>
   )
@@ -226,7 +471,9 @@ function ContentSections({ sections }) {
               <h3 className="lesson-section__title"><LatexText text={heading} /></h3>
             </summary>
             <div className="lesson-section__body">
-              <p className="lesson-section-body"><LatexText text={body} /></p>
+              {parseInlineMarkdown(body) || (
+                <p className="lesson-section-body"><LatexText text={body} /></p>
+              )}
               {s.citation && <div className="lesson-citation">📖 {s.citation}</div>}
               {s.check_question && (
                 <div className="lesson-check">💭 Проверь себя: <LatexText text={s.check_question} /></div>
@@ -278,39 +525,48 @@ function SummarySection({ summary }) {
    ═══════════════════════════════════════════ */
 
 export default function LessonPanel({ text, topic, lesson }) {
-  /* ── Проверка на структурированный урок ── */
-  const structuredCondition = lesson && typeof lesson === 'object' && !Array.isArray(lesson) && (
-    (Array.isArray(lesson.sections) && lesson.sections.length > 0) ||
-    lesson.definition ||
-    lesson.hook ||
-    (Array.isArray(lesson.key_terms) && lesson.key_terms.length > 0)
-  )
+  /* ═ Hooks вызываем всегда в одинаковом порядке, ДО любых return = */
+  
+  /* ── Санитизация структурированного урока (всегда вызывается) ── */
+  const data = useMemo(() => {
+    const isStructured = lesson && typeof lesson === 'object' && !Array.isArray(lesson) && (
+      (Array.isArray(lesson.sections) && lesson.sections.length > 0) ||
+      lesson.definition ||
+      lesson.hook ||
+      (Array.isArray(lesson.key_terms) && lesson.key_terms.length > 0)
+    )
+    if (!isStructured) return null
+    
+    const raw = lesson
+    return {
+      ...raw,
+      title: clean(raw.title),
+      hook: clean(raw.hook),
+      definition: clean(raw.definition),
+      summary: clean(raw.summary),
+      key_terms: (raw.key_terms || [])
+        .map((t) => ({
+          term: clean(typeof t === 'string' ? t : t?.term),
+          definition: clean(typeof t === 'string' ? '' : t?.definition),
+        }))
+        .filter((t) => t.term),
+      sections: (raw.sections || []).map((s) => ({
+        ...s,
+        heading: clean(s?.heading),
+        title: clean(s?.title),
+        body: clean(s?.body),
+        content: clean(s?.content),
+        citation: clean(s?.citation),
+        check_question: clean(s?.check_question),
+      })),
+    }
+  }, [lesson])
 
-  const raw = structuredCondition ? lesson : null
-
-  /* ── Санитизация данных ── */
-  const data = useMemo(() => (raw ? {
-    ...raw,
-    title: clean(raw.title),
-    hook: clean(raw.hook),
-    definition: clean(raw.definition),
-    summary: clean(raw.summary),
-    key_terms: (raw.key_terms || [])
-      .map((t) => ({
-        term: clean(typeof t === 'string' ? t : t?.term),
-        definition: clean(typeof t === 'string' ? '' : t?.definition),
-      }))
-      .filter((t) => t.term),
-    sections: (raw.sections || []).map((s) => ({
-      ...s,
-      heading: clean(s?.heading),
-      title: clean(s?.title),
-      body: clean(s?.body),
-      content: clean(s?.content),
-      citation: clean(s?.citation),
-      check_question: clean(s?.check_question),
-    })),
-  } : null), [raw])
+  /* ── Путь 1: markdown-стриминг (raw_text) ── */
+  const rawMd = lesson?.raw_text || ''
+  if (rawMd && typeof rawMd === 'string' && rawMd.trim().length > 50) {
+    return <MarkdownLesson rawText={rawMd} topic={topic} lesson={lesson} />
+  }
 
   /* ── Fallback: нет данных ── */
   if (!data) {

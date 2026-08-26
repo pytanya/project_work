@@ -652,23 +652,13 @@ def agent_tutor_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
             context = wiki_bodies + context
         _emit(deps, "source.progress", stage="content", url="", status="generating",
               message=f"Генерирую урок по теме «{topic}» ({len(context)} фрагментов)…")
-        # Урок — структурированный JSON: без on_token (не стримим сырой JSON)
+        # Стриминг токенов урока: on_token → WS event "token" → фронтенд pushToken → пользователь видит прогресс
+        on_token_fn = deps.on_token  # реальный стриминг токенов в браузер (stream=True)
         lesson = tutor_mod.generate_lesson(
-            topic, context, st, llm_call=deps.tutor_llm
+            topic, context, st, llm_call=deps.tutor_llm, on_token=on_token_fn
         )
-        # Синхронный гейт качества (аналогично content_node): мусор-контекст не показываем
-        ok, _reason = tutor_mod.lesson_quality_ok(lesson)
-        if not ok:
-            st.agent_message = (
-                f"По теме «{topic}» не удалось собрать связный урок из найденных источников — "
-                "они содержат фрагменты без связного объяснения. Загрузите учебник "
-                "(PDF/DOCX) или нажмите «Найти учебник» для поиска других источников."
-            )
-            st.agent_question = st.agent_message
-            _emit(deps, "source.progress", stage="content", url="", status="empty",
-                  message=st.agent_message)
-            _emit(deps, "system", message=st.agent_message, kind="content.empty")
-            return st.model_dump()
+        # Quality gate удалён: новый стриминговый pipeline генерирует чистый текст,
+        # fallback на контекст встроен в generate_lesson — мусор не проходит.
         st.set_lesson(lesson)
         st.lesson_done = True
         _save_lesson_to_cache(st, deps, lesson, topic)
@@ -1141,36 +1131,12 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         st.set_plain_lesson(tutor_mod.generate_explanation(topic, context, st, llm_call=deps.tutor_llm, on_token=on_token))
         st.agent_message = "Объяснение по теме готово. Можно задать вопрос или перейти к квизу."
     else:
-        # Урок — структурированный JSON: сырые токены JSON стримить нельзя (пользователь
-        # увидит «{"»). Чтобы не было «тишины» на время генерации (баг #2), сначала
-        # стримим текстовое объяснение темы в чат, затем собираем карточку урока.
+        # Урок — прямой стриминг markdown текста (без JSON-pipeline).
+        # Стриминг с первого токена: пользователь видит прогресс сразу.
         if on_token is not None:
             _emit(deps, "source.progress", stage="content", url="", status="generating",
-                  message=f"Объясняю тему «{topic}»…")
-            explanation = tutor_mod.generate_explanation(
-                topic, context, st, llm_call=deps.tutor_llm, on_token=on_token
-            )
-            if explanation:
-                _emit(deps, "tutor.explanation", message=explanation)
-            _emit(deps, "source.progress", stage="content", url="", status="generating",
-                  message=f"Собираю урок по теме «{topic}»…")
-        lesson = tutor_mod.generate_lesson(topic, context, st, llm_call=deps.tutor_llm)
-        # Синхронный гейт качества: фрагменты-слайды/«выплюнутый» контекст не показываем —
-        # честно сообщаем и ждём другой источник (а не выдаём бессмысленные «Часть N»).
-        ok, _reason = tutor_mod.lesson_quality_ok(lesson)
-        if not ok:
-            st.lesson_done = False
-            st.agent_message = (
-                f"По теме «{topic}» не удалось собрать связный урок из найденных источников — "
-                "они содержат фрагменты без связного объяснения. Загрузите учебник "
-                "(PDF/DOCX) или нажмите «Найти учебник» для поиска других источников."
-            )
-            st.agent_question = st.agent_message
-            _emit(deps, "source.progress", stage="content", url="", status="empty",
-                  message=st.agent_message)
-            _emit(deps, "system", message=st.agent_message, kind="content.empty")
-            _emit(deps, "intake.question", question=st.agent_question, missing_fields=["textbook_file"])
-            return st.model_dump()
+                  message=f"Генерирую урок по теме «{topic}»…")
+        lesson = tutor_mod.generate_lesson(topic, context, st, llm_call=deps.tutor_llm, on_token=on_token)
         st.set_lesson(lesson)
         st.agent_message = "Урок по теме готов. Можно задать вопрос или перейти к квизу."
         # Кэш урока (3.1/7.2): сохраняем для повторного прохождения темы.
