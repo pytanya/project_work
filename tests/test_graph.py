@@ -162,6 +162,94 @@ class TestReuseMaterials:
         assert res.reuse_pending is False  # чужие/бесхозные чанки не предлагаем
 
 
+class TestLessonCacheFlow:
+    """Повторное прохождение темы (3.1/3.2/7.2): кэшированный урок показывается сразу."""
+
+    def _lesson(self):
+        from api.schemas import Lesson, LessonSection
+
+        return Lesson(
+            title="Атмосфера",
+            hook="Почему небо голубое?",
+            definition="Атмосфера — газовая оболочка Земли.",
+            sections=[LessonSection(heading="Состав",
+                                    body="Воздух содержит азот и кислород, а также углекислый газ.")],
+            summary="Атмосфера защищает жизнь.",
+        )
+
+    def test_reuse_shows_cached_lesson_and_asks_additional(self, deps, tmp_path):
+        from src.lesson_cache import save_lesson
+
+        cache_dir = Path(deps.settings.SOURCES_CACHE_DIR)
+        save_lesson(cache_dir, "", "география", "Атмосфера", "6", self._lesson())
+
+        graph = build_graph(deps)
+        state = TutorState(num_questions=2, learner_type="schoolchild", grade="6",
+                           subject="география", topic="Атмосфера", mode="lesson", has_textbook=False)
+        res = _invoke(graph, state.model_dump())
+        assert res.reuse_pending is True
+        assert "дополнить" in (res.agent_question or "").lower()
+        assert res.agent_options == ["Перейти к квизу", "Дополнить материал", "Начать с нуля"]
+        # урок из кэша показан сразу (без переспроса «использовать да/нет»)
+        assert res.lesson_done is True
+        assert res.lesson_title == "Атмосфера"
+        assert res.lesson_definition == "Атмосфера — газовая оболочка Земли."
+
+    def test_reuse_answer_go_to_quiz(self, deps, tmp_path):
+        from src.lesson_cache import save_lesson
+
+        cache_dir = Path(deps.settings.SOURCES_CACHE_DIR)
+        save_lesson(cache_dir, "", "география", "Атмосфера", "6", self._lesson())
+        graph = build_graph(deps)
+        state = TutorState(num_questions=1, learner_type="schoolchild", grade="6",
+                           subject="география", topic="Атмосфера", mode="lesson", has_textbook=False)
+        res = _invoke(graph, state.model_dump())
+        res = _invoke(graph, {**res.model_dump(), "pending_answer": "Перейти к квизу"})
+        assert res.reuse_pending is False
+        assert res.lesson_confirmed is True
+        assert res.source_status == "ready"
+        # урок из кэша остался в состоянии
+        assert res.lesson_text and "Атмосфера" in res.lesson_text
+
+    def test_reuse_answer_start_from_scratch(self, deps, tmp_path):
+        from src.lesson_cache import save_lesson
+
+        cache_dir = Path(deps.settings.SOURCES_CACHE_DIR)
+        save_lesson(cache_dir, "", "география", "Атмосфера", "6", self._lesson())
+        graph = build_graph(deps)
+        state = TutorState(num_questions=1, learner_type="schoolchild", grade="6",
+                           subject="география", topic="Атмосфера", mode="lesson", has_textbook=False)
+        res = _invoke(graph, state.model_dump())
+        res = _invoke(graph, {**res.model_dump(), "pending_answer": "Начать с нуля"})
+        assert res.reuse_pending is False
+        assert res.force_source_refresh is True
+        assert res.lesson_text is None  # кэшированный урок сброшен
+
+    def test_content_node_uses_cached_lesson_without_llm(self, deps, tmp_path):
+        from src.lesson_cache import save_lesson
+
+        cache_dir = Path(deps.settings.SOURCES_CACHE_DIR)
+        save_lesson(cache_dir, "", "география", "Атмосфера", "6", self._lesson())
+        calls = {"n": 0}
+
+        def counting_llm(messages):
+            calls["n"] += 1
+            return _GEN
+
+        deps.tutor_llm = counting_llm
+        graph = build_graph(deps)
+        state = TutorState(num_questions=1, learner_type="schoolchild", grade="6",
+                           subject="география", topic="Атмосфера", mode="lesson",
+                           has_textbook=False,
+                           sources=[{"type": "web", "url": "x"}], collection_id="web")
+        res = _invoke(graph, state.model_dump())
+        # content_node: урок из кэша, LLM для генерации урока не вызывался
+        assert res.lesson_done is True
+        assert res.lesson_title == "Атмосфера"
+        assert res.lesson_text and "Атмосфера" in res.lesson_text
+        assert calls["n"] == 0
+
+
 class TestIntakeFlow:
     def test_asks_learner_type_first(self, deps):
         graph = build_graph(deps)
@@ -368,7 +456,8 @@ class TestQuizFlow:
                         "edges": [{"source": "n1", "target": "n2", "label": "смесь"}],
                     },
                     "sections": [
-                        {"heading": "Состав", "body": "Азот и кислород — её основа.",
+                        {"heading": "Состав", "body": "Азот и кислород — её основа. Воздух "
+                         "также содержит углекислый газ и водяной пар, которые влияют на климат.",
                          "citation": "§12", "check_question": "Какой газ преобладает?"},
                     ],
                     "summary": "Атмосфера защищает жизнь на Земле.",
@@ -604,7 +693,12 @@ class TestSourceFlow:
     def test_index_failure_emits_source_failed(self, deps, tmp_path):
         """Сбой эмбеддингов при индексации → source_status=failed + событие source.failed."""
         doc = tmp_path / "doc.txt"
-        doc.write_text("Параграф 12: Атмосфера\nСтроение атмосферы.", encoding="utf-8")
+        doc.write_text(
+            "Параграф 12: Атмосфера\n"
+            "Строение атмосферы. Атмосфера состоит из нескольких слоёв, "
+            "каждый из которых выполняет свою роль в защите планеты.",
+            encoding="utf-8",
+        )
         events = []
         deps.on_event = lambda event, data: events.append(event)
 

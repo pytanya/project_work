@@ -230,9 +230,11 @@ class TestEvaluateAnswer:
             "definition": "Атмосфера — газовая оболочка Земли.",
             "key_terms": [{"term": "атмосфера", "definition": "воздушная оболочка планеты"}],
             "sections": [
-                {"heading": "Состав", "body": "В атмосфере есть азот и кислород.",
+                {"heading": "Состав", "body": "В атмосфере есть азот и кислород. Воздух также "
+                 "содержит углекислый газ и водяной пар, которые влияют на климат.",
                  "citation": "§12", "check_question": "Назови два главных газа."},
-                {"heading": "Роль", "body": "Атмосфера защищает от радиации.",
+                {"heading": "Роль", "body": "Атмосфера защищает от радиации и метеоритов. "
+                 "Без неё жизнь на Земле была бы невозможна.",
                  "citation": "", "check_question": ""},
             ],
             "summary": "Атмосфера — защитный слой Земли.",
@@ -256,7 +258,9 @@ class TestEvaluateAnswer:
             "hook": "Как поэты изменили литературу?",
             "definition": "Серебряный век — расцвет поэзии.",
             "key_terms": [{"term": "Акмеизм", "definition": "направление"}],
-            "sections": [{"heading": "Новые направления", "body": "Поэты искали новые пути."}],
+            "sections": [{"heading": "Новые направления", "body": "Поэты серебряного века "
+                          "искали новые пути: символизм, акмеизм и футуризм по-разному "
+                          "отвечали на вопрос о роли искусства."}],
             "summary": "Итог.",
         }
         fake = lambda m: json.dumps({
@@ -296,7 +300,8 @@ class TestEvaluateAnswer:
             "hook": "Вопрос?",
             "definition": "\ufeff" + "'" + nested + "'",  # BOM + кавычки-обёртка
             "key_terms": [],
-            "sections": [{"heading": "Раздел", "body": "Текст раздела."}],
+            "sections": [{"heading": "Раздел", "body": "Раздел содержит развёрнутое объяснение "
+                          "темы с примерами и анализом ключевых понятий."}],
         })
         lesson = generate_lesson("Тема", ["контекст"], state, llm_call=fake)
         assert lesson.definition == ""
@@ -473,18 +478,18 @@ class TestLessonQualityGate:
         fake = lambda m: json.dumps({
             "definition": "Атмосфера — оболочка.",
             "diagram": {"kind": "spider", "nodes": [{"id": "n", "label": "x"}]},
-            "sections": [{"body": "текст"}],
+            "sections": [{"body": "Атмосфера — воздушная оболочка Земли, содержащая азот и кислород."}],
         })
         lesson = generate_lesson("Атмосфера", ["контекст"], state, llm_call=fake)
         assert lesson.diagram.kind == "flow"
         fake2 = lambda m: json.dumps({
             "definition": "Атмосфера — оболочка.",
             "diagram": {"kind": "flow", "nodes": []},  # пусто → диаграммы нет
-            "sections": [{"body": "текст"}],
+            "sections": [{"body": "Атмосфера — воздушная оболочка Земли, содержащая азот и кислород."}],
         })
         lesson2 = generate_lesson("Атмосфера", ["контекст"], state, llm_call=fake2)
         assert lesson2.diagram is None
-        assert lesson2.sections[0].body == "текст"
+        assert lesson2.sections[0].body == "Атмосфера — воздушная оболочка Земли, содержащая азот и кислород."
 
     def test_generate_lesson_repair_plain_text(self):
         """LLM вернул сплошной текст (не JSON) — repair собирает урок из секций."""

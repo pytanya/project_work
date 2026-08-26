@@ -133,9 +133,25 @@ class TestSearchWeb:
 
         res = search_web("география атмосфера", engines={"ddgs": eng}, settings=s)
         urls = [r.url for r in res]
-        # образовательные домены идут первыми, промо-портал — в конце
+        # образовательные домены идут первыми, обычный сайт — после них
         assert urls.index("https://ru.wikibooks.org/wiki/География") < urls.index("https://some-site.ru/article")
         assert urls.index("https://www.yaklass.by/p/geografia/lesson") < urls.index("https://some-site.ru/article")
+        # жёсткий режим (2.3): при ≥2 предпочитаемых доменах промо-портал исключён целиком
+        assert "https://multiurok.ru/blog/lesson" not in urls
+
+    def test_avoided_domains_kept_when_few_preferred(self, make_settings):
+        s = make_settings()
+
+        def eng(q, settings):
+            return [
+                SearchResult(title="Промо-портал", url="https://multiurok.ru/blog/lesson"),
+                SearchResult(title="Викиучебник", url="https://ru.wikibooks.org/wiki/География"),
+                SearchResult(title="Обычный сайт", url="https://some-site.ru/article"),
+            ]
+
+        res = search_web("география атмосфера", engines={"ddgs": eng}, settings=s)
+        urls = [r.url for r in res]
+        # только 1 предпочитаемый домен — жёсткий режим не срабатывает, промо-портал в конце
         assert urls[-1] == "https://multiurok.ru/blog/lesson"
 
     def test_domain_allowed_suffix(self):

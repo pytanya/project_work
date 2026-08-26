@@ -345,15 +345,18 @@ GRAPH_SCHEMA_VERSION = 5  # bump при изменении структуры г
 # v5: LLM-онтология (вершины/рёбра решает модель), v4: parent_id field
 
 
-def graph_cache_key(source_name: str, path: Optional[Any] = None) -> str:
-    """Ключ кэша: схема графа + исходное имя учебника + размер файла.
+def graph_cache_key(source_name: str, path: Optional[Any] = None, student_id: Optional[str] = None) -> str:
+    """Ключ кэша: схема графа + исходное имя учебника + размер файла (+ ученик).
 
     Схема входит в ключ — при изменении структуры графа старый кэш не
     подставляется (заголовки/узлы могли поменяться). НЕ используем mtime:
     при повторной загрузке temp-файл создаётся заново с другим mtime → ключ
-    бы «прыгал». Размер отделяет разные учебники с одним именем.
+    бы «прыгал». Размер отделяет разные учебники с одним именем. student_id
+    изолирует графы знаний разных учеников (материалы персональны).
     """
     fingerprint = f"v{GRAPH_SCHEMA_VERSION}"
+    if student_id:
+        fingerprint += f":{student_id}"
     if path is not None:
         try:
             fingerprint += f":{source_name}:{Path(path).stat().st_size}"
@@ -392,14 +395,15 @@ def build_or_load_textbook_graph(
     graph_dir: Optional[Any] = None,
     llm_link: Optional[Callable[[List[str]], List[Dict[str, str]]]] = None,
     llm_ontology: Optional[Callable[[List[Dict[str, str]]], str]] = None,
+    student_id: Optional[str] = None,
 ) -> KnowledgeGraph:
-    """Build-once: граф из кэша (по fingerprint файла) или пересборка + сохранение.
+    """Build-once: граф из кэша (по fingerprint файла + ученик) или пересборка + сохранение.
 
     llm_ontology — модель строит онтологию (вершины+рёбра) из контента; если модель
     недоступна/вернула мусор — эвристический каркас (structure/TOC).
     """
     if path is not None:
-        key = graph_cache_key(source, path)
+        key = graph_cache_key(source, path, student_id=student_id)
         cached = load_cached_graph(key, graph_dir)
         if cached is not None:
             return cached
@@ -424,8 +428,12 @@ def _ontology_prompt(text: str, source: str, max_vertices: int) -> List[Dict[str
         "Правила: "
         "1) Только понятия, реально присутствующие в тексте; не выдумывай и не обобщай вне текста. "
         f"2) Не больше {max_vertices} вершин; название 1-4 слова. "
-        "3) relation только: part_of (входит в), prerequisite (опирается на), related (связан). "
-        "4) Для каждой вершины укажи section — §N/номер параграфа из текста, откуда понятие "
+        "3) ПРЕДПОЧИТАЙ ПОНЯТИЙНЫЕ узлы (термины и концепции: «символизм», «акмеизм», "
+        "«верлибр», «образ-символ») — их и показывает граф. НЕ включай структурные узлы: "
+        "номера уроков/классов («7 класс», «Урок 5»), рубрики учебника, оглавление. "
+        "4) relation только: part_of (является частью / входит в), prerequisite (влияет на / "
+        "опирается на), related (связан / противопоставляется). "
+        "5) Для каждой вершины укажи section — §N/номер параграфа из текста, откуда понятие "
         "(если есть, иначе пустая строка). "
         'Верни строго JSON: {"nodes":[{"id":"c1","title":"...","type":"topic|concept","section":""}], '
         '"edges":[{"source":"c1","target":"c2","relation":"part_of"}]}'

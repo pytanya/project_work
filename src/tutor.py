@@ -26,7 +26,8 @@ from .states import TutorState
 
 logger = logging.getLogger("edututor.tutor")
 
-MAX_EXPLANATION_CHARS = 2500
+MAX_EXPLANATION_CHARS = 6000
+MAX_LESSON_CONTEXT_CHARS = 8000
 
 # Ключевые термины берём из контекста вопроса для пре-оценки (В-2)
 # PRE_CHECK_MIN_LENGTH — определён ниже, рядом с simplicity_precheck()
@@ -152,6 +153,32 @@ def _score01(value: Any) -> float:
     if v > 1.0:
         return max(0.0, min(1.0, v / 10.0))
     return max(0.0, min(1.0, v))
+
+
+def _prepare_lesson_context(context: List[str]) -> List[str]:
+    """Очистка RAG-контекста от мусора ПЕРЕД передачей в LLM.
+
+    Применяет _clean_text_lines() к каждому чанку, дополнительно фильтрует
+    метаданные публикаций построчно и удаляет обрывки навигации (строки
+    короче 20 символов без пунктуации). Блоки короче 40 символов отбрасываются.
+    """
+    from .knowledge import _clean_text_lines, _is_publication_metadata, _is_web_noise
+
+    cleaned: List[str] = []
+    for block in context or []:
+        lines = _clean_text_lines(block).splitlines()
+        lines = [
+            ln.strip()
+            for ln in lines
+            if ln.strip()
+            and not _is_publication_metadata(ln)
+            and not _is_web_noise(ln)
+            and (len(ln.strip()) >= 20 or ln.rstrip("…\"»")[-1:] in (".", "!", "?"))
+        ]
+        text = "\n".join(lines).strip()
+        if text and len(text) >= 40:
+            cleaned.append(text)
+    return cleaned
 
 
 def generate_text(
@@ -282,7 +309,10 @@ def _question_prompt(
             "ВАЖНО: варианты-дистракторы делай правдоподобными — они должны быть похожи "
             "на правильный по теме/форме, но неверны по смыслу (никакой очевидной абсурдности, "
             "одинаковой длины и стиля с правильным). "
-            "Поле excerpt ОБЯЗАТЕЛЬНО — это цитата из контекста (до 3 строк), на которую ссылается вопрос."
+            "Поле excerpt ОБЯЗАТЕЛЬНО — это цитата из контекста (до 3 строк), на которую ссылается вопрос. "
+            "Если это фрагмент стихотворения/произведения — НАЧНИ excerpt с указания автора и названия "
+            "произведения (если они видны в контексте), затем сама цитата. "
+            'Пример: «А.А. Блок, "Незнакомка": "И каждый вечер, в час назначенный..."»'
         )
     )
     if asked:
@@ -490,6 +520,14 @@ def _lesson_prompt(topic: str, context: List[str], grade: Optional[str], curricu
             "- Если в контексте нет ни одного связного предложения — верни JSON с пустыми "
             "полями (\"definition\": \"\", \"sections\": []), не пересказывай фрагменты.\n"
             "- НЕ копируй контекст дословно: секции — это твой пересказ, а не цитата фрагмента.\n"
+            "- Заголовки секций (\"heading\") НЕ должны быть «Часть N»/«Раздел N»: пиши "
+            "содержательный заголовок по теме секции (например «Символизм: основные черты», "
+            "«А.А. Блок: поэт и эпоха»).\n"
+            "- Каждая секция: минимум 3 предложения СВОИМИ СЛОВАМИ. Если цитируешь "
+            "стихотворение — СНАЧАЛА контекст (кто автор, о чём), ЗАТЕМ цитата в «кавычках», "
+            "ЗАТЕМ анализ (1-2 предложения: какой приём, что значит).\n"
+            "- ЗАПРЕЩЕНО: секции из одного предложения, секции без heading, копирование "
+            "метаданных авторов публикаций («материал опубликован пользователем …»).\n"
         )
         + _diagram_grade_hint(grade)
         + (
@@ -504,7 +542,7 @@ def _lesson_prompt(topic: str, context: List[str], grade: Optional[str], curricu
             "2-5 узлов, не больше 6 связей. Диаграмма отражает ТОЛЬКО то, что в секциях."
         )
     )
-    ctx = "\n---\n".join(context)[:MAX_EXPLANATION_CHARS]
+    ctx = "\n---\n".join(_prepare_lesson_context(context))[:MAX_LESSON_CONTEXT_CHARS]
     user = f"Тема: {topic}\nКонтекст учебника:\n{ctx}"
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
@@ -587,7 +625,11 @@ def _lesson_from_data(data: Dict[str, Any], topic: str) -> Lesson:
 
     Мусорные/пустые поля отбрасываются — урок никогда не содержит пустых карточек
     и не выводит сырой JSON (вложенный объект в поле → очищается, _clean_plain_field).
+    Пост-валидация: секции без heading получают «Раздел N», секции с метаданными
+    публикаций или телом короче 50 символов удаляются.
     """
+    from .knowledge import _is_publication_metadata
+
     sections: List[LessonSection] = []
     raw_sections = data.get("sections") if isinstance(data.get("sections"), list) else []
     for s in raw_sections[:4]:
@@ -596,6 +638,8 @@ def _lesson_from_data(data: Dict[str, Any], topic: str) -> Lesson:
         body = _clean_plain_field(s.get("body"))
         if not body:
             continue
+        if _is_publication_metadata(body) or len(body) < 50:
+            continue
         sections.append(LessonSection(
             heading=_clean_plain_field(s.get("heading")),
             body=body,
@@ -603,6 +647,11 @@ def _lesson_from_data(data: Dict[str, Any], topic: str) -> Lesson:
             source=_clean_plain_field(s.get("source")),
             check_question=_clean_plain_field(s.get("check_question")),
         ))
+    # Секции без heading → авто-заголовок «Раздел N» (см. 1.3: модель обязана дать
+    # содержательный heading, но деградируем мягко, а не теряем контент).
+    for i, s in enumerate(sections):
+        if not s.heading:
+            s.heading = f"Раздел {i + 1}"
     key_terms = []
     raw_terms = data.get("key_terms") if isinstance(data.get("key_terms"), list) else []
     for t in raw_terms[:5]:
@@ -615,7 +664,12 @@ def _lesson_from_data(data: Dict[str, Any], topic: str) -> Lesson:
     hook = _clean_plain_field(data.get("hook"))
     definition = _clean_plain_field(data.get("definition"))
     summary = _clean_plain_field(data.get("summary"))
-    
+
+    # definition с метаданными публикации → очищаем (пересинтез произойдёт в
+    # generate_lesson через гейт качества, если это единственный контент).
+    if definition and _is_publication_metadata(definition):
+        definition = ""
+
     # Fallback: если LLM вернул hook/definition но не создал секции —
     # используем определение как первую секцию, чтобы контент не терялся
     if not sections and definition:
@@ -772,24 +826,30 @@ def _synthesize_lesson_from_context(topic: str, context: List[str]) -> Lesson:
     """Детерминированная сборка урока из связных предложений контекста.
 
     Фолбэк, когда LLM не смогла структурировать урок. Берём длинные предложения
-    (≥55 символов, с пунктуацией, не шум): первое — определение, остальные
-    группируем в секции ~140 символов. Пользователь получает реальный контент,
-    а не «нет материала» или заголовки.
+    (≥80 символов, с пунктуацией, не шум): первое — определение, остальные
+    группируем в секции по смыслу (общие слова), а не механически по длине.
+    Пользователь получает реальный контент, а не «нет материала» или заголовки.
     """
     from .knowledge import _is_web_noise
 
     def _is_sentence(c: str) -> bool:
         return c.endswith((".", "!", "?")) and c.rstrip("…\"»")[-1:] in (".", "!", "?")
 
+    def _tokens(c: str) -> set:
+        return set(re.findall(r"[а-яёa-z]{4,}", c.lower()))
+
+    def _overlap(a: set, b: set) -> int:
+        return len(a & b)
+
     sentences: List[str] = []
     for block in context or []:
         for line in (block or "").splitlines():
             line = " ".join(line.split()).strip()
-            if not line or _is_web_noise(line) or len(line) < 55 or _is_title_fragment(line):
+            if not line or _is_web_noise(line) or len(line) < 80 or _is_title_fragment(line):
                 continue
             for part in re.split(r"(?<=[.!?])\s+", line):
                 c = " ".join(part.split()).strip()
-                if (len(c) >= 55 and not _is_web_noise(c) and _is_sentence(c)
+                if (len(c) >= 80 and not _is_web_noise(c) and _is_sentence(c)
                         and not _is_title_fragment(c)):
                     sentences.append(c)
     seen: set = set()
@@ -818,15 +878,27 @@ def _synthesize_lesson_from_context(topic: str, context: List[str]) -> Lesson:
             best = score
             definition = s
     rest = [s for s in unique if s != definition]
+    # Группировка по смыслу: жадный поиск соседа с максимальным пересечением слов.
     sections: List[LessonSection] = []
-    buf = ""
-    for s in rest:
-        if buf and len(buf) + len(s) > 140:
-            sections.append(LessonSection(body=buf))
-            buf = ""
-        buf = (buf + " " + s).strip()
-    if buf:
-        sections.append(LessonSection(body=buf))
+    used: set = set()
+    rest_tokens = [(s, _tokens(s)) for s in rest]
+    for i, (s, toks) in enumerate(rest_tokens):
+        if i in used:
+            continue
+        used.add(i)
+        group = [s]
+        group_toks = set(toks)
+        for j in range(i + 1, len(rest_tokens)):
+            if j in used:
+                continue
+            otoks = rest_tokens[j][1]
+            if _overlap(group_toks, otoks) >= 2 or _overlap(toks, otoks) >= 2:
+                used.add(j)
+                group.append(rest_tokens[j][0])
+                group_toks |= otoks
+                if len(group) >= 3:
+                    break
+        sections.append(LessonSection(body=" ".join(group)))
     sections = sections[:3]
     summary = unique[-1] if len(unique) >= 5 else ""
     return Lesson(title=topic, definition=definition, sections=sections, summary=summary)

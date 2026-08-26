@@ -33,4 +33,21 @@ describe('QuizCard', () => {
     )
     expect(container.querySelector('.options')).not.toBeInTheDocument()
   })
+
+  it('показывает прогресс квиза и счётчик правильных (6.2)', () => {
+    const { container } = render(
+      <QuizCard
+        q={question}
+        onSelect={() => {}}
+        questionNum={3}
+        totalQuestions={10}
+        correctCount={2}
+      />,
+    )
+    expect(screen.getByText('вопрос 3/10')).toBeInTheDocument()
+    expect(screen.getByText('Правильных: 2')).toBeInTheDocument()
+    const fill = container.querySelector('.quiz-progress__fill')
+    expect(fill).toBeInTheDocument()
+    expect(fill.style.width).toBe('30%')
+  })
 })

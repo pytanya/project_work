@@ -79,6 +79,8 @@ export default function App() {
   const [progressPhase, setProgressPhase] = useState(null)
   // Счётчик вопросов квиза из записей
   const [questionNum, setQuestionNum] = useState(0)
+  // Баннер кэшированного урока (7.3): «Этот урок из прошлого занятия»
+  const [cachedLessonBanner, setCachedLessonBanner] = useState(false)
   const wsRef = useRef(null)
   const sessionIdRef = useRef(null)
   const inputRef = useRef(null)
@@ -276,6 +278,14 @@ export default function App() {
           break
         case 'quiz.card':
           finalizeStream('quiz', d.question)
+          setCachedLessonBanner(false)
+          // Счётчик вопросов (6.2): авторитетный номер из бэкенда (answered+1)
+          if (typeof d.question_num === 'number' && d.question_num > 0) {
+            setQuestionNum(d.question_num)
+          } else {
+            setQuestionNum((n) => n + 1)
+          }
+          setQuizCount((c) => c || (d.num_questions || 10))
           setCurrent({
             kind: 'quiz',
             question: d.question,
@@ -290,6 +300,10 @@ export default function App() {
         case 'tutor.explanation':
           finalizeStream('explanation', d.message, d)
           setCurrent(null)
+          // Живой счётчик правильных (6.2): обновляем после каждого ответа
+          if (typeof d.correct_count === 'number') {
+            setScore({ correct: d.correct_count, total: d.answered_count || 0 })
+          }
           break
         case 'tutor.lesson':
           finalizeStream('lesson', d.text, { topic: d.topic, lesson: d.lesson })
@@ -363,6 +377,14 @@ export default function App() {
             setCurrent(null)
           }
           push('system', d.message)
+          // Живой счётчик правильных (6.2): обновляем после каждого ответа
+          if (typeof d.correct_count === 'number') {
+            setScore({ correct: d.correct_count, total: d.answered_count || 0 })
+          }
+          // Кэшированный урок из прошлого занятия (7.3): показываем баннер над уроком.
+          if (d.kind === 'lesson.cached') {
+            setCachedLessonBanner(true)
+          }
           // Белый список активен, а материала в разрешённых источниках нет —
           // предлагаем включить любые источники.
           if (d.kind === 'content.empty' && sourcePolicyRef.current && !sourcePolicyRef.current.allow_any_sources) {
@@ -496,7 +518,7 @@ export default function App() {
         })
         // Обновляем счётчик вопросов из records
         if (d.records && d.records.length > 0) {
-          setQuestionNum(d.records.filter(r => r.student_answer).length)
+          setQuestionNum(d.records.filter(r => r.student_answer).length + 1)
           setQuizCount(d.num_questions || 10)
         }
       } else if (d.agent_card && !hasFrontendActiveQuestion) {
@@ -866,6 +888,7 @@ export default function App() {
               totalQuestions={quizCount}
               selectedOption={confirmedOption}
               quickAnswer={quickAnswer}
+              correctCount={score.correct}
             />
           ) : current.kind === 'intake_card' ? (
             <IntakeCard
@@ -896,6 +919,18 @@ export default function App() {
             Вы выбрали: <strong>{confirmedOption}</strong>
             <button className="btn-confirm" onClick={handleConfirmOption}>Подтвердить</button>
             <button className="btn-cancel" onClick={handleCancelOption}>Отмена</button>
+          </div>
+        )}
+        {cachedLessonBanner && (
+          <div className="cached-lesson-banner">
+            <span className="cached-lesson-banner__icon">📋</span>
+            <span className="cached-lesson-banner__text">Этот урок из прошлого занятия.</span>
+            <button className="btn small" onClick={() => { setCachedLessonBanner(false); sendMessage('Дополнить материал') }}>
+              Дополнить материал
+            </button>
+            <button className="btn small ghost" onClick={() => { setCachedLessonBanner(false); sendMessage('Начать с нуля') }}>
+              Начать с нуля
+            </button>
           </div>
         )}
         {sourceProposal && (

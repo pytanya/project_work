@@ -391,6 +391,12 @@ _PUB_METADATA_RE = re.compile(
     # «Настоящий материал опубликован» / «Материал опубликован»
     r"настоящ[аийие]\s+материал\s+опубликован"
     r"|материал\s+опубликован"
+    # «опубликован(а/ы) пользователем»
+    r"|опубликован[аоы]?\s+пользовател"
+    # «размещён(а/ы) пользователем»
+    r"|размещен[аоы]?\s+пользовател"
+    # «опубликован(а/ы) на сайте»
+    r"|опубликован[аоы]?\s+на\s+сайте"
     # «Автор» + :;. + пробел + имя (с заглавной буквы, дальше любые символы до конца строки или до следующего слова)
     r"|Автор[ау]?\.?\s*[:;\s,.]+\s*[А-ЯA-Z][а-яёA-Z]+"
     # «Учитель...» + [ФИО с двумя словами на заглавные]
@@ -486,6 +492,24 @@ def _clean_text_lines(text: str) -> str:
     return "\n".join(kept).strip()
 
 
+def _clean_paragraph_lines(paragraph: str) -> str:
+    """Построчная очистка параграфа: убирает навигацию и метаданные публикаций.
+
+    Скрапленные страницы содержат мусорные строки ВНУТРИ абзаца (concatenated):
+    «Настоящий материал опубликован пользователем …», «Написать комментарий».
+    Каждая строка проверяется фильтрами, пустые/короткие (менее 30 символов)
+    параграфы после очистки отбрасываются вызывающим кодом.
+    """
+    lines = [
+        ln.strip()
+        for ln in (paragraph or "").splitlines()
+        if ln.strip()
+        and not _is_web_noise(ln)
+        and not _is_publication_metadata(ln)
+    ]
+    return "\n".join(lines).strip()
+
+
 def _make_chunks(text: str, source: str, subject: Optional[str], grade: Optional[str],
                  student_id: Optional[str] = None) -> List[DocChunk]:
     """Нарезка текста на чанки с обогащением «Параграф N: название» (13.2).
@@ -502,7 +526,8 @@ def _make_chunks(text: str, source: str, subject: Optional[str], grade: Optional
     if not sections:
         # нет структуры — режем по абзацам
         paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
-        paragraphs = [p for p in paragraphs if not _is_web_noise(p)]
+        paragraphs = [_clean_paragraph_lines(p) for p in paragraphs]
+        paragraphs = [p for p in paragraphs if p and len(p) >= 30]
         buffer = ""
         for p in paragraphs:
             if buffer and len(buffer) + len(p) > MAX_CHUNK_CHARS:
@@ -524,7 +549,8 @@ def _make_chunks(text: str, source: str, subject: Optional[str], grade: Optional
             idx += 1
             continue
         paragraphs = [p.strip() for p in re.split(r"\n\s*\n", content) if p.strip()]
-        paragraphs = [p for p in paragraphs if not _is_web_noise(p)]
+        paragraphs = [_clean_paragraph_lines(p) for p in paragraphs]
+        paragraphs = [p for p in paragraphs if p and len(p) >= 30]
         if not paragraphs:
             continue
         buffer = ""

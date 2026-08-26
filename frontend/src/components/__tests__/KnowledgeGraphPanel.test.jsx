@@ -5,8 +5,8 @@ import KnowledgeGraphPanel from '../KnowledgeGraphPanel'
 
 const nodes = [
   { id: 'book:x', title: 'Учебник «x»', type: 'book', color: '#F4A261' },
-  { id: 'sec:x:1', title: 'Урок 1: Россия — наша Родина', type: 'section', color: '#64DFDF' },
-  { id: 'sec:x:2', title: 'Урок 2: Культура и религия', type: 'section', color: '#B388FF' },
+  { id: 'sec:x:1', title: 'Урок 1: Россия — наша Родина', type: 'topic', color: '#64DFDF' },
+  { id: 'sec:x:2', title: 'Урок 2: Культура и религия', type: 'topic', color: '#B388FF' },
 ]
 
 function makeMockCtx() {
@@ -83,10 +83,28 @@ describe('KnowledgeGraphPanel', () => {
     expect(screen.getByText(/Граф знаний · 2/)).toBeInTheDocument()
   })
 
+  it('скрывает структурные узлы (разделы/уроки) по умолчанию и показывает по тумблеру', async () => {
+    const withStructural = [
+      ...nodes,
+      { id: 'sec:y:1', title: 'Параграф 5: Символизм', type: 'section', color: '#B388FF' },
+      { id: 'sec:y:2', title: 'Урок 4: Акмеизм', type: 'lesson', color: '#64DFDF' },
+    ]
+    const user = userEvent.setup()
+    const { rerender } = render(<KnowledgeGraphPanel nodes={withStructural} onSelect={() => {}} />)
+    // по умолчанию структурные узлы скрыты
+    expect(screen.queryByRole('button', { name: 'Параграф 5: Символизм' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Урок 4: Акмеизм' })).not.toBeInTheDocument()
+    // тумблер 🧩 показывает их
+    await user.click(screen.getByRole('button', { name: '🧩' }))
+    rerender(<KnowledgeGraphPanel nodes={withStructural} onSelect={() => {}} />)
+    expect(screen.getByRole('button', { name: 'Параграф 5: Символизм' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Урок 4: Акмеизм' })).toBeInTheDocument()
+  })
+
   it('отображает mastery-метку в подсказке узла (roadmap #3)', () => {
     const withMastery = [
       ...nodes,
-      { id: 'sec:x:3', title: 'Урок 3: Традиции', type: 'section', color: '#69F0AE', mastery: 0.85, attempts: 5 },
+      { id: 'sec:x:3', title: 'Урок 3: Традиции', type: 'topic', color: '#69F0AE', mastery: 0.85, attempts: 5 },
     ]
     render(<KnowledgeGraphPanel nodes={withMastery} onSelect={() => {}} />)
     const chip = screen.getByRole('button', { name: /Урок 3: Традиции/ })

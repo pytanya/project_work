@@ -125,6 +125,8 @@ def get_graph(session_id: str, store: SessionStore = Depends(get_store)):
             if art is not None:
                 n["mastery"] = art.mastery
                 n["attempts"] = art.attempts
+                n["correct"] = art.correct
+                n["accuracy"] = art.accuracy
     except Exception:
         pass  # wiki недоступен — граф без mastery
 

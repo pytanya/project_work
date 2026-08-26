@@ -123,10 +123,30 @@ class TestChunking:
     def test_plain_text_chunks(self):
         from src.knowledge import _make_chunks
 
-        text = "Абзац первый.\n\nАбзац второй.\n\nАбзац третий."
+        text = (
+            "Атмосфера — воздушная оболочка Земли, удерживаемая гравитацией.\n\n"
+            "Кислород составляет 21% воздуха, а азот — почти 78%.\n\n"
+            "Тропосфера — нижний слой атмосферы, где формируется погода."
+        )
         chunks = _make_chunks(text, source="s", subject=None, grade=None)
         assert len(chunks) == 1  # короткий текст — один чанк
-        assert "Абзац первый" in chunks[0].text
+        assert "Атмосфера — воздушная оболочка" in chunks[0].text
+
+    def test_short_paragraphs_dropped(self):
+        from src.knowledge import _make_chunks
+
+        # Параграфы короче 30 символов (обрывки навигации) не попадают в чанки
+        text = (
+            "Войти\n\n"
+            "Далее\n\n"
+            "Атмосфера — воздушная оболочка Земли, удерживаемая гравитацией.\n\n"
+            "Кислород составляет 21% воздуха, а азот — почти 78%."
+        )
+        chunks = _make_chunks(text, source="s", subject=None, grade=None)
+        merged = "\n".join(c.text for c in chunks)
+        assert "Войти" not in merged
+        assert "Атмосфера — воздушная оболочка" in merged
+        assert "Кислород составляет 21%" in merged
 
     def test_web_noise_filtered_from_chunks(self):
         from src.knowledge import _make_chunks
@@ -442,7 +462,10 @@ class TestProcessDocument:
     def test_txt_pipeline(self, tmp_path: Path):
         src = tmp_path / "doc.txt"
         src.write_text(
-            "Параграф 12: Атмосфера\nСтроение атмосферы.\n\nПараграф 13: Погода\nПогода меняется.",
+            "Параграф 12: Атмосфера\nСтроение атмосферы. Атмосфера состоит из нескольких "
+            "слоёв, каждый из которых выполняет свою роль в защите планеты.\n\n"
+            "Параграф 13: Погода\nПогода меняется каждый день. Её определяют температура, "
+            "влажность и движение воздушных масс.",
             encoding="utf-8",
         )
         store = NumpyVectorStore("docs", FakeEmbedder())

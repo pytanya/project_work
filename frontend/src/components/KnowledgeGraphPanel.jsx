@@ -25,8 +25,8 @@ const LABEL_COLOR = '#c9d1d9'
 
 function masteryColor(mastery) {
   if (mastery === undefined || mastery === null) return null
-  if (mastery >= 0.75) return '#4ade80'
-  if (mastery >= 0.45) return '#fbbf24'
+  if (mastery >= 0.61) return '#4ade80'
+  if (mastery >= 0.31) return '#fbbf24'
   return '#f87171'
 }
 
@@ -228,6 +228,16 @@ function drawGraph(ctx, sim, W, H, view, hovId, activeId, degree, nbrs, dpr, sta
       ctx.restore()
     }
 
+    // пульсирующее кольцо активной темы (5.1): ритмично расширяется/сжимается
+    if (isAct && !isDimmed) {
+      const pulse = 1 + 0.25 * Math.sin(now * 0.004 + n._phase * 6.28)
+      const pr = (r + 4) * pulse
+      ctx.beginPath(); ctx.arc(n.x, n.y, pr, 0, Math.PI * 2)
+      ctx.strokeStyle = baseColor + 'aa'
+      ctx.lineWidth = 1.2
+      ctx.stroke()
+    }
+
     // core node
     ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2)
     ctx.fillStyle = baseColor
@@ -303,6 +313,8 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
   const [wiki, setWiki] = useState(null)
   const [related, setRelated] = useState(null)
   const [expanded, setExpanded] = useState(false)
+  // Структурные узлы (разделы/уроки) скрыты по умолчанию — показываем понятийные (5.3)
+  const [showStructural, setShowStructural] = useState(false)
   // Плавающее окно: позиция (null = по центру) + перетаскивание за заголовок
   const [floatPos, setFloatPos] = useState(null)
   const [dragging, setDragging] = useState(false)
@@ -317,7 +329,11 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
     return () => window.removeEventListener('resize', onR)
   }, [])
 
-  const topics = useMemo(() => (nodes || []).filter((n) => n.type !== 'book'), [nodes])
+  const topics = useMemo(() => {
+    const all = (nodes || []).filter((n) => n.type !== 'book')
+    if (showStructural) return all
+    return all.filter((n) => n.type !== 'section' && n.type !== 'lesson')
+  }, [nodes, showStructural])
   const nodeMap = useMemo(() => Object.fromEntries((nodes || []).map((n) => [n.id, n])), [nodes])
   const filtered = useMemo(() => {
     if (!query.trim()) return topics
@@ -635,6 +651,10 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
         onPointerDown={expanded ? onFloatHeaderDown : undefined}
         title={expanded ? 'Перетащите окно за заголовок' : undefined}>
         <h3>Граф знаний · {topics.length}</h3>
+        <button className="graph-panel__toggle" onClick={() => setShowStructural((v) => !v)}
+          title={showStructural ? 'Скрыть разделы/уроки (оставить понятия)' : 'Показать разделы и уроки'}>
+          {showStructural ? '📚' : '🧩'}
+        </button>
         <button className="graph-panel__expand" onClick={() => setExpanded((v) => !v)}
           title={expanded ? 'Свернуть' : 'Открыть в окне'}>
           {expanded ? '⊟' : '⛶'}
@@ -660,7 +680,12 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
               <div className="kg-tooltip-mastery">
                 <i className="dot" style={{ background: masteryColor(tooltip.node.mastery) }} />
                 мастерство {Math.round(tooltip.node.mastery * 100)}%
-                {tooltip.node.attempts !== undefined ? ` · попыток: ${tooltip.node.attempts}` : ''}
+                {tooltip.node.attempts !== undefined && tooltip.node.attempts > 0 && (
+                  <>
+                    {' · '}Правильных: {tooltip.node.correct ?? 0}/{tooltip.node.attempts}
+                    {' · '}точность {Math.round((tooltip.node.accuracy ?? 0) * 100)}%
+                  </>
+                )}
               </div>
             )}
             {tooltip.node.source && <div className="kg-tooltip-source">{tooltip.node.source}</div>}

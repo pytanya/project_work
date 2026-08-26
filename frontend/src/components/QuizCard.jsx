@@ -52,7 +52,8 @@ function ExcerptDisplay({ excerpt, fullExcerpt }) {
   )
 }
 
-export default function QuizCard({ q, onSelect, questionNum, totalQuestions, selectedOption, quickAnswer }) {
+export default function QuizCard({ q, onSelect, questionNum, totalQuestions, selectedOption, quickAnswer, correctCount }) {
+  const progress = totalQuestions > 0 ? Math.min(100, Math.round((questionNum / totalQuestions) * 100)) : 0
   return (
     <div className="card quiz">
       {/* Отрывок — отображается перед вопросом */}
@@ -65,7 +66,15 @@ export default function QuizCard({ q, onSelect, questionNum, totalQuestions, sel
         {questionNum > 0 && totalQuestions > 0 && (
           <span className="badge counter">вопрос {questionNum}/{totalQuestions}</span>
         )}
+        {typeof correctCount === 'number' && (
+          <span className="badge score">Правильных: {correctCount}</span>
+        )}
       </div>
+      {totalQuestions > 0 && (
+        <div className="quiz-progress" title={`Вопрос ${questionNum}/${totalQuestions}`}>
+          <div className="quiz-progress__fill" style={{ width: `${progress}%` }} />
+        </div>
+      )}
       <div className="question-text"><LatexText text={q.question} /></div>
       {q.options && (
         <div className="options">

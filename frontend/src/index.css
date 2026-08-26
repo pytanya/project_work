@@ -846,6 +846,28 @@ body.resizing * { cursor: col-resize !important; }
 }
 .badge.topic { background: var(--green-soft); border-color: var(--green); color: var(--green-strong); }
 .badge.type { background: var(--amber-soft); border-color: var(--amber); color: #8a5a17; }
+.badge.counter { background: var(--blue-soft, #e8f1ff); border-color: var(--blue, #3b82f6); color: var(--blue-strong, #1e40af); }
+.badge.score { background: var(--green-soft); border-color: var(--green); color: var(--green-strong); }
+
+/* --- Прогресс квиза (6.2) --- */
+.quiz-progress {
+  height: 6px; background: var(--line); border-radius: 8px;
+  overflow: hidden; margin-bottom: 12px;
+}
+.quiz-progress__fill {
+  height: 100%; background: linear-gradient(90deg, var(--green), var(--blue, #3b82f6));
+  border-radius: 8px; transition: width 0.35s ease;
+}
+
+/* --- Баннер кэшированного урока (7.3) --- */
+.cached-lesson-banner {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  background: var(--amber-soft, #fff7e0); border: 1px solid var(--amber, #f59e0b);
+  color: #7a5410; border-radius: 12px; padding: 10px 14px; margin: 10px 0;
+  font-size: 13px;
+}
+.cached-lesson-banner__icon { font-size: 16px; }
+.cached-lesson-banner__text { flex: 1; min-width: 180px; }
 .question-text { font-size: 17px; font-weight: 600; line-height: 1.45; margin-bottom: 12px; font-family: var(--font-display); }
 
 /* --- Карточка отрывка текста --- */

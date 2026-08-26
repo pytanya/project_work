@@ -69,7 +69,56 @@ def _topic_count(nodes):
     """Count only non-book topics (matches frontend KnowledgeGraphPanel filtering)."""
     return sum(1 for n in (nodes or []) if n.get("type") != "book")
 
-# Тема «весь учебник»/не задана → нужен выбор темы из графа (topic gate).
+
+# ----------------------------------------------------------------------
+# Кэш сгенерированных уроков (план доработки, блоки 3 и 7)
+# ----------------------------------------------------------------------
+def _load_cached_lesson(st: TutorState, deps: GraphDeps, topic: str):
+    """Кэшированный урок из прошлого занятия по (student_id, subject, topic, grade).
+
+    Возвращает Lesson или None. Кэш активен только в режиме «урок» и пока урок
+    текущей сессии ещё не показан.
+    """
+    if st.mode != "lesson" or st.lesson_done or not topic:
+        return None
+    from .lesson_cache import load_lesson
+
+    try:
+        return load_lesson(
+            deps.settings.SOURCES_CACHE_DIR,
+            st.student_id or "", st.subject or "", topic, st.grade or "",
+        )
+    except Exception as exc:
+        logger.warning("load_lesson: %s", exc)
+        return None
+
+
+def _save_lesson_to_cache(st: TutorState, deps: GraphDeps, lesson, topic: str) -> None:
+    """Сохраняет сгенерированный урок в кэш для повторного прохождения."""
+    if not topic or lesson is None:
+        return
+    from .lesson_cache import save_lesson
+
+    try:
+        save_lesson(
+            deps.settings.SOURCES_CACHE_DIR,
+            st.student_id or "", st.subject or "", topic, st.grade or "", lesson,
+        )
+    except Exception as exc:
+        logger.warning("save_lesson: %s", exc)
+
+
+def _apply_cached_lesson(st: TutorState, deps: GraphDeps, cached, topic: str) -> Dict[str, Any]:
+    """Показывает кэшированный урок: запись в состояние + события + вопрос «перейти к квизу?»."""
+    st.set_lesson(cached)
+    st.lesson_done = True
+    _emit(deps, "tutor.lesson", **st.lesson_payload(topic))
+    _emit(deps, "system",
+          message="Показываю урок из прошлого занятия. Хочешь дополнить материал?",
+          kind="lesson.cached")
+    st.agent_question = "Готов(а) перейти к квизу? (да / нет)"
+    _emit(deps, "intake.question", question=st.agent_question, missing_fields=["lesson_confirm"])
+    return st.model_dump()# Тема «весь учебник»/не задана → нужен выбор темы из графа (topic gate).
 # Конкретная тема (напр. «Дроби») → гейт пропускается (Уровень 1).
 _ALL_TOPIC_MARKERS = {"all", "все", "всё", "вся", "весь", "весь учебник", "все темы"}
 
@@ -537,6 +586,17 @@ def agent_tutor_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
                     title = n.get("title", "")
                     if title:
                         topic = title
+        # Кэш урока (3.1/7.2): повторное прохождение темы — урок из прошлого раза.
+        cached_lesson = _load_cached_lesson(st, deps, topic)
+        if cached_lesson is not None:
+            logger.info("agent_tutor_node: кэшированный урок по теме «%s» — без генерации", topic)
+            st.set_lesson(cached_lesson)
+            st.lesson_done = True
+            _emit(deps, "tutor.lesson", **st.lesson_payload(topic))
+            _emit(deps, "system",
+                  message="Показываю урок из прошлого занятия. Хочешь дополнить материал?",
+                  kind="lesson.cached")
+            return st.model_dump()
         _emit(deps, "source.progress", stage="content", url="", status="generating",
               message=f"Ищу материалы по теме «{topic}»…")
         chunks = _rag_chunks(deps.store, topic, st, k=5)
@@ -574,6 +634,7 @@ def agent_tutor_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
             return st.model_dump()
         st.set_lesson(lesson)
         st.lesson_done = True
+        _save_lesson_to_cache(st, deps, lesson, topic)
         _emit(deps, "tutor.lesson", **st.lesson_payload(topic))
         _emit(deps, "system", message="Урок готов.", kind="lesson.ready")
     
@@ -588,7 +649,8 @@ def agent_tutor_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         card = st.current_question
         _emit(deps, "quiz.card", question_id=card.question_id, question=card.question,
               options=card.options, answer_type=card.answer_type, difficulty=card.difficulty,
-              topic=card.topic)
+              topic=card.topic, num_questions=st.num_questions,
+              question_num=st.answered_count + 1)
     if st.lesson_text and st.lesson_text != prev_lesson:
         _emit(deps, "tutor.lesson", **st.lesson_payload(st.active_topic or st.topic or "тема"))
     if final_text and not st.current_question and not st.quiz_complete:
@@ -721,7 +783,26 @@ def reuse_materials_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         st.reuse_pending = False
         st.agent_question = None
         st.agent_options = None
-        if _reuse_decision(answer_text) == "search":
+        low = answer_text.strip().lower()
+        if "с нуля" in low or "заново" in low:
+            # «Начать с нуля»: урок из кэша убираем, ищем свежие материалы
+            st.clear_lesson()
+            st.force_source_refresh = True
+            st.source_note = "Начинаем с нуля — ищу новые материалы по теме."
+        elif "дополнить" in low or "искать" in low or "найти" in low:
+            # «Дополнить материал»: старый урок остаётся, ищем новые источники
+            st.force_source_refresh = True
+            st.source_note = "Ищу дополнительные материалы по теме."
+        elif "квиз" in low or "перейти" in low or "дальше" in low:
+            # «Перейти к квизу»: кэшированный урок показан, существующие материалы готовы
+            st.lesson_confirmed = True
+            st.source_status = "ready"
+            st.collection_id = getattr(deps.store, "collection_name", None) or "existing"
+            st.sources = [{"type": "existing", "note": "ранее разобранные материалы"}]
+            st.source_note = "Отлично! Переходим к квизу по теме."
+            _finalize_source(st, web_sources=True)
+            _emit(deps, "system", message="Отлично! Переходим к квизу.", kind="lesson.done")
+        elif _reuse_decision(answer_text) == "search":
             st.source_note = "Ищу другие материалы по теме."
         else:
             # используем существующие материалы (без нового поиска)
@@ -786,6 +867,22 @@ def reuse_materials_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         if existing:
             st.reuse_pending = True
             topic = st.topic or st.subject or "этой теме"
+            # 3.2: при повторном прохождении темы в режиме «урок» — сразу показываем
+            # кэшированный урок из прошлого раза, а не спрашиваем «использовать да/нет».
+            cached_lesson = _load_cached_lesson(st, deps, topic)
+            if cached_lesson is not None:
+                st.set_lesson(cached_lesson)
+                st.lesson_done = True
+                _emit(deps, "tutor.lesson", **st.lesson_payload(topic))
+                st.agent_question = (
+                    "Вот урок из прошлого раза. Хочешь дополнить материал из новых источников?"
+                )
+                st.agent_options = ["Перейти к квизу", "Дополнить материал", "Начать с нуля"]
+                _emit(deps, "system", message="Показываю урок из прошлого занятия.",
+                      kind="lesson.cached")
+                _emit(deps, "intake.question", question=st.agent_question,
+                      missing_fields=["reuse"], options=st.agent_options)
+                return st.model_dump()
             st.agent_question = (
                 f"По теме «{topic}» у тебя уже есть разобранные материалы. "
                 "Использовать их (да) или найти другие (нет)?"
@@ -927,10 +1024,17 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
             st.agent_question = None
             _emit(deps, "system", message="Отлично! Начинаем квиз.", kind="lesson.done")
             return st.model_dump()
-        # «нет»/повтор → сбрасываем и перегенерируем материал ниже
-        st.clear_lesson()
-        st.agent_question = None
-        _emit(deps, "system", message="Повторяем материал по теме.", kind="lesson.repeat")
+        # «Дополнить материал» / «Начать с нуля» (7.3): сбрасываем урок и ищем свежие источники
+        if "дополнить" in low or "с нуля" in low or "заново" in low:
+            st.clear_lesson()
+            st.force_source_refresh = True
+            st.agent_question = None
+            _emit(deps, "system", message="Ищу свежие материалы по теме.", kind="lesson.repeat")
+        else:
+            # «нет»/повтор → сбрасываем и перегенерируем материал ниже
+            st.clear_lesson()
+            st.agent_question = None
+            _emit(deps, "system", message="Повторяем материал по теме.", kind="lesson.repeat")
 
     if st.lesson_text:
         # материал уже показан — ждём подтверждения
@@ -939,7 +1043,7 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         _emit(deps, "intake.question", question=st.agent_question, missing_fields=["lesson_confirm"])
         return st.model_dump()
 
-    # Генерируем материал по активной теме и режиму
+    # Тема (единый ключ): активный узел графа → его название, иначе subject/topic.
     topic = st.topic or st.subject or "общая тема"
     if st.active_topic:
         from .knowledge_graph import KnowledgeGraph as _KG2
@@ -947,6 +1051,15 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         title = _node_title(kg, st.active_topic)
         if title:
             topic = title
+
+    # Кэш урока (3.1/7.2): повторное прохождение темы — показываем урок из прошлого раза,
+    # не генерируя заново (пользователь сам решит, дополнять ли материал).
+    cached_lesson = _load_cached_lesson(st, deps, topic)
+    if cached_lesson is not None:
+        logger.info("content_node: кэшированный урок по теме «%s» — без генерации", topic)
+        return _apply_cached_lesson(st, deps, cached_lesson, topic)
+
+    # Генерируем материал по активной теме и режиму
     # deep_dive берёт больше контекста (несколько разделов, 7.3.4); lesson/explain — k=5
     k = 8 if mode == "deep_dive" else 5
     # Гранулярный прогресс (оптимизация): пользователь видит этап генерации, а не «тишину»
@@ -999,6 +1112,8 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
             return st.model_dump()
         st.set_lesson(lesson)
         st.agent_message = "Урок по теме готов. Можно задать вопрос или перейти к квизу."
+        # Кэш урока (3.1/7.2): сохраняем для повторного прохождения темы.
+        _save_lesson_to_cache(st, deps, lesson, topic)
     st.lesson_done = True
     # Ключевые понятия урока → wiki-статья темы (roadmap #3: drill-down в графе)
     try:
@@ -1090,6 +1205,7 @@ def process_document_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         st.knowledge_graph = build_or_load_textbook_graph(
             text, source=source_name, path=path, graph_dir=deps.settings.KNOWLEDGE_GRAPH_DIR,
             llm_ontology=_ontology_llm_call(deps),
+            student_id=getattr(st, "student_id", None) or None,
         ).to_dict()
     except Exception as e:
         return _index_failure(st, deps, e).model_dump()
@@ -1204,6 +1320,7 @@ def handle_doc_pages_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         st.knowledge_graph = build_or_load_textbook_graph(
             text, source=source_name, path=path, graph_dir=deps.settings.KNOWLEDGE_GRAPH_DIR,
             llm_ontology=_ontology_llm_call(deps),
+            student_id=getattr(st, "student_id", None) or None,
         ).to_dict()
     except Exception as e:
         return _index_failure(st, deps, e).model_dump()
@@ -1480,7 +1597,8 @@ def generate_question_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]
     })
     _emit(deps, "quiz.card", question_id=card.question_id, question=card.question,
           options=card.options, answer_type=card.answer_type, difficulty=card.difficulty,
-          topic=card.topic)
+          topic=card.topic, num_questions=st.num_questions,
+          question_num=st.answered_count + 1)
     return st.model_dump()
 
 

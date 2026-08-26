@@ -156,7 +156,9 @@ def evaluate_and_record(
     if emit is not None:
         emit("tutor.explanation" if not graded.correct else "system",
              message=message,
-             citation=(explanation.get("citation") if explanation else None) if not graded.correct else None)
+             citation=(explanation.get("citation") if explanation else None) if not graded.correct else None,
+             correct_count=st.correct_count,
+             answered_count=st.answered_count)
 
     # Knowledge Wiki: применяем результат текущего ответа к статье темы (идемпотентно)
     try:

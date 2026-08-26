@@ -681,6 +681,9 @@ def search_web(
 
     Результаты упорядочиваются по качеству источника (реферальные учебные ресурсы выше,
     промо-порталы учителей ниже) — чтобы в урок не попадали мусорные страницы.
+
+    Жёсткий режим (2.3): если в выдаче есть хотя бы 2 источника из _PREFERRED_DOMAINS
+    (ранг 0), результаты рангом 4+ (_AVOIDED_DOMAINS) полностью исключаются.
     """
     s = settings or default_settings
     engines = engines or _ENGINES
@@ -688,7 +691,11 @@ def search_web(
         try:
             results = engines[engine](query, s)
             if results:
-                return sorted(results, key=_rank_source)
+                ranked = sorted(results, key=_rank_source)
+                preferred = [r for r in ranked if _rank_source(r) == 0]
+                if len(preferred) >= 2:
+                    ranked = [r for r in ranked if _rank_source(r) < 4]
+                return ranked
         except Exception as e:
             logger.warning("search_web: %s недоступен (%s)", engine, e)
     return []
