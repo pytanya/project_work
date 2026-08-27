@@ -818,6 +818,7 @@ body.resizing * { cursor: col-resize !important; }
 @keyframes stream-blink { to { visibility: hidden; } }
 .bubble.agent.intake { border-left: 3px solid var(--red); }   /* тьютор «пишет красным» */
 .bubble.agent.quiz { border-left: 3px solid var(--amber); }   /* квиз = маркер */
+.bubble.agent.tutor-chat { border-left: 3px solid var(--green); background: linear-gradient(135deg, var(--card), var(--green-soft)); }
 .bubble.summary { background: var(--green-soft); border: 1px solid var(--ok); color: var(--ok); }
 .bubble.system, .bubble.source { background: var(--paper); border: 1px solid var(--line); color: var(--ink-soft); font-size: 13.5px; }
 .bubble.error { background: var(--red-soft); border: 1px solid var(--err); color: var(--err); }

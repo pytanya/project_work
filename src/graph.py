@@ -664,6 +664,17 @@ def agent_tutor_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         _save_lesson_to_cache(st, deps, lesson, topic)
         _emit(deps, "tutor.lesson", **st.lesson_payload(topic))
         _emit(deps, "system", message="Урок готов.", kind="lesson.ready")
+
+    # Урок только что показан — ждём ответ ученика, не запускаем агент.
+    # Иначе ReAct-цикл вернёт сырой текст или вызовет generate_quiz до
+    # того, как ученик прочитает урок.
+    if st.lesson_done and st.current_question is None and st.answered_count == 0 \
+            and not st.pending_answer:
+        st.agent_question = "Готов(а) перейти к квизу? (да / нет)"
+        _emit(deps, "system",
+              message="Урок по теме готов. Можно задать вопрос или перейти к квизу.",
+              kind="lesson.ready")
+        return st.model_dump()
     
     prev_qid = st.current_question.question_id if st.current_question else None
     prev_lesson = st.lesson_text

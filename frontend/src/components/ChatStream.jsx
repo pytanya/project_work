@@ -43,6 +43,7 @@ export default function ChatStream({ feed, busy = false, progressPhase = null })
           {m.kind === 'summary' && <div className="bubble summary">✅ {m.text}</div>}
           {m.kind === 'system' && <div className="bubble system">ℹ️ {m.text}</div>}
           {m.kind === 'source' && <div className="bubble source">🔎 {m.text}</div>}
+          {m.kind === 'agent' && <div className="bubble agent tutor-chat">🎓 {m.text}</div>}
           {m.kind === 'error' && <div className="bubble error">⚠️ {m.text}</div>}
         </div>
       ))}

@@ -1268,7 +1268,7 @@ def _lesson_stream_prompt(
         )
     )
     
-    ctx = "\n---\n".join(context)[:MAX_LESSON_CONTEXT_CHARS]
+    ctx = "\n---\n".join(_prepare_lesson_context(context))[:MAX_LESSON_CONTEXT_CHARS]
     user = f"Тема: {topic}\nКонтекст учебника:\n{ctx}"
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 

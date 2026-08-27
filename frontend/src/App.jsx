@@ -406,10 +406,15 @@ export default function App() {
           endStream()
           // Информационные события (фоновый судья, RAG-гейт, агент-сообщения)
           // НЕ должны сносить активный UI (карточка квиза / чек-лист).
-          if (!['lesson.judge', 'content.empty', 'agent.message'].includes(d.kind)) {
+          if (!['lesson.judge', 'content.empty', 'agent.message', 'lesson.ready'].includes(d.kind)) {
             setCurrent(null)
           }
-          push('system', d.message)
+          // Агент-сообщения и lesson.ready — как чат репетитора (не системное)
+          if (['agent.message', 'lesson.ready'].includes(d.kind)) {
+            push('agent', d.message)
+          } else {
+            push('system', d.message)
+          }
           // Живой счётчик правильных (6.2): обновляем после каждого ответа
           if (typeof d.correct_count === 'number') {
             setScore({ correct: d.correct_count, total: d.answered_count || 0 })
@@ -901,7 +906,9 @@ export default function App() {
         {sessionId && <div className="session-id">сессия: {sessionId}</div>}
         {/* intake.complete — истинен, когда карточка заполнена (статус из intakeStatus) */}
         <KnowledgeWikiPanel key={wikiReloadKey} studentId={student.student_id} studentName={student.student_name} intakeComplete={intake.complete} />
-        <SessionHistoryPanel studentId={student.student_id} reloadKey={sessionHistoryReloadKey} />
+        {intake.complete && student.student_id && (
+          <SessionHistoryPanel studentId={student.student_id} reloadKey={sessionHistoryReloadKey} />
+        )}
         <SourceWhitelistPanel studentId={student.student_id} openSignal={sourcePanelSignal} onChanged={setSourcePolicy} />
         <KnowledgeGraphPanel
           nodes={graph.nodes}
