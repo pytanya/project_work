@@ -928,7 +928,9 @@ export default function App() {
           onSelect={handleSelectTopic}
           sessionId={sessionId}
         />
-        <FileUpload onUpload={handleUpload} busy={uploadBusy} />
+        {source.status !== 'ready' && source.status !== 'done' && (
+          <FileUpload onUpload={handleUpload} busy={uploadBusy} />
+        )}
       </aside>
       <div className="sidebar-resizer" ref={sidebarDragRef} title="Изменить ширину панели" />
       <main className="chat">

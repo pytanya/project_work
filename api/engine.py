@@ -437,6 +437,13 @@ class SessionStore:
         """
         st = session.state
         if not st or not getattr(st, "student_id", None):
+            if st and not getattr(st, "student_id", None):
+                logger.debug(
+                    "_maybe_log_session_history: student_id не задан в сессии %s — "
+                    "история не будет записана. Проверьте, что профиль ученика "
+                    "создаётся при создании сессии (StudentProfile.prefill).",
+                    session.id,
+                )
             return
         snapshot = (bool(st.lesson_done), st.answered_count or 0, bool(st.quiz_complete))
         if snapshot == session.history_written:

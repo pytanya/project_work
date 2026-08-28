@@ -313,6 +313,8 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
   const [wiki, setWiki] = useState(null)
   const [related, setRelated] = useState(null)
   const [expanded, setExpanded] = useState(false)
+  // Авто-свёртка канваса при малом числе тем (<5) — экономия места в сайдбаре (#7)
+  const [collapsed, setCollapsed] = useState(true)
   // Структурные узлы (разделы/уроки) скрыты по умолчанию — показываем понятийные (5.3)
   const [showStructural, setShowStructural] = useState(false)
   // Плавающее окно: позиция (null = по центру) + перетаскивание за заголовок
@@ -645,12 +647,22 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
   const selectedId = activeTopic || selected?.id
   const activeNode = (nodes || []).find((n) => n.id === activeTopic)
 
+  // Авто-свёртка: при малом числе тем канвас свёрнут, но пользователь может раскрыть
+  const autoCollapsed = collapsed && topics.length < 5 && !expanded
+
   const panel = (
     <div className={`card graph-panel ${expanded ? 'graph-panel--float' : ''}`}>
       <div className="graph-panel__header"
         onPointerDown={expanded ? onFloatHeaderDown : undefined}
         title={expanded ? 'Перетащите окно за заголовок' : undefined}>
         <h3>Граф знаний · {topics.length}</h3>
+        {!expanded && (
+          <button className="graph-panel__toggle" onClick={() => setCollapsed((v) => !v)}
+            title={autoCollapsed ? 'Развернуть граф' : 'Свернуть граф'}
+            style={{ fontSize: '14px' }}>
+            {autoCollapsed ? '▸' : '▾'}
+          </button>
+        )}
         <button className="graph-panel__toggle" onClick={() => setShowStructural((v) => !v)}
           title={showStructural ? 'Скрыть разделы/уроки (оставить понятия)' : 'Показать разделы и уроки'}>
           {showStructural ? '📚' : '🧩'}
@@ -663,7 +675,12 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
       {activeNode && (
         <div className="active-topic">Изучаем: <strong>{activeNode.title}</strong></div>
       )}
-      <div ref={wrapRef} className="graph-canvas-wrap"
+      {autoCollapsed && (
+        <div className="graph-panel-empty" style={{ padding: '6px 12px', fontSize: '12px' }}>
+          Мало тем — канвас свёрнут. <button className="link" onClick={() => setCollapsed(false)} style={{ fontSize: '12px' }}>Показать</button>
+        </div>
+      )}
+      {!autoCollapsed && <div ref={wrapRef} className="graph-canvas-wrap"
         onMouseMove={onMove} onMouseDown={onDown} onMouseUp={onUp}
         onMouseLeave={onLeave} onWheel={onWheel}
         onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}>
@@ -703,7 +720,7 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
           <button onClick={fitToView} title="Вместить всё">⊡</button>
         </div>
         <div className="graph-zoom-hint">колесо / pinch — масштаб · drag — сдвиг</div>
-      </div>
+      </div>}
       {selected && (
         <div className="graph-wiki-card">
           <button className="graph-wiki-close" onClick={() => setSelected(null)}>✕</button>

@@ -853,10 +853,12 @@ def reuse_materials_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
             st.clear_lesson()
             st.force_source_refresh = True
             st.source_note = "Начинаем с нуля — ищу новые материалы по теме."
+            st.agent_message = st.source_note
         elif "дополнить" in low or "искать" in low or "найти" in low:
             # «Дополнить материал»: старый урок остаётся, ищем новые источники
             st.force_source_refresh = True
             st.source_note = "Ищу дополнительные материалы по теме."
+            st.agent_message = st.source_note
         elif "квиз" in low or "перейти" in low or "дальше" in low:
             # «Перейти к квизу»: кэшированный урок показан, существующие материалы готовы
             st.lesson_confirmed = True
@@ -964,6 +966,10 @@ def route_reuse(state: TutorState) -> str:
         return END
     if state.source_status == "ready" or state.sources or state.collection_id:
         return NODE_TOPIC_GATE
+    # «Начать с нуля» / «Дополнить»: force_source_refresh=True — останавливаем invoke,
+    # чтобы пользователь увидел подтверждение. Следующий invoke запустит поиск с флагом.
+    if state.force_source_refresh:
+        return END
     return NODE_FIND_TEXTBOOK
 
 
