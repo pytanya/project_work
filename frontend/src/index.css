@@ -734,6 +734,34 @@ body.resizing * { cursor: col-resize !important; }
 }
 .session-history__caret { opacity: 0.55; font-size: 11px; }
 .session-history__body { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
+.session-history__filters { display: flex; gap: 6px; }
+.session-history__select {
+  flex: 1; font-size: 11px; padding: 4px 6px; border: 1px solid var(--line);
+  border-radius: 6px; background: rgba(255,255,255,0.6); color: var(--ink);
+  outline: none; cursor: pointer;
+}
+.session-history__select:focus { border-color: var(--blue); }
+.session-history__summary {
+  display: flex; gap: 12px; flex-wrap: wrap; padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+.session-history__stat { display: flex; align-items: baseline; gap: 4px; }
+.session-history__stat-value { font-size: 16px; font-weight: 700; color: var(--ink); }
+.session-history__stat-label { font-size: 11px; color: var(--muted); }
+.session-history__group { margin-top: 4px; }
+.session-history__group-header {
+  display: flex; justify-content: space-between; align-items: baseline;
+  margin-bottom: 3px; padding: 0 2px;
+}
+.session-history__subject { font-size: 12px; font-weight: 600; color: var(--ink); }
+.session-history__group-meta { font-size: 11px; color: var(--muted); display: flex; align-items: baseline; gap: 4px; }
+.session-history__group-sep { margin: 0 1px; }
+.session-history__pct { font-weight: 700; }
+.session-history__bar-track {
+  height: 4px; border-radius: 2px; background: rgba(0,0,0,0.06);
+  margin-bottom: 6px; overflow: hidden;
+}
+.session-history__bar-fill { height: 100%; border-radius: 2px; transition: width 0.3s; }
 .session-history__item {
   border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px;
   background: rgba(255, 255, 255, 0.55);
@@ -751,6 +779,12 @@ body.resizing * { cursor: col-resize !important; }
 }
 .session-history__icon { font-size: 12px; }
 .session-history__score { margin-top: 4px; font-size: 11px; color: var(--muted); }
+.session-history__mini-bar-track {
+  height: 3px; border-radius: 2px; background: rgba(0,0,0,0.06);
+  margin-bottom: 2px; overflow: hidden;
+}
+.session-history__mini-bar-fill { height: 100%; border-radius: 2px; transition: width 0.3s; }
+.session-history__score-text { font-size: 11px; }
 .session-history__correct { font-weight: 700; color: var(--green); font-size: 13px; }
 .session-history__score-label { margin-left: 5px; }
 

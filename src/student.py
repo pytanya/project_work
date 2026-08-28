@@ -159,7 +159,13 @@ class StudentStore:
         tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(p)
 
-    def list_sessions(self, student_id: str, limit: int = 20) -> List[Dict[str, Any]]:
+    def list_sessions(
+        self,
+        student_id: str,
+        limit: int = 20,
+        subject: Optional[str] = None,
+        mode: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         if not student_id:
             return []
         p = self._log_path(student_id)
@@ -169,6 +175,10 @@ class StudentStore:
             items = json.loads(p.read_text(encoding="utf-8"))
             if not isinstance(items, list):
                 return []
+            if subject:
+                items = [it for it in items if (it.get("subject") or "").lower() == subject.lower()]
+            if mode:
+                items = [it for it in items if (it.get("mode") or "").lower() == mode.lower()]
             return items[-limit:][::-1]  # последние сверху
         except Exception:
             logger.warning("Не удалось прочитать историю занятий %s", student_id)

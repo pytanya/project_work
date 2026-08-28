@@ -97,6 +97,35 @@ def clean_title(text: str) -> str:
     text = re.sub(r"[ \t\u00a0]+", " ", text).strip(" *#-–—")
     return text
 
+
+def _is_valid_topic_title(title: str) -> bool:
+    """Проверяет, что title — реальная тема, а не instruction/навигация.
+
+    Отсекает:
+    - слишком короткие titles (<3 слов)
+    - titles которые являются instruction (вернуться, продолжить, см. также)
+    - titles которые похожи на навигацию (оглавление, примечания, источники)
+    """
+    if not title:
+        return False
+    title_lower = title.lower().strip()
+    # Слишком короткое — не тема
+    if len(title_lower.split()) < 3:
+        return False
+    # Instruction/навигация
+    _INSTRUCTIONS = {
+        "вернуться к теме", "вернитесь к теме", "продолжить", "продолжайте",
+        "см. также", "смотри также", "читать также", "подробнее",
+        "оглавление", "примечания", "источники", "литература",
+        "библиотека", "содержание",
+    }
+    if title_lower in _INSTRUCTIONS:
+        return False
+    # Если title начинается с "вернуться" или "продолжить" — не тема
+    if title_lower.startswith(("вернуться", "вернитесь", "продолжить", "продолжайте")):
+        return False
+    return True
+
 # Шумовые секции веб-страниц, которые НЕ являются темами урока (навигация/служебное)
 _WEB_NOISE = {
     "содержание", "оглавление", "примечания", "источники", "литература",
@@ -576,7 +605,14 @@ def build_textbook_graph(
     section_ids: List[str] = []
     for label, num, title, _content in sections:
         nid = f"sec:{source}:{num}"
-        kg.add_topic(nid, f"{label.capitalize()} {num}" + (f": {clean_title(title)}" if title else ""),
+        cleaned_title = clean_title(title) if title else ""
+        # Фильтруем невалидные titles (instructions, навигация, слишком короткие)
+        if cleaned_title and not _is_valid_topic_title(cleaned_title):
+            # Если title невалидный — используем только "Урок N" без подзаголовка
+            node_title = f"{label.capitalize()} {num}"
+        else:
+            node_title = f"{label.capitalize()} {num}" + (f": {cleaned_title}" if cleaned_title else "")
+        kg.add_topic(nid, node_title,
                      node_type="section", section_number=num, parent_id=root_id)
         kg.add_edge(root_id, nid, PART_OF)
         section_ids.append(nid)
@@ -594,6 +630,9 @@ def build_textbook_graph(
                 found.append(key)
                 nid = f"sec:{source}:{num}"
                 lesson_title = clean_title(titles.get(num, ""))
+                # Фильтруем невалидные titles
+                if lesson_title and not _is_valid_topic_title(lesson_title):
+                    lesson_title = ""
                 node_title = f"{label.capitalize()} {num}"
                 if lesson_title:
                     node_title += f": {lesson_title}"

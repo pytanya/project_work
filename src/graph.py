@@ -695,6 +695,57 @@ def agent_tutor_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         _emit(deps, "system", message=st.agent_message, kind="agent.message")
         return st.model_dump()
 
+    # Готов к квизу: запускаем генерацию первого вопроса напрямую (без агента).
+    # Агент не знает как обработать "да/готов/начинаем" — он ждёт ответ на активный вопрос.
+    if st.lesson_done and st.current_question is None and st.answered_count == 0 \
+            and st.pending_answer and _is_ready_to_quiz(st.pending_answer):
+        st.pending_answer = None
+        st.lesson_confirmed = True
+        _emit(deps, "system", message="Отлично! Начинаем квиз.", kind="lesson.done")
+        _emit(deps, "source.progress", stage="quiz", url="", status="generating",
+              message=f"Генерирую первый вопрос по теме «{st.topic or st.subject or 'тема'}»…")
+        st = TutorState.model_validate(generate_question_node(st, deps))
+        if st.current_question:
+            card = st.current_question
+            _emit(deps, "quiz.card", question_id=card.question_id, question=card.question,
+                  options=card.options, answer_type=card.answer_type, difficulty=card.difficulty,
+                  topic=card.topic, num_questions=st.num_questions,
+                  question_num=st.answered_count + 1)
+        return st.model_dump()
+
+    # Быстрая оценка ответа (если есть активный вопрос и ответ ученика):
+    # для закрытых вопросов — мгновенно (reference matching), для открытых — LLM.
+    # Фидбек "Верно/Неверно" эмитится сразу, генерация следующего вопроса — после.
+    if st.mode == "quiz" and st.current_question and st.pending_answer:
+        from .evaluation import evaluate_and_record
+
+        def _local_emit(event: str, **data: Any) -> None:
+            _emit(deps, event, **data)
+
+        card = st.current_question
+        answer = st.pending_answer
+        st.pending_answer = None
+        _emit(deps, "source.progress", stage="tutor", url="", status="evaluating",
+              message="Оцениваю ответ…")
+        st, message, _j, _e = evaluate_and_record(st, deps, card, answer, emit=_local_emit)
+        # Эмитим фидбек сразу (не ждём генерации следующего вопроса)
+        _emit(deps, "tutor.explanation" if not getattr(st, "quiz_complete", False) else "system",
+              message=message,
+              correct_count=st.correct_count,
+              answered_count=st.answered_count)
+        # Генерируем следующий вопрос (если квиз не завершён)
+        if not st.quiz_complete and st.answered_count < (st.num_questions or 10):
+            _emit(deps, "source.progress", stage="quiz", url="", status="generating",
+                  message=f"Генерирую следующий вопрос…")
+            st = TutorState.model_validate(generate_question_node(st, deps))
+            if st.current_question:
+                card = st.current_question
+                _emit(deps, "quiz.card", question_id=card.question_id, question=card.question,
+                      options=card.options, answer_type=card.answer_type, difficulty=card.difficulty,
+                      topic=card.topic, num_questions=st.num_questions,
+                      question_num=st.answered_count + 1)
+        return st.model_dump()
+
     prev_qid = st.current_question.question_id if st.current_question else None
     prev_lesson = st.lesson_text
     _emit(deps, "source.progress", stage="tutor", url="", status="generating",
@@ -1086,12 +1137,12 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         return st.model_dump()
 
     if st.pending_answer is not None:
-        from .agent_loop import _answer_free_question, _is_not_ready, _looks_like_free_question
+        from .agent_loop import _answer_free_question, _is_not_ready, _is_ready_to_quiz
 
         raw = st.pending_answer
         low = raw.strip().lower()
         st.pending_answer = None
-        if low in ("да", "yes", "у", "готов", "конечно", "начинаем", "квиз", "поехали", "всё", "понятно"):
+        if _is_ready_to_quiz(raw):
             st.lesson_confirmed = True
             st.lesson_done = True
             st.agent_question = None

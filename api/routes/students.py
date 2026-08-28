@@ -17,11 +17,17 @@ router = APIRouter(prefix="/api/students", tags=["students"])
 @router.get("/{student_id}/sessions")
 def student_sessions(
     student_id: str,
-    limit: int = Query(default=20, ge=1, le=100),
+    limit: int = Query(default=50, ge=1, le=100),
+    subject: Optional[str] = Query(default=None),
+    mode: Optional[str] = Query(default=None),
     store: SessionStore = Depends(get_store),
 ):
     """Последние занятия ученика (дата, предмет/тема, режим, счёт квиза)."""
-    return {"sessions": store.student_store.list_sessions(student_id, limit=limit)}
+    return {
+        "sessions": store.student_store.list_sessions(
+            student_id, limit=limit, subject=subject, mode=mode,
+        )
+    }
 
 
 _REGIONAL_PREFIXES = {

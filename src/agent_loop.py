@@ -338,9 +338,11 @@ def _tutor_context(st: TutorState) -> str:
 
 FREE_Q_SYSTEM = (
     "Ты — тьютор EduTutor. Ученик после урока задал вопрос по теме. "
-    "Ответь КОРОТКО и ПО СУЩЕСТВУ (2-6 предложений), опираясь ТОЛЬКО на контекст учебника. "
+    "Ответь КОРОТКО и ПО СУЩЕСТВУ (2-6 предложений). "
     "Отвечай на КОНКРЕТНЫЙ вопрос ученика, НЕ пересказывай весь урок. "
-    "Если по вопросу нет материала — честно скажи об этом и предложи уточнить."
+    "Опирайся на контекст учебника, если он релевантен вопросу. "
+    "Если в контексте нет ответа — используй свои знания, но предупреди: "
+    "«Этого нет в учебном материале, но по моим знаниям: …»"
 )
 
 _READY_ANSWERS = {
@@ -372,7 +374,11 @@ def _is_ready_to_quiz(text: Optional[str]) -> bool:
         return True
     if t.startswith("да"):
         return True
-    if "готов" in t and ("квиз" in t or "перейт" in t or "начн" in t):
+    # «давай квиз», «спасибо, давай квиз», «ну давай начнём» и т.п.
+    if ("готов" in t or "давай" in t) and ("квиз" in t or "перейт" in t or "начн" in t):
+        return True
+    # «давай» / «поехали» / «начинаем» как часть более длинной фразы
+    if any(w in t for w in ("давай", "поехали", "начинаем", "начнём", "начнем")):
         return True
     return False
 
@@ -401,15 +407,28 @@ def _looks_like_free_question(text: Optional[str]) -> bool:
     return len(t.split()) >= 3
 
 
-def _tutor_llm_text(deps: Any, messages: List[Dict[str, Any]]) -> str:
-    """Вызов тьютор-LLM одним текстовым ходом (без function calling)."""
+def _tutor_llm_text(deps: Any, messages: List[Dict[str, Any]], timeout_sec: float = 30.0) -> str:
+    """Вызов тьютор-LLM одним текстовым ходом (без function calling).
+
+    timeout_sec: максимальное время ожидания ответа (по умолчанию 30с).
+    """
+    import concurrent.futures
+
     fn = getattr(deps, "tutor_llm", None)
     if callable(fn):
         return (fn(messages) or "").strip()
     from .llm_client import LLMClient
 
-    try:
+    def _chat():
         return (LLMClient(role="tutor").chat(messages, temperature=0.3, max_tokens=300).content or "").strip()
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_chat)
+            return future.result(timeout=timeout_sec)
+    except concurrent.futures.TimeoutError:
+        logger.warning("_tutor_llm_text: timeout %ss", timeout_sec)
+        return ""
     except Exception:
         return ""
 
@@ -422,19 +441,45 @@ def _answer_free_question(st: TutorState, deps: Any, text: str) -> str:
     """
     from .agent_tools import AgentToolContext, _rag_results
 
-    results = _rag_results(AgentToolContext(state=st, deps=deps), text, k=4)
+    try:
+        results = _rag_results(AgentToolContext(state=st, deps=deps), text, k=4)
+    except Exception as exc:
+        logger.warning("_answer_free_question: RAG failed (%s)", exc)
+        results = []
+
     if not results:
-        return (
-            "Пока не нашёл материала по этому вопросу в загруженных источниках. "
-            "Уточните, пожалуйста, вопрос или загрузите учебник по теме — и я отвечу."
-        )
+        # RAG пуст — отвечаем на основе знаний модели (без контекста учебника)
+        topic = st.topic or st.subject or ""
+        messages = [
+            {"role": "system", "content": FREE_Q_SYSTEM},
+            {"role": "user", "content": (
+                f"Вопрос ученика: {text}\n\nТема: {topic}\n"
+                "Контекст учебника: (не найден — ответь на основе своих знаний, "
+                "предупредив что этого нет в загруженных материалах)"
+            )},
+        ]
+        try:
+            answer = _tutor_llm_text(deps, messages, timeout_sec=30.0)
+        except Exception:
+            answer = ""
+        if len(answer) < 10:
+            return (
+                "Этого нет в загруженных учебных материалах. "
+                "Попробуйте загрузить учебник по теме или уточните вопрос."
+            )
+        return answer
+
     context = "\n---\n".join(r.chunk.text for r in results)[:4000]
     topic = st.topic or st.subject or ""
     messages = [
         {"role": "system", "content": FREE_Q_SYSTEM},
         {"role": "user", "content": f"Вопрос ученика: {text}\n\nТема: {topic}\nКонтекст учебника:\n{context}"},
     ]
-    answer = _tutor_llm_text(deps, messages)
+    try:
+        answer = _tutor_llm_text(deps, messages, timeout_sec=30.0)
+    except Exception as exc:
+        logger.warning("_answer_free_question: LLM failed (%s)", exc)
+        answer = ""
     if len(answer) < 10:
         answer = context[:300]
     return answer
