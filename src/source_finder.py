@@ -298,6 +298,7 @@ def _get_text(url: str, client: httpx.Client, max_chars: int) -> Tuple[str, str]
     resp.raise_for_status()
     body = resp.content
     text = body.decode("utf-8", errors="replace")
+    logger.info("fetch: %s → %s (%d байт)", url, current, len(body))
     return text, "OK"
 
 
@@ -352,19 +353,25 @@ def fetch_url(url: str, client: Optional[httpx.Client] = None) -> Tuple[str, str
     try:
         # Провайдеры с API/JS-рендерингом: обычный HTML-fetch не даст контент.
         if "stepik.org/course/" in url:
+            logger.info("fetch_url: Stepik %s", url)
             return _fetch_stepik_text(url, client)
         if _LESSON_EDU_HOST in url:
+            logger.info("fetch_url: lesson.edu.ru %s", url)
             return _fetch_lesson_edu_text(url, default_settings)
         raw, status = _get_text(url, client, max_chars=default_settings.MAX_FETCH_CHARS)
         if status != "OK":
+            logger.warning("fetch_url: %s — %s", url, status)
             return raw, status
         text = _strip_html(raw)
         if not text:
+            logger.warning("fetch_url: %s — пустой текст", url)
             return "Страница не содержит текстового содержимого", "ERROR"
         if len(text) > default_settings.MAX_FETCH_CHARS:
             text = text[: default_settings.MAX_FETCH_CHARS] + "…[обрезано]"
+        logger.info("fetch_url: %s (%d символов)", url, len(text))
         return text, "OK"
     except httpx.HTTPError as e:
+        logger.warning("fetch_url: %s — %s", url, e)
         return f"Ошибка при загрузке {url}: {e}", "ERROR"
     finally:
         if close:
@@ -383,11 +390,14 @@ def fetch_html(url: str, client: Optional[httpx.Client] = None) -> Tuple[str, st
     try:
         raw, status = _get_text(url, client, max_chars=default_settings.MAX_FETCH_CHARS_HTML)
         if status != "OK":
+            logger.warning("fetch_html: %s — %s", url, status)
             return raw, status
         if len(raw) > default_settings.MAX_FETCH_CHARS_HTML:
             raw = raw[: default_settings.MAX_FETCH_CHARS_HTML]
+        logger.info("fetch_html: %s (%d байт)", url, len(raw))
         return raw, "OK"
     except httpx.HTTPError as e:
+        logger.warning("fetch_html: %s — %s", url, e)
         return f"Ошибка при загрузке {url}: {e}", "ERROR"
     finally:
         if close:
@@ -926,6 +936,9 @@ def collect_source_materials(
     _sid = f"{student_id}::" if student_id else ""
     cache_key = f"{_sid}{subject}::{topic}::{grade}" if (topic or subject) else ""
 
+    logger.info("collect_source_materials: subject=%s topic=%s grade=%s student=%s",
+                subject, topic, grade, student_id or "—")
+
     # 0) Проверка кэша материалов (если use_cache=True и key не пустой)
     if use_cache and cache_key:
         cached = _get_cached_materials(cache_key, cache_dir)
@@ -1005,14 +1018,19 @@ def collect_source_materials(
                 continue
             cached = _cache_read(r.url, cache_dir)
             if cached is not None:
+                logger.info("Источник %s: кэш (%d символов)", r.url, len(cached))
                 texts.append(cached)
                 sources.append({"type": "page", "url": r.url, "license": reason, "cached": True})
                 continue
+            logger.info("Источник %s: загрузка...", r.url)
             text, status = fetch_url(r.url, client=http)
             if status == "OK" and text:
                 texts.append(text)
                 sources.append({"type": "page", "url": r.url, "license": reason})
                 _cache_write(r.url, cache_dir, text)
+                logger.info("Источник %s: загружено (%d символов)", r.url, len(text))
+            else:
+                logger.warning("Источник %s: не удалось загрузить (%s)", r.url, status)
             time.sleep(s.CRAWL_RATE_LIMIT_SEC)
             if len(sources) >= s.MAX_CRAWL_PAGES:
                 break
