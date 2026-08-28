@@ -1,4 +1,4 @@
-﻿// LessonPanel — урок по теме (режим lesson).
+// LessonPanel — урок по теме (режим lesson).
 // Поддержка: структурированный Lesson (карточки) ИЛИ plain/markdown текст (новый стриминг).
 import { useMemo, useState } from 'react'
 import LatexText from './LatexText'
@@ -7,6 +7,33 @@ import LessonDiagram from './LessonDiagram'
 /* ═══════════════════════════════════════════
    Утилиты санитизации
    ═══════════════════════════════════════════ */
+
+/* Нормализованные ключи секций урока (tutor._normalize_heading) → русские подписи.
+   Модель иногда присылает заголовки секций как content/summary/check/terms —
+   в UI показываем осмысленное русское название. */
+const SECTION_LABELS = {
+  content: 'Подробное объяснение',
+  definition: 'Определение',
+  terms: 'Основные понятия',
+  key_terms: 'Ключевые понятия',
+  examples: 'Примеры',
+  check: 'Проверь себя',
+  summary: 'Краткий итог',
+  hook: 'Введение',
+  intro: 'Введение',
+  introduction: 'Введение',
+  diagram: 'Схема',
+  'check yourself': 'Проверь себя',
+  'key terms': 'Ключевые понятия',
+  eval: 'Оценка',
+}
+
+/** Читаемый заголовок секции: русская подпись для известных ключей, иначе — как есть. */
+function sectionLabel(heading) {
+  const h = String(heading || '').trim()
+  if (!h) return ''
+  return SECTION_LABELS[h.toLowerCase()] || h
+}
 
 /** Отфильтровывает JSON-подобные значения от модели, чтобы в UI не появлялся сырой JSON */
 function clean(v, field) {
@@ -462,7 +489,7 @@ function ContentSections({ sections }) {
   return (
     <div className="lesson-sections">
       {cleanSections.map((s, i) => {
-        const heading = s.heading || s.title || `Часть ${i + 1}`
+        const heading = sectionLabel(s.heading || s.title) || `Часть ${i + 1}`
         const body = s.body || s.content || ''
         return (
           <details className="lesson-section lesson-section--content" key={i} open={i === 0}>

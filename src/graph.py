@@ -667,15 +667,34 @@ def agent_tutor_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
 
     # Урок только что показан — ждём ответ ученика, не запускаем агент.
     # Иначе ReAct-цикл вернёт сырой текст или вызовет generate_quiz до
-    # того, как ученик прочитает урок.
+    # того, как ученик прочитает урок. lesson_confirmed уже истинен, когда
+    # ученик ответил «да» (content_node) — тогда пропускаем гейт и идём в квиз.
     if st.lesson_done and st.current_question is None and st.answered_count == 0 \
-            and not st.pending_answer:
+            and not st.pending_answer and not st.lesson_confirmed:
         st.agent_question = "Готов(а) перейти к квизу? (да / нет)"
         _emit(deps, "system",
               message="Урок по теме готов. Можно задать вопрос или перейти к квизу.",
               kind="lesson.ready")
         return st.model_dump()
-    
+
+    # Свободный вопрос ПОСЛЕ урока (квиз ещё не начат): отвечаем по RAG, квиз не запускаем.
+    # Слабая модель на вопрос ученика иначе «пересказывает урок» или сразу зовёт generate_quiz.
+    from .agent_loop import _answer_free_question, _is_not_ready, _is_ready_to_quiz
+
+    if st.lesson_done and st.current_question is None and st.answered_count == 0 \
+            and st.pending_answer and not _is_ready_to_quiz(st.pending_answer):
+        user_text = st.pending_answer
+        st.pending_answer = None
+        if _is_not_ready(user_text):
+            st.agent_message = (
+                "Хорошо. Изучите урок ещё раз — если что-то непонятно, спросите, "
+                "и я объясню. Когда будете готовы — напишите «да»."
+            )
+        else:
+            st.agent_message = _answer_free_question(st, deps, user_text)
+        _emit(deps, "system", message=st.agent_message, kind="agent.message")
+        return st.model_dump()
+
     prev_qid = st.current_question.question_id if st.current_question else None
     prev_lesson = st.lesson_text
     _emit(deps, "source.progress", stage="tutor", url="", status="generating",
@@ -1061,7 +1080,10 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         return st.model_dump()
 
     if st.pending_answer is not None:
-        low = (st.pending_answer or "").strip().lower()
+        from .agent_loop import _answer_free_question, _is_not_ready, _looks_like_free_question
+
+        raw = st.pending_answer
+        low = raw.strip().lower()
         st.pending_answer = None
         if low in ("да", "yes", "у", "готов", "конечно", "начинаем", "квиз", "поехали", "всё", "понятно"):
             st.lesson_confirmed = True
@@ -1075,11 +1097,18 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
             st.force_source_refresh = True
             st.agent_question = None
             _emit(deps, "system", message="Ищу свежие материалы по теме.", kind="lesson.repeat")
-        else:
-            # «нет»/повтор → сбрасываем и перегенерируем материал ниже
+        elif _is_not_ready(raw):
+            # Явный отказ («нет», «не готов», «пока нет») → сбрасываем и перегенерируем
             st.clear_lesson()
             st.agent_question = None
             _emit(deps, "system", message="Повторяем материал по теме.", kind="lesson.repeat")
+        else:
+            # Любой другой ответ (вопрос, просьба, короткая фраза) → отвечаем по RAG,
+            # НЕ сбрасываем урок (иначе урок пересказывается заново — баг).
+            st.agent_message = _answer_free_question(st, deps, raw)
+            st.agent_question = None
+            _emit(deps, "system", message=st.agent_message, kind="agent.message")
+            return st.model_dump()
 
     if st.lesson_text:
         # материал уже показан — ждём подтверждения

@@ -191,6 +191,7 @@ class SessionData:
     last_activity: float = field(default_factory=time.monotonic)
     store: Optional["SessionStore"] = None  # reference to parent store for persistence
     judge_in_flight: bool = False  # фоновый LLM-судья урока уже запланирован/выполняется
+    history_written: tuple = ()  # последняя записанная в историю сводка (прогрессивная запись)
     # Наблюдаемость и лимиты сессии (None — если llm-колбэки заданы извне/тесты)
     metrics: Optional[MetricsCollector] = None
     budget: Optional[BudgetGuard] = None
@@ -400,27 +401,54 @@ class SessionStore:
             self._log_session_history(session)
         return session is not None
 
+    def _history_entry(self, session: SessionData) -> Optional[Dict[str, Any]]:
+        """Сводка сессии для истории занятий (или None, если писать нечего)."""
+        st = session.state
+        if not st or not getattr(st, "student_id", None):
+            return None
+        if not (st.subject or st.topic or st.answered_count or st.lesson_done):
+            return None  # пустой сеанс (только создали и закрыли) — не пишем
+        return {
+            "session_id": session.id,
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "subject": st.subject or "",
+            "topic": st.topic or "",
+            "mode": st.mode or "",
+            "lesson_done": bool(st.lesson_done),
+            "correct": st.correct_count or 0,
+            "answered": st.answered_count or 0,
+            "total": st.num_questions or st.answered_count or 0,
+        }
+
     def _log_session_history(self, session: SessionData) -> None:
         """Сводка закрытой сессии → история занятий ученика (студенты/sessions/)."""
         try:
-            st = session.state
-            if not st or not getattr(st, "student_id", None):
-                return
-            if not (st.subject or st.topic or st.answered_count or st.lesson_done):
-                return  # пустой сеанс (только создали и закрыли) — не пишем
-            self.student_store.log_session(st.student_id, {
-                "session_id": session.id,
-                "ts": datetime.now().isoformat(timespec="seconds"),
-                "subject": st.subject or "",
-                "topic": st.topic or "",
-                "mode": st.mode or "",
-                "lesson_done": bool(st.lesson_done),
-                "correct": st.correct_count or 0,
-                "answered": st.answered_count or 0,
-                "total": st.num_questions or st.answered_count or 0,
-            })
+            entry = self._history_entry(session)
+            if entry is not None:
+                self.student_store.log_session(session.state.student_id, entry)
         except Exception:
             logger.exception("log_session_history: не удалось сохранить сводку")
+
+    def _maybe_log_session_history(self, session: SessionData) -> None:
+        """Прогрессивная запись истории: после урока и после квиза, без дублей.
+
+        Вызывается после каждого шага графа; пишет только когда изменился
+        значимый снимок (урок показан / отвечено вопросов / квиз завершён).
+        """
+        st = session.state
+        if not st or not getattr(st, "student_id", None):
+            return
+        snapshot = (bool(st.lesson_done), st.answered_count or 0, bool(st.quiz_complete))
+        if snapshot == session.history_written:
+            return
+        entry = self._history_entry(session)
+        if entry is None:
+            return
+        try:
+            self.student_store.log_session(st.student_id, entry)
+            session.history_written = snapshot
+        except Exception:
+            logger.exception("_maybe_log_session_history: не удалось сохранить сводку")
 
     def all_ids(self) -> list:
         with self._lock:
@@ -581,6 +609,13 @@ async def run_step(session: SessionData, answer: Optional[str] = None) -> TutorS
             session.store._save_state(session.id, session.state)
         except Exception:
             logger.exception("run_step: ошибка сохранения %s", session.id)
+
+    # Прогрессивная история занятий: урок показан / квиз пройден — запись без дублей
+    if session.store is not None:
+        try:
+            session.store._maybe_log_session_history(session)
+        except Exception:
+            logger.exception("run_step: прогрессивная история %s", session.id)
 
     # Фоновый LLM-судья урока: fire-and-forget, НЕ блокирует ответ шага
     _maybe_schedule_lesson_judge(session)

@@ -4,7 +4,6 @@ import ChatStream from './components/ChatStream'
 import IntakeWizard from './components/IntakeWizard'
 import IntakeCard from './components/IntakeCard'
 import QuizCard from './components/QuizCard'
-import SourceSearchPanel from './components/SourceSearchPanel'
 import FileUpload from './components/FileUpload'
 import KnowledgeGraphPanel from './components/KnowledgeGraphPanel'
 import KnowledgeWikiPanel from './components/KnowledgeWikiPanel'
@@ -330,6 +329,8 @@ export default function App() {
           finalizeStream('lesson', d.text, { topic: d.topic, lesson: d.lesson })
           // Удалить процессные статусы («Генерирую урок...», «Собираю урок...») при завершении урока
           removeProcessStatuses()
+          // История занятий: урок показан — сводка сессии уже записана на бэкенде
+          setSessionHistoryReloadKey((k) => k + 1)
           break
         case 'tutor.summary':
           finalizeStream('summary', `Квиз завершён: правильных ${d.correct}/${d.total}`)
@@ -909,7 +910,17 @@ export default function App() {
         {intake.complete && student.student_id && (
           <SessionHistoryPanel studentId={student.student_id} reloadKey={sessionHistoryReloadKey} />
         )}
-        <SourceWhitelistPanel studentId={student.student_id} openSignal={sourcePanelSignal} onChanged={setSourcePolicy} />
+        <SourceWhitelistPanel
+          studentId={student.student_id}
+          openSignal={sourcePanelSignal}
+          onChanged={setSourcePolicy}
+          status={source.status}
+          note={source.note}
+          sources={source.sources}
+          author={source.author}
+          onFind={handleFind}
+          busy={uploadBusy}
+        />
         <KnowledgeGraphPanel
           nodes={graph.nodes}
           edges={graph.edges}
@@ -917,7 +928,6 @@ export default function App() {
           onSelect={handleSelectTopic}
           sessionId={sessionId}
         />
-        <SourceSearchPanel status={source.status} note={source.note} sources={source.sources} author={source.author} onFind={handleFind} busy={uploadBusy} />
         <FileUpload onUpload={handleUpload} busy={uploadBusy} />
       </aside>
       <div className="sidebar-resizer" ref={sidebarDragRef} title="Изменить ширину панели" />

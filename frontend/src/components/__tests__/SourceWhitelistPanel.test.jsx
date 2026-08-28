@@ -93,3 +93,46 @@ describe('SourceWhitelistPanel', () => {
     await waitFor(() => expect(screen.getByLabelText(/Белый список доменов/)).toBeInTheDocument())
   })
 })
+
+describe('SourceWhitelistPanel (объединённая панель источников)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('показывает статус по умолчанию и кнопку «Найти учебник»', async () => {
+    mockPolicy({ allow_any_sources: true, whitelist: [] })
+    render(<SourceWhitelistPanel studentId="stu_1" status={null} note={null} onFind={() => {}} />)
+    expect(screen.getByText(/Источник не выбран/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Найти учебник/ })).toBeInTheDocument()
+  })
+
+  it('показывает статус, заметку, автора и найденные источники', async () => {
+    mockPolicy({ allow_any_sources: true, whitelist: [] })
+    const sources = [
+      { type: 'page', url: 'https://ru.wikipedia.org/wiki/Кант', license: 'источник лицензионно допустим' },
+      { type: 'page', url: 'https://ru.wikibooks.org/wiki/Философия' },
+    ]
+    render(
+      <SourceWhitelistPanel studentId="stu_1" status="ready" note="Собрано 2 источника"
+        author="Алексеев А.И." sources={sources} onFind={() => {}} />,
+    )
+    expect(screen.getByText(/Источник готов/)).toBeInTheDocument()
+    expect(screen.getByText('Собрано 2 источника')).toBeInTheDocument()
+    expect(screen.getByText('Алексеев А.И.')).toBeInTheDocument()
+    expect(screen.getByText(/Найденные источники \(2\):/)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /wikipedia/ })).toHaveAttribute('href', 'https://ru.wikipedia.org/wiki/Кант')
+    expect(screen.getByRole('link', { name: /wikibooks/ })).toBeInTheDocument()
+  })
+
+  it('показывает локальный PDF и вызывает onFind', async () => {
+    mockPolicy({ allow_any_sources: true, whitelist: [] })
+    const onFind = vi.fn()
+    render(
+      <SourceWhitelistPanel studentId="stu_1" status="ready"
+        sources={[{ type: 'local_pdf', path: 'downloads/geo.pdf' }]} onFind={onFind} />,
+    )
+    expect(screen.getByText(/Локальный учебник:/)).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /Найти учебник/ }))
+    expect(onFind).toHaveBeenCalled()
+  })
+})

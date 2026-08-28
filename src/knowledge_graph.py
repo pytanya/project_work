@@ -130,6 +130,33 @@ def _is_url_like(title: str) -> bool:
 
 
 
+# Мусорные темы графа от поисковых-страниц/агрегаторов: заголовки UI поиска
+# («Улучшить свой запрос», «Фильтры», «Картинки»), «похожие запросы» и навигация.
+# Аналог WIKI_JUNK в панели базы знаний — граф должен строиться из онтологии
+# собранного материала, а не из хрома поисковой выдачи.
+_GRAPH_JUNK_EXACT = {
+    "улучшить свой запрос", "фильтры", "фильтр", "картинки", "картинка",
+    "видео", "видеоролики", "ещё", "все результаты", "похожие запросы",
+    "сортировка", "настройки поиска", "искать в интернете", "закрыть", "меню",
+    "фонетика и орфоэпия", "лексика и фразеология",
+}
+_GRAPH_JUNK_SUBSTR = re.compile(
+    r"похожие запросы|улучшить свой запрос|результаты поиска|страница не найдена|"
+    r"ошибка\s*404|реклама|войти|зарегистрироваться",
+    re.IGNORECASE,
+)
+
+
+def is_junk_topic(title: Optional[str]) -> bool:
+    """Тема-«мусор» (поисковая выдача/навигация), не являющаяся понятием материала."""
+    if not title:
+        return True
+    low = title.strip().lower()
+    if low in _GRAPH_JUNK_EXACT:
+        return True
+    return bool(_GRAPH_JUNK_SUBSTR.search(title))
+
+
 def _is_ui_element(title: str) -> bool:
     """Проверяет, является ли строка UI-элементом (кнопка, ссылка действия)."""
     if not title:
@@ -199,6 +226,9 @@ def _web_headings(kg: "KnowledgeGraph", root_id: str, text: str, source: str) ->
             continue
         if _is_paragraph_number(title_clean):
             continue
+        # Мусор поисковой выдачи/навигации («Улучшить свой запрос», «Картинки»)
+        if is_junk_topic(title_clean):
+            continue
         key = title_clean.lower()
         if key in seen:
             continue
@@ -229,13 +259,17 @@ class KnowledgeGraph:
         allow_url: bool = False,
         **attrs: Any,
     ) -> None:
-        """Add topic with hierarchy support (parent_id) and URL filtering.
+        """Add topic with hierarchy support (parent_id) and URL/junk filtering.
 
         allow_url=True — намеренно создаваемый узел (страница-источник), заголовок
         которого может быть доменным именем; URL-фильтр в этом случае не применяется.
         """
         # Validation: topic must not be a URL
         if not allow_url and _is_url_like(title):
+            return
+        # Фильтрация мусора (навигация/UI поисковой выдачи) при добавлении любого узла.
+        # Структурные узлы (book, lesson) — не фильтруем, только тематические.
+        if node_type not in ("book", "lesson") and is_junk_topic(title):
             return
         data = dict(attrs)
         data.update(
@@ -482,6 +516,8 @@ def build_model_graph(
             continue
         title = clean_title(str(n.get("title") or ""))
         if not title or len(title) < 2:
+            continue
+        if is_junk_topic(title):
             continue
         key = title.lower()
         if key in seen_titles:

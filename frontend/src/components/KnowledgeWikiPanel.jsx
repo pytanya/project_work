@@ -1,7 +1,7 @@
 // KnowledgeWikiPanel — card-based knowledge base (roadmap #2 redesign):
 // subject sections, topic cards with mastery progress bars, stats, notes.
 // Клик по теме → модальное окно чтения (источник + изложение + понятия).
-import { useEffect, useState, useMemo } from 'react'
+import { useEffect, useState, useMemo, useRef } from 'react'
 import MasteryWall from './MasteryWall'
 import TopicModal from './TopicModal'
 
@@ -49,6 +49,22 @@ export default function KnowledgeWikiPanel({ studentId = '', studentName = '', i
   const [enriching, setEnriching] = useState(false)
   const [enrichNote, setEnrichNote] = useState(null)
   const [filter, setFilter] = useState('')
+  const cancelledRef = useRef(false)
+
+  // Персональная база знаний: ?student_id= изолирует данные разных учеников
+  const fetchWiki = async () => {
+    if (!studentId) return
+    cancelledRef.current = false
+    const q = studentId ? `?student_id=${encodeURIComponent(studentId)}` : ''
+    try {
+      const r = await fetch(`/api/wiki${q}`)
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      const body = await r.json()
+      if (!cancelledRef.current) setData(body.subjects || [])
+    } catch (e) {
+      if (!cancelledRef.current) setError(String(e.message || e))
+    }
+  }
 
   useEffect(() => {
     // База знаний строится по материалам темы: загружаем, когда карточка
@@ -56,14 +72,9 @@ export default function KnowledgeWikiPanel({ studentId = '', studentName = '', i
     // видит свою закешированную базу, новые темы добавляются после сбора
     // материалов и урока/квиза.
     if (!studentId || !intakeComplete) return
-    let cancelled = false
-    // Персональная база знаний: ?student_id= изолирует данные разных учеников
-    const q = studentId ? `?student_id=${encodeURIComponent(studentId)}` : ''
-    fetch(`/api/wiki${q}`)
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((body) => !cancelled && setData(body.subjects || []))
-      .catch((e) => !cancelled && setError(String(e.message || e)))
-    return () => { cancelled = true }
+    fetchWiki()
+    return () => { cancelledRef.current = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [studentId, intakeComplete])
 
   // Отсев URL-мусора от веб-скрапинга (multiurok.ru, footer#toggle и т.п.)
@@ -132,8 +143,20 @@ export default function KnowledgeWikiPanel({ studentId = '', studentName = '', i
       })
       if (res.ok) {
         const b = await res.json()
-        if (b.article) setReading({ subject: reading.subject, article: b.article })
+        if (b.article) {
+          setReading({ subject: reading.subject, article: b.article })
+          // Патчим data-state напрямую: при повторном открытии модала body не потеряется
+          // (даже если fetchWiki ещё не завершился или компонент перерисовался).
+          setData((prev) => (prev || []).map((s) => ({
+            ...s,
+            articles: (s.articles || []).map((a) =>
+              (a.topic || a.title) === (b.article.topic || b.article.title) ? b.article : a
+            ),
+          })))
+        }
         if (b.note) setEnrichNote(b.note)
+        // Изложение сохранено на бэкенде — обновляем список с сервера для надёжности.
+        await fetchWiki()
       } else {
         setEnrichNote('Не удалось сгенерировать изложение (ошибка сервера).')
       }

@@ -1,8 +1,28 @@
-// SourceWhitelistPanel — политика источников ученика (раздел 8.5):
-// toggle «Любые источники» + белый список доменов (редактируемый).
+// SourcesPanel — единая панель «Источники» (объединяет бывшие SourceWhitelistPanel +
+// SourceSearchPanel): статус авто-поиска/индексации, найденные источники, кнопка
+// «Найти учебник» и политика источников (любые / белый список доменов).
 import { useEffect, useState } from 'react'
 
-export default function SourceWhitelistPanel({ studentId = '', onChanged, openSignal = 0 }) {
+const STATUS_LABELS = {
+  ready: 'Источник готов',
+  failed: 'Источник не найден',
+  indexing: 'Обработка…',
+  searching: 'Поиск…',
+  idle: 'Источник не выбран',
+}
+
+function hostOf(url) {
+  try {
+    return new URL(url).hostname
+  } catch {
+    return url
+  }
+}
+
+export default function SourceWhitelistPanel({
+  studentId = '', onChanged, openSignal = 0,
+  status = null, note = null, sources = [], author = null, onFind, busy = false,
+}) {
   const [allowAny, setAllowAny] = useState(true)
   const [whitelist, setWhitelist] = useState([])
   const [input, setInput] = useState('')
@@ -10,6 +30,10 @@ export default function SourceWhitelistPanel({ studentId = '', onChanged, openSi
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [saved, setSaved] = useState(false)
+
+  const list = Array.isArray(sources) ? sources : []
+  const webPages = list.filter((s) => s && s.type === 'page' && s.url)
+  const localPdf = list.filter((s) => s && s.type === 'local_pdf')
 
   // Внешний сигнал «раскрыть панель» (кнопка «Изменить источники» в предложении)
   useEffect(() => {
@@ -69,8 +93,6 @@ export default function SourceWhitelistPanel({ studentId = '', onChanged, openSi
   }
 
   const toggleAny = () => {
-    // Выключение «любых» открывает редактор; пустой список сохранится как есть
-    // (поиск будет заблокирован до добавления доменов — это честное состояние).
     if (allowAny) setOpen(true)
     persist({ allow_any_sources: !allowAny, whitelist })
   }
@@ -85,8 +107,57 @@ export default function SourceWhitelistPanel({ studentId = '', onChanged, openSi
         <span className="source-policy__state">{allowAny ? 'любые' : `список · ${whitelist.length}`}</span>
         <span className="source-policy__caret">{open ? '▾' : '▸'}</span>
       </button>
+
+      {/* Статус авто-поиска/индексации + найденные источники — всегда видны
+          (ранее SourceSearchPanel), не прячутся за аккордеоном политики. */}
+      <div className="source-policy__status">
+        <div className={`source-status ${status || 'idle'}`}>
+          {STATUS_LABELS[status] || status || STATUS_LABELS.idle}
+        </div>
+        {note && <div className="source-note">{note}</div>}
+        {author && (
+          <div className="source-author">
+            Автор: <strong>{author}</strong>
+          </div>
+        )}
+        {webPages.length > 0 && (
+          <div className="source-list">
+            <div className="source-list-title">Найденные источники ({webPages.length}):</div>
+            <ul>
+              {webPages.map((s, i) => (
+                <li key={`${s.url}-${i}`}>
+                  <a href={s.url} target="_blank" rel="noopener noreferrer" title={s.url}>
+                    {s.title || hostOf(s.url)}
+                  </a>
+                  {s.license && <span className="muted"> · {s.license}</span>}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {localPdf.length > 0 && (
+          <div className="source-list">
+            <div className="source-list-title">Локальный учебник:</div>
+            <ul>
+              {localPdf.map((s, i) => (
+                <li key={`${s.path}-${i}`}>{s.path || 'PDF'}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {webPages.length === 0 && localPdf.length === 0 && (status === 'ready' || status === 'done') && (
+          <div className="source-note muted" style={{ fontSize: '12px', padding: '4px 0' }}>
+            Источник проиндексирован, материал готов к использованию
+          </div>
+        )}
+        <button onClick={onFind} className="btn" disabled={busy}>
+          {busy ? 'Работаю…' : 'Найти учебник'}
+        </button>
+      </div>
+
       {open && (
         <div className="source-policy__body">
+          {/* Политика источников: любые / белый список */}
           <label className="source-policy__any">
             <input type="checkbox" checked={allowAny} onChange={toggleAny} disabled={loading} />
             <span>

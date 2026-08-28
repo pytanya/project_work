@@ -110,6 +110,15 @@ def get_graph(session_id: str, store: SessionStore = Depends(get_store)):
     nodes = kg.to_dict()["nodes"]
     edges = kg.to_dict()["edges"]
 
+    # Отсев мусорных тем (поисковая выдача/навигация) — защита и для кэшированных графов.
+    from src.knowledge_graph import is_junk_topic
+
+    clean_ids = {n["id"] for n in nodes
+                 if n.get("type") == "book" or not is_junk_topic(n.get("title", ""))}
+    if len(clean_ids) != len(nodes):
+        nodes = [n for n in nodes if n["id"] in clean_ids]
+        edges = [e for e in edges if e["source"] in clean_ids and e["target"] in clean_ids]
+
     # Mastery overlay (roadmap #3): цвет узла = уровень усвоения из Knowledge Wiki.
     # Матчим по названию темы/раздела (с нормализацией «Урок N: Тема» ≈ «Тема»),
     # subject сессии — фильтр.

@@ -768,6 +768,8 @@ body.resizing * { cursor: col-resize !important; }
 .source-policy__state:not(:empty) + .source-policy__caret { margin-left: 0; }
 .source-policy__caret { opacity: 0.55; font-size: 11px; }
 .source-policy__body { margin-top: 8px; display: flex; flex-direction: column; gap: 9px; }
+.source-policy__status { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
+.source-policy__status .source-note { margin: 0; }
 .source-policy__any {
   display: flex; align-items: flex-start; gap: 8px; font-size: 13px; cursor: pointer;
   color: var(--ink); line-height: 1.3;

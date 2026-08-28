@@ -298,6 +298,33 @@ class TestRunTutorAgent:
         assert st_new.correct_count >= 1  # оценка произошла (детерминированно)
 
 
+class TestReadyQuizHelpers:
+    """Помощники различения «готов к квизу» vs «свободный вопрос» (агент-чат после урока)."""
+
+    def test_ready_confirms(self):
+        from src.agent_loop import _is_ready_to_quiz
+
+        for t in ("да", "Да!", "готов", "готова", "давай", "начинаем", "поехали",
+                  "да, готов", "конечно", "да, перейдём к квизу"):
+            assert _is_ready_to_quiz(t) is True, t
+
+    def test_question_is_not_ready(self):
+        from src.agent_loop import _is_ready_to_quiz, _looks_like_free_question
+
+        for t in ("расскажи про символизм", "что такое атмосфера?", "объясни подробнее",
+                  "а можно пример?", "почему небо голубое", "зачем это нужно"):
+            assert _is_ready_to_quiz(t) is False, t
+            assert _looks_like_free_question(t) is True, t
+
+    def test_not_ready_is_neither_confirmation_nor_question(self):
+        from src.agent_loop import _is_not_ready, _is_ready_to_quiz, _looks_like_free_question
+
+        assert _is_not_ready("нет") is True
+        assert _is_not_ready("ещё нет") is True
+        assert _is_ready_to_quiz("нет") is False
+        assert _looks_like_free_question("нет") is False
+
+
 class TestGraphAgentTutor:
     def test_graph_agent_quiz_flow(self):
         """Сквозной граф: агент генерирует первый вопрос, ответ оценивается."""
@@ -332,6 +359,25 @@ class TestGraphAgentTutor:
         res = TutorState.model_validate(graph.invoke(st.model_dump()))
         assert res.lesson_confirmed is True
         assert res.current_question is not None  # квиз начался
+
+    def test_lesson_free_question_answered_without_quiz(self):
+        """Вопрос после урока → ответ по RAG (agent_message), квиз НЕ запускается,
+        урок не пересказывается заново."""
+        agent = FakeAgentLLM([])
+        deps = _tutor_deps(agent)
+        events = []
+        deps.on_event = lambda e, d: events.append((e, d))
+        graph = build_graph(deps)
+        st = _quiz_state()
+        st.mode = "lesson"
+        st.lesson_text = "Атмосфера — газовая оболочка Земли."
+        st.lesson_done = True
+        st.pending_answer = "а почему небо голубое?"
+        res = TutorState.model_validate(graph.invoke(st.model_dump()))
+        assert res.current_question is None  # квиз не начат
+        assert res.lesson_text  # урок НЕ сброшен (не «повторяем материал»)
+        assert res.agent_message  # дан ответ на вопрос
+        assert any(e == "system" and d.get("kind") == "agent.message" for e, d in events)
 
     def test_agent_tutor_fallback_generates_next_question(self):
         """Баг #3: агент оценил ответ, но НЕ вызвал generate_quiz → следующий вопрос

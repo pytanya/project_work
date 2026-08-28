@@ -149,6 +149,10 @@ class StudentStore:
                 items = []
         except Exception:
             items = []
+        # Upsert по session_id: прогрессивная запись (после урока/квиза) не плодит дубли.
+        sid = entry.get("session_id")
+        if sid:
+            items = [it for it in items if it.get("session_id") != sid]
         items.append(entry)
         items = items[-50:]
         tmp = p.with_suffix(".json.tmp")

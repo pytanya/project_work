@@ -289,10 +289,14 @@ TUTOR_AGENT_PROMPT = (
     "generate_quiz для следующего вопроса. НЕ останавливайся после оценки!\n"
     "2. ОШИБКА: Если ответ неверный — вызови explain_error, затем generate_quiz.\n"
     "3. СВОБОДНЫЙ ВОПРОС: Если ученик спрашивает по теме (не отвечает на квиз) — "
-    "вызови rag_search, найди информацию и ОТВЕТЬ СВОИМИ СЛОВАМИ. Будь репетитором!\n"
+    "вызови rag_search с запросом ИЗ ВОПРОСА ученика, найди факты и ОТВЕТЬ "
+    "НА ЭТОТ КОНКРЕТНЫЙ ВОПРОС (2-6 предложений, своими словами). "
+    "НЕ пересказывай весь урок целиком и НЕ запускай квиз, пока ученик не подтвердил готовность.\n"
     "4. УГЛУБЛЕНИЕ: Если ученик просит подробнее — вызови deep_dive.\n"
     "5. ЗАВЕРШЕНИЕ: Если ученик хочет закончить или quiz_complete — вызови finish_session.\n"
-    "6. ПЕРВЫЙ ВОПРОС: Если урок показан, активного вопроса нет — вызови generate_quiz.\n"
+    "6. ПЕРВЫЙ ВОПРОС: Квиз запускается ТОЛЬКО когда ученик явно подтвердил готовность "
+    "(«да», «готов», «начинаем»). Если активного вопроса нет и ученик задал вопрос или "
+    "просит объяснить — сначала ответь на вопрос (правило 3), а не начинай квиз.\n"
     "7. ФИНАЛЬНЫЙ ТЕКСТ: Твой ответ ученику — короткий дружелюбный фидбек. "
     "Если оценил ответ — похвали или подбодри. Если дал новый вопрос — подведи.\n"
     "8. НИКОГДА не отвечай только текстом при наличии активного вопроса и ответа ученика. "
@@ -330,6 +334,110 @@ def _tutor_context(st: TutorState) -> str:
     if st.lesson_done and not st.current_question and st.answered_count == 0:
         parts.append("- ученик ещё не начал квиз — спроси, готов ли он, или ответь на вопрос по теме")
     return "\n".join(parts)
+
+
+FREE_Q_SYSTEM = (
+    "Ты — тьютор EduTutor. Ученик после урока задал вопрос по теме. "
+    "Ответь КОРОТКО и ПО СУЩЕСТВУ (2-6 предложений), опираясь ТОЛЬКО на контекст учебника. "
+    "Отвечай на КОНКРЕТНЫЙ вопрос ученика, НЕ пересказывай весь урок. "
+    "Если по вопросу нет материала — честно скажи об этом и предложи уточнить."
+)
+
+_READY_ANSWERS = {
+    "да", "давай", "готов", "готова", "начинаем", "поехали", "конечно",
+    "yes", "ага", "угу", "ок", "окей", "хорошо", "ну да", "пойдём", "пойдем",
+    "можно", "да, готов", "да, давай", "давай начнём", "давай начнем",
+    "давай квиз", "перейдём к квизу", "перейдем к квизу", "да, перейдём",
+}
+_NOT_READY_ANSWERS = {
+    "нет", "не", "неа", "no", "ещё нет", "пока нет", "не готов", "не готова",
+    "не хочу", "потом", "позже", "нет, спасибо", "стоп",
+}
+_QUESTION_MARKERS = (
+    "?", "расскажи", "объясни", "почему", "как", "что такое", "что значит",
+    "чем", "пример", "подробнее", "зачем", "когда", "где", "кто",
+)
+
+
+def _is_ready_to_quiz(text: Optional[str]) -> bool:
+    """Понял ли ученик, что переходим к квизу (подтвердил «да»-семейством)."""
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    # Вопрос/просьба об объяснении — это НЕ подтверждение готовности
+    if any(m in t for m in _QUESTION_MARKERS):
+        return False
+    t = t.rstrip("!., ").strip()
+    if t in _READY_ANSWERS:
+        return True
+    if t.startswith("да"):
+        return True
+    if "готов" in t and ("квиз" in t or "перейт" in t or "начн" in t):
+        return True
+    return False
+
+
+def _is_not_ready(text: Optional[str]) -> bool:
+    t = (text or "").strip().lower().rstrip("!., ").strip()
+    return t in _NOT_READY_ANSWERS or t.startswith("не готов")
+
+
+def _looks_like_free_question(text: Optional[str]) -> bool:
+    """Свободный вопрос/просьба ученика (а не подтверждение «да» или «нет»)."""
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    if "?" in t:
+        return True
+    if _is_ready_to_quiz(t) or _is_not_ready(t):
+        return False
+    if any(m in t for m in (
+        "расскажи", "объясни", "почему", "как ", "как?", "что такое", "что значит",
+        "зачем", "пример", "подробнее", "повтори", "непонят", "не понятно",
+        "уточни", "поясни", "напомни",
+    )):
+        return True
+    # Осмысленная фраза из 3+ слов — скорее вопрос/просьба, чем «да»/«нет»
+    return len(t.split()) >= 3
+
+
+def _tutor_llm_text(deps: Any, messages: List[Dict[str, Any]]) -> str:
+    """Вызов тьютор-LLM одним текстовым ходом (без function calling)."""
+    fn = getattr(deps, "tutor_llm", None)
+    if callable(fn):
+        return (fn(messages) or "").strip()
+    from .llm_client import LLMClient
+
+    try:
+        return (LLMClient(role="tutor").chat(messages, temperature=0.3, max_tokens=300).content or "").strip()
+    except Exception:
+        return ""
+
+
+def _answer_free_question(st: TutorState, deps: Any, text: str) -> str:
+    """Детерминированный ответ на свободный вопрос ученика (RAG → тьютор-LLM).
+
+    Не запускает квиз и не пересказывает урок: rag_search по тексту вопроса,
+    затем короткий ответ на КОНКРЕТНЫЙ вопрос.
+    """
+    from .agent_tools import AgentToolContext, _rag_results
+
+    results = _rag_results(AgentToolContext(state=st, deps=deps), text, k=4)
+    if not results:
+        return (
+            "Пока не нашёл материала по этому вопросу в загруженных источниках. "
+            "Уточните, пожалуйста, вопрос или загрузите учебник по теме — и я отвечу."
+        )
+    context = "\n---\n".join(r.chunk.text for r in results)[:4000]
+    topic = st.topic or st.subject or ""
+    messages = [
+        {"role": "system", "content": FREE_Q_SYSTEM},
+        {"role": "user", "content": f"Вопрос ученика: {text}\n\nТема: {topic}\nКонтекст учебника:\n{context}"},
+    ]
+    answer = _tutor_llm_text(deps, messages)
+    if len(answer) < 10:
+        answer = context[:300]
+    return answer
 
 
 def run_tutor_agent(state: TutorState, deps: Any) -> Tuple[TutorState, Optional[str]]:
