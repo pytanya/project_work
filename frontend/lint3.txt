@@ -1,0 +1,23 @@
+
+  ! eslint(no-unused-vars): Function 'MarkdownLesson' is declared but never used.
+     ,-[src/components/LessonPanel.jsx:287:10]
+ 286 | 
+ 287 | function MarkdownLesson({ rawText, topic, lesson }) {
+     :          ^^^^^^^|^^^^^^
+     :                 `-- 'MarkdownLesson' is declared here
+ 288 |   const sections = useMemo(() => parseMarkdownSections(rawText), [rawText])
+     `----
+  help: Consider removing this declaration.
+
+  ! eslint(no-unused-vars): Variable 'rawText' is declared but never used. Unused variables should start with a '_'.
+     ,-[src/components/LessonPanel.jsx:529:9]
+ 528 |   /* ── Извлекаем raw_text ── */
+ 529 |   const rawText = lesson?.raw_text || ''
+     :         ^^^|^^^
+     :            `-- 'rawText' is declared here
+ 530 | 
+     `----
+  help: Consider removing this declaration.
+
+Found 2 warnings and 0 errors.
+Finished in 96ms on 1 file with 104 rules using 4 threads.

@@ -1,0 +1,89 @@
+
+  ! eslint(no-unused-vars): Variable 'hook' is declared but never used. Unused variables should start with a '_'.
+     ,-[src/components/LessonPanel.jsx:302:9]
+ 301 |   // Определим hook (первый контент до первой секции, если есть)
+ 302 |   const hook = "" // Из markdownhook нет, используем definition
+     :         ^^|^
+     :           `-- 'hook' is declared here
+ 303 |   
+     `----
+  help: Consider removing this declaration.
+
+  ! eslint(no-unused-vars): Function 'CheckQuestionSection' is declared but never used.
+     ,-[src/components/LessonPanel.jsx:514:10]
+ 513 | 
+ 514 | function CheckQuestionSection({ question }) {
+     :          ^^^^^^^^^^|^^^^^^^^^
+     :                    `-- 'CheckQuestionSection' is declared here
+ 515 |   if (!question) return null
+     `----
+  help: Consider removing this declaration.
+
+  ! eslint(no-useless-escape): Unnecessary escape character 'Z'
+    ,-[src/components/LessonPanel.jsx:73:84]
+ 72 |   if (!mdText) return ''
+ 73 |   const defMatch = mdText.match(/^##\s*Определение\s*\n([\s\S]*?)(?=^##|\Z)/m)
+    :                                                                         ^^
+ 74 |   if (defMatch) {
+    `----
+  help: Replace `\Z` with `Z`.
+
+  ! eslint(no-useless-escape): Unnecessary escape character 'Z'
+    ,-[src/components/LessonPanel.jsx:85:105]
+ 84 |   if (!mdText) return []
+ 85 |   const termsMatch = mdText.match(/^##\s*[Оо]сновные\s*[Ппонятия]\s*\n([\s\S]*?)(?=^##|\Z)/m)
+    :                                                                                        ^^
+ 86 |   if (!termsMatch) return []
+    `----
+  help: Replace `\Z` with `Z`.
+
+  ! eslint(no-useless-escape): Unnecessary escape character 'Z'
+     ,-[src/components/LessonPanel.jsx:109:93]
+ 108 |   if (!mdText) return ''
+ 109 |   const checkMatch = mdText.match(/^##\s*[Пп]роверь\s*себя\s*\n([\s\S]*?)(?=^##|\Z)/m)
+     :                                                                                 ^^
+ 110 |   if (checkMatch) {
+     `----
+  help: Replace `\Z` with `Z`.
+
+  ! eslint(no-useless-escape): Unnecessary escape character 'Z'
+     ,-[src/components/LessonPanel.jsx:119:123]
+ 118 |   if (!mdText) return ''
+ 119 |   const sumMatch = mdText.match(/^##\s*(?:Краткий\s+Итог|Заключение|Итого)\s*\n([\s\S]*?)(?=^##|\Z)/m)
+     :                                                                                                 ^^
+ 120 |   if (sumMatch) {
+     `----
+  help: Replace `\Z` with `Z`.
+
+  x react-hooks(rules-of-hooks): React Hook "useMemo" is called conditionally. React Hooks must be called in the exact same order in every component render.
+     ,-[src/components/LessonPanel.jsx:567:16]
+ 566 |       /* ── Санитизация данных ── */
+ 567 | ,->   const data = useMemo(() => (raw ? {
+ 568 | |       ...raw,
+ 569 | |       title: clean(raw.title),
+ 570 | |       hook: clean(raw.hook),
+ 571 | |       definition: clean(raw.definition),
+ 572 | |       summary: clean(raw.summary),
+ 573 | |       key_terms: (raw.key_terms || [])
+ 574 | |         .map((t) => ({
+ 575 | |           term: clean(typeof t === 'string' ? t : t?.term),
+ 576 | |           definition: clean(typeof t === 'string' ? '' : t?.definition),
+ 577 | |         }))
+ 578 | |         .filter((t) => t.term),
+ 579 | |       sections: (raw.sections || []).map((s) => ({
+ 580 | |         ...s,
+ 581 | |         heading: clean(s?.heading),
+ 582 | |         title: clean(s?.title),
+ 583 | |         body: clean(s?.body),
+ 584 | |         content: clean(s?.content),
+ 585 | |         citation: clean(s?.citation),
+ 586 | |         check_question: clean(s?.check_question),
+ 587 | |       })),
+ 588 | |->   } : null), [raw])
+     : `---- This Hook call is not reachable on every render path.
+ 589 |     
+     `----
+  help: Move the Hook call before the condition, or call it unconditionally and branch inside the Hook/effect instead.
+
+Found 6 warnings and 1 error.
+Finished in 68ms on 1 file with 104 rules using 4 threads.
