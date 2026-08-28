@@ -1371,6 +1371,15 @@ body.resizing * { cursor: col-resize !important; }
 .lesson-fallback p { margin: 0 0 8px 0; }
 .lesson-fallback pre { margin: 6px 0 0 0; }
 
+/* --- Изображения в уроке --- */
+.lesson-image {
+  display: block; max-width: 100%; height: auto;
+  margin: 10px 0; border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  border: 1px solid var(--line);
+}
+.lesson-image[alt=""] { display: none; }
+
 /* --- Объяснение --- */
 .explanation-text { white-space: pre-line; }
 .citation {

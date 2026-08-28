@@ -168,6 +168,15 @@ function escapeHtml(str) {
 function renderMarkdownLine(line) {
   let html = String(line || '')
   
+  // Извлекаем markdown-изображения ![alt](url) ДО экранирования
+  // (иначе URL может содержать &lt; или другие экранированные символы)
+  const imagePlaceholders = []
+  html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt, url) => {
+    const placeholder = `__IMG_${imagePlaceholders.length}__`
+    imagePlaceholders.push(`<img src="${url}" alt="${alt}" loading="lazy" class="lesson-image" />`)
+    return placeholder
+  })
+  
   // Экранируем HTML (порядок важен: & первым!)
   html = escapeHtml(html)
   
@@ -181,6 +190,11 @@ function renderMarkdownLine(line) {
   
   // Код: `текст`
   html = html.replace(/`(.+?)`/g, '<code>$1</code>')
+  
+  // Восстанавливаем изображения
+  for (let i = 0; i < imagePlaceholders.length; i++) {
+    html = html.replace(`__IMG_${i}__`, imagePlaceholders[i])
+  }
   
   return html
 }
