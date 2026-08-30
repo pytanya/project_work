@@ -41,6 +41,32 @@ function saveStudent(s) {
   localStorage.setItem(STUDENT_KEY, JSON.stringify(s))
 }
 
+// Личность ученика: детерминированная идентичность из ФИО+тип+класс.
+// student_id выводится из неё — у разных людей разные id → изолированные
+// ветки данных (Wiki/история/мастерство). У одного и того же человека id
+// воспроизводится, у другого (с тем же браузером) — свой.
+function canonicalName(name) {
+  return String(name || '').trim().replace(/\s+/g, ' ').toLowerCase()
+}
+
+function deriveIdentityKey(name, type, grade) {
+  return `${canonicalName(name)}|${String(type || '').trim().toLowerCase()}|${String(grade || '').trim().toLowerCase()}`
+}
+
+function hashStr(s) {
+  // FNV-1a 32-bit — стабильный детерминированный хеш (без обращения к crypto)
+  let h = 0x811c9dc5
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 0x01000193)
+  }
+  return (h >>> 0).toString(16).padStart(8, '0')
+}
+
+function deriveStudentId(name, type, grade) {
+  return `stu_${hashStr(deriveIdentityKey(name, type, grade))}`
+}
+
 function loadSidebarWidth() {
   const v = Number(localStorage.getItem(SIDEBAR_KEY))
   if (Number.isFinite(v) && v >= SIDEBAR_MIN && v <= SIDEBAR_MAX) return v
@@ -521,8 +547,10 @@ export default function App() {
             const r = await api.createSession(student.student_id)
             sid = r?.session_id
             if (r && r.student_id && (r.student_id !== student.student_id || r.student_name !== student.student_name)) {
-              setStudent({ student_id: r.student_id, student_name: r.student_name || '' })
-              saveStudent({ student_id: r.student_id, student_name: r.student_name || '' })
+              // merge: не теряем identity/тип/класс при расхождении имён
+              const next = { ...student, student_id: r.student_id, student_name: r.student_name || '' }
+              setStudent(next)
+              saveStudent(next)
             }
             break
           } catch (e) {
@@ -705,13 +733,33 @@ export default function App() {
     isWaitingForAnswer.current = true
     resetBusyAfterTimeout()
     try {
-      await api.postIntakeCard(sessionId, values)
-      // Профиль ученика обновляем локально (имя) — для шапки/панели
-      if (values.name) {
-        const next = { ...student, student_name: values.name }
-        setStudent(next)
-        saveStudent(next)
+      const name = String(values.name || '').trim()
+      const type = values.learner_type || ''
+      const grade = String(values.grade || '').trim()
+      const identity = deriveIdentityKey(name, type, grade)
+
+      // Смена личности: если у этого браузера уже была заполнена карточка
+      // другого человека (другое ФИО/тип/класс) — выделяем новую изолированную
+      // ветку данных. Иначе (тот же человек / первое заполнение) — сохраняем id.
+      let studentId = student.student_id
+      if (student.identity && student.identity !== identity) {
+        studentId = deriveStudentId(name, type, grade)
       }
+
+      await api.postIntakeCard(sessionId, values, studentId)
+
+      // Профиль ученика обновляем локально (имя/тип/класс/id) — для шапки/панели
+      const next = {
+        ...student,
+        student_id: studentId,
+        student_name: name,
+        learner_type: type || student.learner_type,
+        grade: grade || student.grade,
+        identity,
+      }
+      setStudent(next)
+      saveStudent(next)
+
       const st = await api.intakeStatus(sessionId)
       setIntake({ missingFields: st.missing_fields, complete: st.complete })
       if (st.complete) {

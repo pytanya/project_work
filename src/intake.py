@@ -322,7 +322,7 @@ def build_intake_card(state: IntakeState) -> Dict[str, Any]:
         textbook = "true" if state.has_textbook else "false"
 
     fields: List[Dict[str, Any]] = [
-        {"key": "name", "label": "Как тебя зовут?", "type": "text", "required": True,
+        {"key": "name", "label": "Как тебя зовут (имя и фамилия)?", "type": "text", "required": True,
          "value": getattr(state, "student_name", None) or ""},
         {"key": "learner_type", "label": "Ты школьник или студент?", "type": "choice", "required": True,
          "options": _choice([
@@ -353,15 +353,27 @@ def build_intake_card(state: IntakeState) -> Dict[str, Any]:
     }
 
 
-def apply_intake_card(state: IntakeState, values: Dict[str, Any]) -> IntakeState:
+def apply_intake_card(
+    state: IntakeState,
+    values: Dict[str, Any],
+    student_id: Optional[str] = None,
+) -> IntakeState:
     """Применить заполненную карточку к состоянию (все поля сразу).
 
     Возвращает копию состояния; `agent_card` сбрасывается. Значения нормализуются
     детерминированно (те же правила, что и в normalize_answer/extract_intake_fields).
+
+    Если передан `student_id` и он отличается от текущего — сессия перепривязывается
+    к нему (namespace Wiki/истории/мастерства). Это сигнал с фронта, что карточка
+    заполнена ДРУГИМ человеком (другое ФИО/тип/класс): выделяем новую изолированную
+    ветку данных, не трогая данные предыдущего ученика.
     """
     st = state.model_copy(deep=True)
     v = values or {}
     st.agent_card = None
+
+    if student_id and student_id != st.student_id:
+        st.student_id = student_id
 
     name = str(v.get("name") or "").strip()
     if name:
