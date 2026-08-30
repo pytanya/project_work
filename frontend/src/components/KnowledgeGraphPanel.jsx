@@ -4,6 +4,7 @@
 import { useMemo, useState, useCallback, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import NoteItem from './NoteItem'
+import LatexText from './LatexText'
 
 const EDGE_COLORS = {
   part_of: '#64DFDF',
@@ -313,8 +314,10 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
   const [wiki, setWiki] = useState(null)
   const [related, setRelated] = useState(null)
   const [expanded, setExpanded] = useState(false)
-  // Авто-свёртка канваса при малом числе тем (<5) — экономия места в сайдбаре (#7)
-  const [collapsed, setCollapsed] = useState(true)
+  // Авто-свёртка канваса — начинаем раскрытым, пользователь может свернуть
+  const [collapsed, setCollapsed] = useState(false)
+  // Ref для отслеживания появления новых данных (автораскрытие)
+  const prevNodesLenRef = useRef(0)
   // Структурные узлы (разделы/уроки) скрыты по умолчанию — показываем понятийные (5.3)
   const [showStructural, setShowStructural] = useState(false)
   // Плавающее окно: позиция (null = по центру) + перетаскивание за заголовок
@@ -391,6 +394,16 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
 
   // Keep activeId ref in sync without restarting animation
   useEffect(() => { activeIdRef.current = activeTopic || selected?.id || null }, [activeTopic, selected])
+
+  // Авто-раскрытие графа при появлении данных (граф построен)
+  useEffect(() => {
+    const prevLen = prevNodesLenRef.current
+    const curLen = (nodes || []).length
+    if (curLen > 0 && prevLen === 0) {
+      setCollapsed(false)  // Раскрываем граф при первом появлении данных
+    }
+    prevNodesLenRef.current = curLen
+  }, [nodes])
 
   /* canvas sizing — в плавающем окне масштабируется под высоту окна */
   const canvasH = expanded ? Math.max(420, Math.round(winH * 0.68)) : 260
@@ -647,8 +660,8 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
   const selectedId = activeTopic || selected?.id
   const activeNode = (nodes || []).find((n) => n.id === activeTopic)
 
-  // Авто-свёртка: при малом числе тем канвас свёрнут, но пользователь может раскрыть
-  const autoCollapsed = collapsed && topics.length < 5 && !expanded
+  // Пользователь может свернуть/раскрыть канвас вручную
+  const autoCollapsed = collapsed && !expanded
 
   const panel = (
     <div className={`card graph-panel ${expanded ? 'graph-panel--float' : ''}`}>
@@ -677,7 +690,7 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
       )}
       {autoCollapsed && (
         <div className="graph-panel-empty" style={{ padding: '6px 12px', fontSize: '12px' }}>
-          Мало тем — канвас свёрнут. <button className="link" onClick={() => setCollapsed(false)} style={{ fontSize: '12px' }}>Показать</button>
+          Граф свёрнут. <button className="link" onClick={() => setCollapsed(false)} style={{ fontSize: '12px' }}>Показать</button>
         </div>
       )}
       {!autoCollapsed && <div ref={wrapRef} className="graph-canvas-wrap"
@@ -687,7 +700,7 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
         <canvas ref={canvasRef} className="graph-canvas" />
         {tooltip && (
           <div className="kg-tooltip" style={{ left: tooltip.left, top: tooltip.top }}>
-            <div className="kg-tooltip-title">{tooltip.node.title}</div>
+            <div className="kg-tooltip-title"><LatexText text={tooltip.node.title} /></div>
             <div className="kg-tooltip-meta">
               <span className="kg-tooltip-type">{TYPE_LABELS[tooltip.node.type] || 'Тема'}</span>
               {tooltip.node.section_number && <span>§{tooltip.node.section_number}</span>}
@@ -724,7 +737,7 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
       {selected && (
         <div className="graph-wiki-card">
           <button className="graph-wiki-close" onClick={() => setSelected(null)}>✕</button>
-          <div className="graph-wiki-title">{selected.title}</div>
+          <div className="graph-wiki-title"><LatexText text={selected.title} /></div>
           <button className="graph-wiki-study" onClick={() => onSelect && onSelect(selected)}
             disabled={busy}>
             📖 Изучить тему
@@ -750,7 +763,7 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
                   {wiki.concepts.map((c, i) => <span key={i} className="graph-wiki-concept">{c}</span>)}
                 </div>
               )}
-              {wiki.body && <div className="graph-wiki-body">{wiki.body}</div>}
+              {wiki.body && <div className="graph-wiki-body"><LatexText text={wiki.body} /></div>}
             </>
           )}
           {!wiki && <div className="muted">Статья ещё не создана — пройдите квиз по теме</div>}
@@ -767,7 +780,7 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
                       const pseudo = { id: r.target, title: r.target_title, type: r.target_type }
                       onSelect(pseudo); openNode(pseudo)
                     }}>
-                    {r.target_title}
+                    <LatexText text={r.target_title} />
                   </button>
                 ))}
             </div>
@@ -787,7 +800,7 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
             {n.mastery !== undefined && (
               <span className="chip-mastery" style={{ background: masteryColor(n.mastery) }} />
             )}
-            <span className="chip-text">{n.title}</span>
+            <span className="chip-text"><LatexText text={n.title} /></span>
           </button>
         ))}
         {!query.trim() && Object.entries(grouped.byParent).map(([pid, children]) => (
@@ -796,7 +809,7 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
               onClick={() => { const p = nodeMap[pid]; if (p) { onSelect(p); openNode(p) } }}
               disabled={busy}
               title={nodeMap[pid]?.title || pid}>
-              <span className="topic-group-title">{nodeMap[pid]?.title || pid}</span>
+              <span className="topic-group-title"><LatexText text={nodeMap[pid]?.title || pid} /></span>
               <span className="topic-group-count">{children.length}</span>
             </button>
             {children.map((n) => (
@@ -809,7 +822,7 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
                 {n.mastery !== undefined && (
                   <span className="chip-mastery" style={{ background: masteryColor(n.mastery) }} />
                 )}
-                <span className="chip-text">{n.title}</span>
+                <span className="chip-text"><LatexText text={n.title} /></span>
               </button>
             ))}
           </div>
