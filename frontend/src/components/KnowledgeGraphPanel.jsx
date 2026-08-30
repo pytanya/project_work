@@ -323,6 +323,8 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
   // Плавающее окно: позиция (null = по центру) + перетаскивание за заголовок
   const [floatPos, setFloatPos] = useState(null)
   const [dragging, setDragging] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState(null)
   const floatRef = useRef(null)
   const floatDragRef = useRef(null)
   // Высота окна — для масштабируемого канваса в плавающем режиме
@@ -577,6 +579,33 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
   const zoomIn = useCallback(() => applyZoom(1.3), [applyZoom])
   const zoomOut = useCallback(() => applyZoom(0.75), [applyZoom])
 
+  // Экспорт OKF-бандла знаний учебника (index + log + topics/*.md) — переносимый
+  // формат (райд #4). Эндпоинт уже существует и изолирован по сессии: данные другого
+  // ученика/предмета не затрагиваются. Best-effort: при сбое показываем ошибку.
+  const exportOKF = useCallback(async () => {
+    const sid = sessionId || sessionStorage.getItem('edututor_sid') || ''
+    if (!sid) { setExportError('Сессия не определена.'); return }
+    setExporting(true)
+    setExportError(null)
+    try {
+      const res = await fetch(`/api/sessions/${sid}/knowledge-package`)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const b = await res.json()
+      const blob = new Blob([b.index || ''], { type: 'text/markdown;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `okf-${sid}.md`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    } catch (e) {
+      setExportError(String(e.message || e))
+    }
+    setExporting(false)
+  }, [sessionId])
+
   const fitToView = useCallback(() => {
     const sim = simRef.current; if (!sim || !sim.nodes.length) return
     const c = canvasRef.current; if (!c) return
@@ -684,7 +713,16 @@ export default function KnowledgeGraphPanel({ nodes = [], edges = [], activeTopi
           title={expanded ? 'Свернуть' : 'Открыть в окне'}>
           {expanded ? '⊟' : '⛶'}
         </button>
+        <button className="graph-panel__toggle" onClick={exportOKF} disabled={exporting}
+          title="Экспортировать базу знаний учебника в OKF-бандл">
+          {exporting ? '⏳' : '⬇'}
+        </button>
       </div>
+      {exportError && (
+        <div className="muted" style={{ color: 'var(--err)', padding: '4px 12px', fontSize: '12px' }}>
+          Экспорт OKF: {exportError}
+        </div>
+      )}
       {activeNode && (
         <div className="active-topic">Изучаем: <strong>{activeNode.title}</strong></div>
       )}

@@ -243,6 +243,28 @@ class TestStudentNamespacing:
         assert summary[0]["articles"][0]["topic"] == "Кант"
         assert summary[0]["articles"][0]["mastery"] == 0.9
 
+    def test_delete_article(self, tmp_path):
+        """delete убирает статью и обновляет индекс предмета."""
+        wiki = KnowledgeWiki(tmp_path)
+        wiki.upsert(WikiArticle(subject="Философия", topic="Кант"))
+        wiki.upsert(WikiArticle(subject="Философия", topic="Гегель"))
+        assert wiki.delete("Философия", "Кант") is True
+        assert wiki.get("Философия", "Кант") is None
+        assert wiki.get("Философия", "Гегель") is not None  # сосед не задет
+        assert {a.topic for a in wiki.list_articles("Философия")} == {"Гегель"}
+
+    def test_delete_missing_returns_false(self, tmp_path):
+        wiki = KnowledgeWiki(tmp_path)
+        assert wiki.delete("Философия", "Нет такой темы") is False
+
+    def test_delete_last_article_clears_index(self, tmp_path):
+        """Удаление последней статьи предмета не оставляет индекс (каталог пуст)."""
+        wiki = KnowledgeWiki(tmp_path)
+        wiki.upsert(WikiArticle(subject="Философия", topic="Кант"))
+        assert wiki.delete("Философия", "Кант") is True
+        # index не пересоздаётся (нет статей), каталог остаётся пустым
+        assert wiki.list_articles("Философия") == []
+
     def test_enrich_body_with_llm(self, tmp_path):
         """Wiki-LLM: тело статьи генерируется из RAG-контекста."""
         from types import SimpleNamespace

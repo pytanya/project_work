@@ -94,3 +94,19 @@ def wiki_article(subject: str, topic: str, student_id: str = Query(default=""),
     if art is None:
         raise HTTPException(status_code=404, detail="Тема не найдена в базе знаний")
     return art.to_dict()
+
+
+@router.delete("/{subject}/{topic}")
+def wiki_delete(subject: str, topic: str, student_id: str = Query(default=""),
+                _store: SessionStore = Depends(get_store)):
+    """Удалить wiki-статью темы (персонально для ученика).
+
+    Изолированно: student_id определяет namespace, subject/topic — конкретную
+    статью; удаляется только её файл + обновляется индекс предмета. Используется
+    для очистки мусорных карточек от веб-скрапинга (домены, «Мощность. единицы
+    измерения» и т.п.), которые не относятся к реальной теме.
+    """
+    deleted = _wiki(student_id).delete(subject, topic)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Тема не найдена в базе знаний")
+    return {"deleted": True, "subject": subject, "topic": topic}

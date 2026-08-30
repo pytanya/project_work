@@ -452,6 +452,12 @@ body {
   font-size: 14px; cursor: pointer;
 }
 .topic-modal__close:hover { border-color: var(--err); color: var(--err); }
+.topic-modal__delete {
+  position: absolute; top: 12px; right: 48px; width: 30px; height: 30px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--card); color: var(--ink-soft);
+  font-size: 14px; cursor: pointer;
+}
+.topic-modal__delete:hover { border-color: var(--err); color: var(--err); background: var(--red-soft); }
 .topic-modal__meta { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .topic-modal__subject {
   font-family: var(--font-mono); font-size: 11px; font-weight: 700; text-transform: uppercase;

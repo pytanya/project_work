@@ -653,6 +653,32 @@ class TestWiki:
         assert client.get("/api/wiki/Нет/Нет").status_code == 404
         assert client.get("/api/wiki/Нет").status_code == 404
 
+    def test_delete_article(self, client, monkeypatch, tmp_path):
+        """DELETE /api/wiki/{subject}/{topic}: удаление карточки + изоляция ученика."""
+        from src.wiki import KnowledgeWiki, WikiArticle
+
+        self._seed(tmp_path)
+        monkeypatch.setattr("api.routes.wiki.default_settings.KNOWLEDGE_WIKI_DIR", tmp_path)
+        # Ученик A — персональная статья
+        wiki_a = KnowledgeWiki(tmp_path, student_id="stu_a")
+        wiki_a.upsert(WikiArticle(subject="физика", topic="Мощность", mastery=0.5))
+        # Ученик B — своя статья с тем же названием (не должна задеваться)
+        wiki_b = KnowledgeWiki(tmp_path, student_id="stu_b")
+        wiki_b.upsert(WikiArticle(subject="физика", topic="Мощность", mastery=0.9))
+
+        r = client.delete("/api/wiki/физика/Мощность?student_id=stu_a")
+        assert r.status_code == 200
+        assert r.json()["deleted"] is True
+        # статья ученика A удалена, B не тронута
+        assert wiki_a.get("физика", "Мощность") is None
+        assert wiki_b.get("физика", "Мощность") is not None
+        assert wiki_b.get("физика", "Мощность").mastery == 0.9
+
+    def test_delete_missing_404(self, client, monkeypatch, tmp_path):
+        monkeypatch.setattr("api.routes.wiki.default_settings.KNOWLEDGE_WIKI_DIR", tmp_path)
+        r = client.delete("/api/wiki/Нет/Нет")
+        assert r.status_code == 404
+
 
 class TestWikiEnrich:
     """POST /api/wiki/enrich: изложение темы по требованию (не зависит от сессии)."""

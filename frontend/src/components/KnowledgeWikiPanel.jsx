@@ -132,6 +132,27 @@ export default function KnowledgeWikiPanel({ studentId = '', studentName = '', i
     setReading({ subject: subjects[si].subject || 'тема', article: subjects[si].articles[ai] })
   }
 
+  const deleteTopic = async () => {
+    if (!reading) return
+    const subject = reading.subject
+    const topic = reading.article.topic || reading.article.title
+    setEnriching(false)
+    setEnrichNote(null)
+    try {
+      const res = await fetch(`/api/wiki/${encodeURIComponent(subject)}/${encodeURIComponent(topic)}?student_id=${encodeURIComponent(studentId || '')}`, {
+        method: 'DELETE',
+      })
+      if (res.ok) {
+        setReading(null)
+        await fetchWiki()
+      } else {
+        setEnrichNote('Не удалось удалить карточку (ошибка сервера).')
+      }
+    } catch (_) {
+      setEnrichNote('Не удалось удалить карточку: нет связи с сервером.')
+    }
+  }
+
   const enrichTopic = async () => {
     if (!reading) return
     setEnriching(true)
@@ -279,7 +300,7 @@ export default function KnowledgeWikiPanel({ studentId = '', studentName = '', i
       )}
       <TopicModal article={reading?.article} subject={reading?.subject}
         onClose={() => setReading(null)} onEnrich={enrichTopic} enriching={enriching}
-        enrichNote={enrichNote} />
+        enrichNote={enrichNote} onDelete={deleteTopic} />
     </div>
   )
 }
