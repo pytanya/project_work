@@ -4,6 +4,7 @@
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import NoteItem from './NoteItem'
+import LatexText from './LatexText'
 
 function masteryClass(m) {
   if (m >= 0.75) return 'high'
@@ -51,7 +52,7 @@ export default function TopicModal({ article, subject, onClose, onEnrich, enrich
           {showCurriculum && <span className="topic-modal__badge" title="программа/ФГОС">{article.curriculum}</span>}
           {article.okf_version && <span className="topic-modal__badge okf">OKF {article.okf_version}</span>}
         </div>
-        <h2 className="topic-modal__title">{article.title || article.topic}</h2>
+        <h2 className="topic-modal__title"><LatexText text={article.title || article.topic} /></h2>
 
         {/* Прогресс: отдельный визуальный блок с аккордеоном */}
         <div className={`topic-modal__progress ${cls}`}>
@@ -117,7 +118,7 @@ export default function TopicModal({ article, subject, onClose, onEnrich, enrich
         {hasBody && (
           <div className="topic-modal__body">
             <div className="topic-modal__section-label">Изложение темы</div>
-            <div className="topic-modal__body-text">{article.body}</div>
+            <div className="topic-modal__body-text"><LatexText text={article.body} /></div>
           </div>
         )}
 

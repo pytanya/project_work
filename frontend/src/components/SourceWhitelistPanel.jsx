@@ -112,7 +112,15 @@ export default function SourceWhitelistPanel({
           (ранее SourceSearchPanel), не прячутся за аккордеоном политики. */}
       <div className="source-policy__status">
         <div className={`source-status ${status || 'idle'}`}>
-          {STATUS_LABELS[status] || status || STATUS_LABELS.idle}
+          {(status === 'searching' || status === 'indexing') && (
+            <span className="source-status__pulse" />
+          )}
+          <span className="source-status__text">
+            {STATUS_LABELS[status] || status || STATUS_LABELS.idle}
+          </span>
+          {list.length > 0 && (
+            <span className="source-status__count">{list.length} ист.</span>
+          )}
         </div>
         {note && <div className="source-note">{note}</div>}
         {author && (
@@ -129,6 +137,7 @@ export default function SourceWhitelistPanel({
                   <a href={s.url} target="_blank" rel="noopener noreferrer" title={s.url}>
                     {s.title || hostOf(s.url)}
                   </a>
+                  <span className="source-domain-badge">{hostOf(s.url)}</span>
                   {s.license && <span className="muted"> · {s.license}</span>}
                 </li>
               ))}
@@ -140,18 +149,18 @@ export default function SourceWhitelistPanel({
             <div className="source-list-title">Локальный учебник:</div>
             <ul>
               {localPdf.map((s, i) => (
-                <li key={`${s.path}-${i}`}>{s.path || 'PDF'}</li>
+                <li key={`${s.path}-${i}`}>📄 {s.path || 'PDF'}</li>
               ))}
             </ul>
           </div>
         )}
         {webPages.length === 0 && localPdf.length === 0 && (status === 'ready' || status === 'done') && (
           <div className="source-note muted" style={{ fontSize: '12px', padding: '4px 0' }}>
-            Источник проиндексирован, материал готов к использованию
+            ✅ Источник проиндексирован, материал готов к использованию
           </div>
         )}
         <button onClick={onFind} className="btn" disabled={busy}>
-          {busy ? 'Работаю…' : 'Найти учебник'}
+          {busy ? '⏳ Работаю…' : '🔍 Найти учебник'}
         </button>
       </div>
 

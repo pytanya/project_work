@@ -2,6 +2,7 @@
 // Тепловая карта тем по предметам (цвет = уровень мастерства), клик по ячейке
 // раскрывает тему в браузере базы знаний ниже.
 import { useState } from 'react'
+import LatexText from './LatexText'
 
 function masteryClass(m) {
   if (m >= 0.75) return 'high'
@@ -39,7 +40,7 @@ export default function MasteryWall({ subjects = [], onSelect }) {
                       className={`mastery-wall__cell ${masteryClass(a.mastery)}`}
                       title={`${a.topic} · ${Math.round((a.mastery || 0) * 100)}%`}
                       onClick={() => onSelect && onSelect(s.subject, a.topic)}>
-                      {a.topic}
+                      <LatexText text={a.topic} />
                     </button>
                   ))}
                 </div>

@@ -2,6 +2,7 @@
 // subject sections, topic cards with mastery progress bars, stats, notes.
 // Клик по теме → модальное окно чтения (источник + изложение + понятия).
 import { useEffect, useState, useMemo, useRef } from 'react'
+import LatexText from './LatexText'
 import MasteryWall from './MasteryWall'
 import TopicModal from './TopicModal'
 
@@ -254,7 +255,7 @@ export default function KnowledgeWikiPanel({ studentId = '', studentName = '', i
                               onClick={() => setReading({ subject: s.subject || 'тема', article: a })}
                               title="Открыть для чтения">
                               <span className={`wiki-article__dot ${masteryClass(a.mastery)}`} />
-                              <span className="wiki-article__title">{a.title || a.topic}</span>
+                              <span className="wiki-article__title"><LatexText text={a.title || a.topic} /></span>
                               {a.okf_version && <span className="wiki-article__src" title="источник OKF/LLM-wiki">OKF</span>}
                               <span className="wiki-article__pct">{pct}%</span>
                             </button>
