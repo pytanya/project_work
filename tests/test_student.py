@@ -76,3 +76,30 @@ class TestStudentStore:
         store.log_session("", {"topic": "x"})
         store.log_session(None, {"topic": "x"})
         assert store.list_sessions("") == []
+
+
+from src.student_kg import StudentKnowledgeGraph
+
+def test_set_topic_respects_explicit_status():
+    kg = StudentKnowledgeGraph(student_id="s1")
+    ts = kg.set_topic(topic_id="t1", status="in_progress")
+    assert ts.status == "in_progress"
+
+def test_mark_in_progress_sets_status():
+    kg = StudentKnowledgeGraph(student_id="s1")
+    ts = kg.mark_in_progress("t1", title="Тема 1")
+    assert ts.status == "in_progress"
+    assert ts.attempts == 0
+
+def test_mark_in_progress_does_not_downgrade_mastered():
+    kg = StudentKnowledgeGraph(student_id="s1")
+    kg.set_topic(topic_id="t1", mastery=0.9, attempts=5, correct=5)  # -> mastered
+    ts = kg.mark_in_progress("t1")
+    assert ts.status == "mastered"
+
+def test_auto_mastery_requires_status_none():
+    kg = StudentKnowledgeGraph(student_id="s1")
+    ts = kg.set_topic(topic_id="t1", mastery=0.85, attempts=3, correct=3)
+    assert ts.status == "mastered"
+    ts = kg.set_topic(topic_id="t1", mastery=0.3, attempts=1, correct=0)
+    assert ts.status == "in_progress"

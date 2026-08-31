@@ -122,9 +122,12 @@ class StudentKnowledgeGraph(BaseModel):
         weak_areas: Optional[List[str]] = None,
         relations: Optional[Dict[str, List[str]]] = None,
         curriculum_code: Optional[str] = None,
+        status: Optional[STATUS_LITERAL] = None,
+        last_studied: Optional[str] = None,
     ) -> TopicStatus:
-        """Upsert topic status. Если attempts > 0 и mastery >= 0.8 → mastered."""
-        now = _now_iso()
+        """Upsert topic status. Если status задан явно — не пересчитываем.
+        Иначе авто-переход: attempts>=3 и mastery>=0.8 → mastered; attempts>0 → in_progress."""
+        now = last_studied or _now_iso()
         prev = self.topics.get(topic_id)
 
         if prev:
@@ -137,13 +140,13 @@ class StudentKnowledgeGraph(BaseModel):
             title = title or prev.title
             subject = subject or prev.subject
 
-        # Авто-переход в mastered: mastery >= 0.8 и >= 3 попыток
-        if attempts >= 3 and mastery >= 0.8:
-            status: STATUS_LITERAL = "mastered"
-        elif attempts > 0:
-            status = "in_progress"
-        else:
-            status = "not_studied"
+        if status is None:
+            if attempts >= 3 and mastery >= 0.8:
+                status = "mastered"
+            elif attempts > 0:
+                status = "in_progress"
+            else:
+                status = "not_studied"
 
         ts = TopicStatus(
             topic_id=topic_id,
@@ -163,12 +166,16 @@ class StudentKnowledgeGraph(BaseModel):
         return ts
 
     def mark_in_progress(self, topic_id: str, title: str = "", subject: str = "") -> TopicStatus:
-        """Тема начата (урок показан, квиз не пройден) → in_progress."""
+        """Тема начата (урок показан) → in_progress; mastered не даунгрейдим."""
+        prev = self.topics.get(topic_id)
+        status: STATUS_LITERAL = "in_progress"
+        if prev is not None and prev.status == "mastered":
+            status = "mastered"
         return self.set_topic(
             topic_id=topic_id,
             title=title,
             subject=subject,
-            status="in_progress",
+            status=status,
             last_studied=_now_iso(),
         )
 
