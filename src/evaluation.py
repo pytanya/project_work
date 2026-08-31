@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import adaptive
 from .judge import judge_evaluation
+from .scaffold import hint_for as scaffold_hint_for
 from .states import TutorState
 from . import tutor as tutor_mod
 
@@ -134,93 +135,137 @@ def evaluate_and_record(
     graded = tutor_mod.evaluate_answer(
         card.question, answer, context, st, llm_call=getattr(deps, "eval_llm", None)
     )
-    tutor_mod.update_knowledge_map(st, card.topic, graded.score)
-    if st.bandit is not None:
-        # LinUCB: обновляем сыгранную руку и выбираем следующую сложность по контексту
-        features = adaptive.bandit_features(st)
-        adaptive.update_counters(st, graded.correct)
-        played = adaptive.difficulty_arm(card.difficulty)
-        st.bandit = adaptive.bandit_update(st.bandit, features, played, graded.score)
-        st.difficulty = adaptive.arm_difficulty(
-            adaptive.bandit_select(st.bandit, features, current_idx=played)
-        )
-    else:
-        tutor_mod.adjust_difficulty(st, graded.correct)
 
-    # Судья: контракт «оценка ответа ученика» (К-4). Для детерминированной сверки
-    # с эталоном (закрытый вопрос, model_used="reference") судить нечего.
-    deterministic = graded.model_used == "reference"
-    if not deterministic:
-        judge_result = judge_evaluation(
-            card.question,
-            answer,
-            {"score": graded.score, "correct": graded.correct, "feedback": graded.feedback},
-            judge_call=getattr(deps, "judge_llm", None),
-        )
-        st.last_judge_score = judge_result.avg_score
-    else:
-        judge_result = None
+    enable_scaffolding = bool(getattr(getattr(deps, "settings", None), "ENABLE_SCAFFOLDING", True))
+    max_hints = int(getattr(getattr(deps, "settings", None), "MAX_HINTS_PER_QUESTION", 2))
 
-    message = f"{'Верно' if graded.correct else 'Ошибка'} (оценка {round(graded.score * 10, 1)}/10)."
-    if graded.feedback:
-        message += f" {graded.feedback}"
-    explanation: Optional[Dict[str, Any]] = None
-    if not graded.correct and not deterministic:
-        explanation = tutor_mod.explain_error(
-            card.question, answer, context, st, llm_call=getattr(deps, "expert_llm", None), on_token=deps.on_token
-        )
-        message += f"\nОбъяснение: {explanation['text']}"
-        if explanation["citation"]["paragraph"]:
-            message += f"\nЦитата: {explanation['citation']['paragraph']}"
-    st.agent_message = message
-    st.current_question = None
-    st.pending_answer = None
+    def _finalize(correct_final: bool) -> Tuple[TutorState, str, Optional[Any], Optional[Dict[str, Any]]]:
+        """Финализация вопроса: учёт в knowledge_map/bandit/счётчиках, wiki, KG, quiz_complete."""
+        nonlocal st
+        final_score = graded.score
+        tutor_mod.update_knowledge_map(st, topic, final_score)
+        if st.bandit is not None:
+            # LinUCB: обновляем сыгранную руку и выбираем следующую сложность по контексту
+            features = adaptive.bandit_features(st)
+            adaptive.update_counters(st, graded.correct)
+            played = adaptive.difficulty_arm(card.difficulty)
+            st.bandit = adaptive.bandit_update(st.bandit, features, played, final_score)
+            st.difficulty = adaptive.arm_difficulty(
+                adaptive.bandit_select(st.bandit, features, current_idx=played)
+            )
+        else:
+            tutor_mod.adjust_difficulty(st, graded.correct)
 
-    # Экспорт учителю: заполняем запись вопроса оценкой/судьёй
-    if st.records and st.records[-1].get("question_id") == card.question_id:
-        st.records[-1].update({
-            "student_answer": answer,
-            "score01": round(graded.score, 4),
-            "correct": graded.correct,
-            "feedback": graded.feedback,
-            "model_used": graded.model_used,
-            "judge_score": judge_result.avg_score if judge_result else None,
-            "question": card.question if card else "",
-            "correct_answer": ", ".join(st.current_answers) or "",
-        })
+        # Судья: контракт «оценка ответа ученика» (К-4). Для детерминированной сверки
+        # с эталоном (закрытый вопрос, model_used="reference") судить нечего.
+        deterministic = graded.model_used == "reference"
+        if not deterministic:
+            judge_result = judge_evaluation(
+                card.question,
+                answer,
+                {"score": graded.score, "correct": graded.correct, "feedback": graded.feedback},
+                judge_call=getattr(deps, "judge_llm", None),
+            )
+            st.last_judge_score = judge_result.avg_score
+        else:
+            judge_result = None
 
-    if emit is not None:
-        emit("tutor.explanation" if not graded.correct else "system",
-             message=message,
-             citation=(explanation.get("citation") if explanation else None) if not graded.correct else None,
-             correct_count=st.correct_count,
-             answered_count=st.answered_count)
+        message = f"{'Верно' if graded.correct else 'Ошибка'} (оценка {round(graded.score * 10, 1)}/10)."
+        if graded.feedback:
+            message += f" {graded.feedback}"
+        explanation: Optional[Dict[str, Any]] = None
+        if not graded.correct and not deterministic:
+            explanation = tutor_mod.explain_error(
+                card.question, answer, context, st, llm_call=getattr(deps, "expert_llm", None), on_token=deps.on_token
+            )
+            message += f"\nОбъяснение: {explanation['text']}"
+            if explanation["citation"]["paragraph"]:
+                message += f"\nЦитата: {explanation['citation']['paragraph']}"
+        st.agent_message = message
+        st.current_question = None
+        st.pending_answer = None
+        st.hint_level = 0
+        st.attempts_on_question = 0
+        st.retry_question_id = None
 
-    # Knowledge Wiki: применяем результат текущего ответа к статье темы (идемпотентно)
-    try:
-        from .wiki import KnowledgeWiki
-
-        wiki = KnowledgeWiki(deps.settings.KNOWLEDGE_WIKI_DIR,
-                             student_id=getattr(st, "student_id", None) or "")
+        # Экспорт учителю: заполняем запись вопроса оценкой/судьёй
         if st.records and st.records[-1].get("question_id") == card.question_id:
-            wiki.apply_record(st, st.records[-1])
-            if card and card.topic:
-                art = wiki.get(getattr(st, "subject", None) or "общая тема", card.topic)
-                if art is None or not (art.body or "").strip():
-                    wiki.enrich_body(st, card.topic, context, llm_call=getattr(deps, "tutor_llm", None))
-                # источник информации (URL/учебник) из RAG-чанков
-                src = _topic_source(deps.store, card.topic, st)
-                if src:
-                    wiki.set_source(st, card.topic, src)
-    except Exception as exc:
-        logger.warning("Knowledge Wiki per-answer update failed: %s", exc)
+            st.records[-1].update({
+                "student_answer": answer,
+                "score01": round(graded.score, 4),
+                "correct": graded.correct,
+                "feedback": graded.feedback,
+                "model_used": graded.model_used,
+                "judge_score": judge_result.avg_score if judge_result else None,
+                "question": card.question if card else "",
+                "correct_answer": ", ".join(st.current_answers) or "",
+            })
 
-    # Student Knowledge Graph (roadmap #4): живой синк темы на каждый ответ
-    if card and card.topic:
-        sync_student_kg(st, deps, card.topic)
+        if emit is not None:
+            emit("tutor.explanation" if not graded.correct else "system",
+                 message=message,
+                 citation=(explanation.get("citation") if explanation else None) if not graded.correct else None,
+                 correct_count=st.correct_count,
+                 answered_count=st.answered_count)
 
-    if st.answered_count >= st.num_questions:
-        st.quiz_complete = True
-        st.session_status = "completed"
+        # Knowledge Wiki: применяем результат текущего ответа к статье темы (идемпотентно)
+        try:
+            from .wiki import KnowledgeWiki
 
-    return st, message, judge_result, explanation
+            wiki = KnowledgeWiki(deps.settings.KNOWLEDGE_WIKI_DIR,
+                                 student_id=getattr(st, "student_id", None) or "")
+            if st.records and st.records[-1].get("question_id") == card.question_id:
+                wiki.apply_record(st, st.records[-1])
+                if card and card.topic:
+                    art = wiki.get(getattr(st, "subject", None) or "общая тема", card.topic)
+                    if art is None or not (art.body or "").strip():
+                        wiki.enrich_body(st, card.topic, context, llm_call=getattr(deps, "tutor_llm", None))
+                    # источник информации (URL/учебник) из RAG-чанков
+                    src = _topic_source(deps.store, card.topic, st)
+                    if src:
+                        wiki.set_source(st, card.topic, src)
+        except Exception as exc:
+            logger.warning("Knowledge Wiki per-answer update failed: %s", exc)
+
+        # Student Knowledge Graph (roadmap #4): живой синк темы на каждый ответ
+        if card and card.topic:
+            sync_student_kg(st, deps, card.topic)
+
+        if st.answered_count >= st.num_questions:
+            st.quiz_complete = True
+            st.session_status = "completed"
+
+        return st, message, judge_result, explanation
+
+    # --- Scaffolding: лестница подсказок (B5). При ошибке вопрос НЕ финализируется,
+    # выдаётся quiz.hint (уровень 1 → 2), и route_tutor ждёт повторный ответ.
+    retry = (st.retry_question_id == (card.question_id if card else None))
+    if enable_scaffolding and card is not None and not graded.correct:
+        if not retry and st.hint_level == 0:
+            # Первая ошибка: не финализируем, даём подсказку уровня 1
+            st.hint_level = 1
+            st.attempts_on_question = 1
+            st.retry_question_id = card.question_id
+            st.pending_answer = None
+            hint = card.hint or scaffold_hint_for(card.question, ", ".join(st.current_answers), context, 1)
+            st.agent_message = f"Пока неверно. Подсказка: {hint}"
+            if st.records and st.records[-1].get("question_id") == card.question_id:
+                st.records[-1].update({"student_answer": answer, "score01": 0.0, "correct": False,
+                                       "feedback": "Первый неверный ответ — ждём повторную попытку"})
+            if emit is not None:
+                emit("quiz.hint", question_id=card.question_id, hint=hint, level=1,
+                     attempts_left=max_hints - 1, subtask=False)
+            return st, st.agent_message, None, None
+        if retry and st.hint_level < max_hints:
+            # Ещё не исчерпали подсказки
+            st.hint_level += 1
+            st.attempts_on_question += 1
+            st.pending_answer = None
+            hint = scaffold_hint_for(card.question, ", ".join(st.current_answers), context, st.hint_level)
+            st.agent_message = f"Пока неверно. Подсказка ({st.hint_level}/{max_hints}): {hint}"
+            if emit is not None:
+                emit("quiz.hint", question_id=card.question_id, hint=hint, level=st.hint_level,
+                     attempts_left=max_hints - st.hint_level, subtask=False)
+            return st, st.agent_message, None, None
+
+    return _finalize(graded.correct)

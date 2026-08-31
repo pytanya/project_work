@@ -61,6 +61,7 @@ NODE_TUTOR_NEXT = "tutor_next"
 NODE_AGENT_TUTOR = "agent_tutor_node"
 NODE_GENERATE_QUESTION = "generate_question"
 NODE_EVALUATE_ANSWER = "evaluate_answer"
+NODE_SUBTASK = "subtask"
 NODE_SUMMARY = "summary"
 
 
@@ -1744,11 +1745,13 @@ def source_failed_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
 def route_tutor(state: TutorState) -> str:
     if state.quiz_complete or state.session_status == "failed":
         return NODE_SUMMARY
-    if state.current_question is None:
-        return NODE_GENERATE_QUESTION
+    if state.subtask_queue is not None:
+        return NODE_SUBTASK
     if state.pending_answer is not None:
         return NODE_EVALUATE_ANSWER
-    return NODE_GENERATE_QUESTION
+    if state.current_question is None:
+        return NODE_GENERATE_QUESTION
+    return END  # активный вопрос ждёт ответа (в т.ч. после подсказки)
 
 
 def route_tutor_agent(state: TutorState) -> str:
@@ -2083,6 +2086,7 @@ def build_graph(deps: Optional[GraphDeps] = None, checkpointer: Any = None) -> A
                 NODE_GENERATE_QUESTION: NODE_GENERATE_QUESTION,
                 NODE_EVALUATE_ANSWER: NODE_EVALUATE_ANSWER,
                 NODE_SUMMARY: NODE_SUMMARY,
+                END: END,
             },
         )
         g.add_edge(NODE_GENERATE_QUESTION, END)

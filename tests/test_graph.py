@@ -320,8 +320,9 @@ class TestQuizFlow:
         # q2
         res = _invoke(graph, {**res.model_dump(), "pending_answer": "Воздушная оболочка Земли."})
         assert res.correct_count >= 1
-        # q3
-        res = _invoke(graph, {**res.model_dump(), "pending_answer": "Океан."})
+        # q3: неверный ответ исчерпывает лестницу подсказок (3 попытки) → финализация
+        for _ in range(3):
+            res = _invoke(graph, {**res.model_dump(), "pending_answer": "Океан."})
         assert res.quiz_complete is True
         assert res.session_status == "completed"
         assert res.summary_text and "Квиз завершён" in res.summary_text
@@ -338,7 +339,9 @@ class TestQuizFlow:
         graph = build_graph(deps)
         state = TutorState(num_questions=1, sources=[{"type": "web", "url": "x"}], collection_id="web")
         res = _feed(graph, state, ["студент", "география", "Атмосфера", "нет", "квиз"])
-        res = _invoke(graph, {**res.model_dump(), "pending_answer": "А"})
+        # лестница подсказок: 1-я и 2-я ошибки → quiz.hint; 3-я → финализация (без судьи/эксперта)
+        for _ in range(3):
+            res = _invoke(graph, {**res.model_dump(), "pending_answer": "А"})
         assert "Ошибка" in res.agent_message
         assert "Б" in res.agent_message          # правильный вариант показан без LLM
         assert judged["n"] == 0                   # судья не вызывался
@@ -349,7 +352,9 @@ class TestQuizFlow:
         state = TutorState(num_questions=1, sources=[{"type": "web", "url": "x"}], collection_id="web")
         res = _feed(graph, state, ["студент", "география", "Атмосфера", "нет", "квиз"])
         deps.eval_llm = lambda m: _EVAL_WRONG
-        res = _invoke(graph, {**res.model_dump(), "pending_answer": "Неправильный ответ тут"})
+        # лестница подсказок: 1-я и 2-я ошибки → quiz.hint; 3-я → финализация с объяснением ошибки
+        for _ in range(3):
+            res = _invoke(graph, {**res.model_dump(), "pending_answer": "Неправильный ответ тут"})
         assert "Объяснение:" in res.agent_message
         assert "§12" in res.agent_message
 
@@ -387,7 +392,7 @@ class TestQuizFlow:
         res = _feed(graph, state, ["студент", "география", "Атмосфера", "нет", "квиз"])
         assert res.asked_questions == ["Что такое атмосфера?"]
 
-        res = _invoke(graph, {**res.model_dump(), "pending_answer": "Воздушная оболочка."})
+        res = _invoke(graph, {**res.model_dump(), "pending_answer": "Воздушная оболочка Земли."})
         assert res.current_question is not None
         assert res.current_question.question == "Из каких газов состоит атмосфера?"
         assert res.asked_questions == ["Что такое атмосфера?", "Из каких газов состоит атмосфера?"]
@@ -1181,7 +1186,7 @@ def test_answer_updates_kg_live(make_settings, tmp_path):
     res = _invoke(g, st.model_dump())
     card = res.current_question
     assert card is not None
-    answer = card.options[0] if card.options else "верный ответ"
+    answer = card.options[0] if card.options else "Атмосфера — газовая оболочка Земли"
     res = _invoke(g, {**res.model_dump(), "pending_answer": answer})
     kg = student_store.get_knowledge_graph("stu_test")
     assert kg is not None
@@ -1228,3 +1233,89 @@ def test_mastery_gate_emits_for_unmastered_prereq(make_settings, tmp_path):
     g.invoke(st.model_dump())
     g.invoke(st.model_dump())  # вопрос по теме сгенерирован
     assert any(ev == "system" and data.get("kind") == "mastery.gate" for ev, data in events)
+
+
+def test_hint_ladder_on_wrong_answer(make_settings, tmp_path):
+    """Scaffolding (B5): первый неверный ответ не финализируется — эмитится quiz.hint (level 1)."""
+    s = make_settings(
+        FGOS_REFERENCE_DIR=str(FGOS_DIR),
+        TEXTBOOKS_DOWNLOADS_DIR=str(tmp_path / "downloads"),
+        MAX_INTAKE_ITERATIONS=8,
+        OCR_MIN_TEXT_CHARS=20,
+        KNOWLEDGE_GRAPH_DIR=str(tmp_path / "kg"),
+        KNOWLEDGE_WIKI_DIR=str(tmp_path / "wiki"),
+        SOURCES_CACHE_DIR=str(tmp_path / "sources_cache"),
+        STUDENTS_DIR=str(tmp_path / "students"),
+    )
+    store = NumpyVectorStore("t", FakeEmbedder())
+    store.add([DocChunk(
+        id="c1",
+        text="Атмосфера — воздушная оболочка Земли: азот 78%, кислород 21%. "
+             "Именно она защищает планету и определяет погоду на её поверхности.",
+        subject="география", grade="6", topic="Атмосфера", student_id="stu_hint",
+    )])
+    events = []
+    deps = GraphDeps(embedder=FakeEmbedder(), store=store, settings=s,
+                     tutor_llm=lambda m: _GEN, expert_llm=lambda m: _EXPL,
+                     judge_llm=lambda m: _JUDGE,
+                     on_event=lambda ev, data: events.append((ev, data)))
+    g = build_graph(deps)
+    st = TutorState(student_id="stu_hint", learner_type="schoolchild", grade="6",
+                    subject="география", topic="Атмосфера", mode="quiz",
+                    has_textbook=False, num_questions=2, source_status="ready")
+    st = _invoke(g, st.model_dump())
+    st = _invoke(g, st.model_dump())  # вопрос сгенерирован
+    card = st.current_question
+    assert card is not None
+    # открытый вопрос (мок _GEN): слишком короткий ответ → пре-чек провален → rule-based wrong
+    wrong = "не знаю"
+    st = _invoke(g, {**st.model_dump(), "pending_answer": wrong})
+    hint_events = [d for ev, d in events if ev == "quiz.hint"]
+    assert len(hint_events) == 1
+    assert hint_events[0]["question_id"] == card.question_id
+    assert hint_events[0]["level"] == 1
+    # вопрос НЕ сброшен — ожидаем повторный ответ
+    assert st.current_question is not None
+    assert st.hint_level == 1
+    assert st.attempts_on_question == 1
+    assert st.retry_question_id == card.question_id
+    assert st.answered_count == 0  # не финализирован
+
+
+def test_second_wrong_after_hints_finalizes(make_settings, tmp_path):
+    """Scaffolding (B5): после исчерпания подсказок 3-й неверный ответ финализирует вопрос."""
+    s = make_settings(
+        FGOS_REFERENCE_DIR=str(FGOS_DIR),
+        TEXTBOOKS_DOWNLOADS_DIR=str(tmp_path / "downloads"),
+        MAX_INTAKE_ITERATIONS=8,
+        OCR_MIN_TEXT_CHARS=20,
+        KNOWLEDGE_GRAPH_DIR=str(tmp_path / "kg"),
+        KNOWLEDGE_WIKI_DIR=str(tmp_path / "wiki"),
+        SOURCES_CACHE_DIR=str(tmp_path / "sources_cache"),
+        STUDENTS_DIR=str(tmp_path / "students"),
+    )
+    store = NumpyVectorStore("t", FakeEmbedder())
+    store.add([DocChunk(
+        id="c1",
+        text="Атмосфера — воздушная оболочка Земли: азот 78%, кислород 21%. "
+             "Именно она защищает планету и определяет погоду на её поверхности.",
+        subject="география", grade="6", topic="Атмосфера", student_id="stu_hint",
+    )])
+    deps = GraphDeps(embedder=FakeEmbedder(), store=store, settings=s,
+                     tutor_llm=lambda m: _GEN, expert_llm=lambda m: _EXPL,
+                     judge_llm=lambda m: _JUDGE)
+    g = build_graph(deps)
+    st = TutorState(student_id="stu_hint", learner_type="schoolchild", grade="6",
+                    subject="география", topic="Атмосфера", mode="quiz",
+                    has_textbook=False, num_questions=2, source_status="ready")
+    st = _invoke(g, st.model_dump())
+    st = _invoke(g, st.model_dump())  # вопрос сгенерирован
+    card = st.current_question
+    assert card is not None
+    # лестница подсказок: level 1, level 2, затем 3-й неверный → финализация
+    for _ in range(3):
+        st = _invoke(g, {**st.model_dump(), "pending_answer": "не знаю"})
+    assert st.answered_count == 1
+    assert st.hint_level == 0  # сброшен после финализации
+    assert st.attempts_on_question == 0
+    assert st.retry_question_id is None
