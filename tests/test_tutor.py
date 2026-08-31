@@ -8,6 +8,7 @@ import pytest
 
 from src.config import BASE_DIR, Settings
 from src.states import TutorState
+from src import tutor as tutor_mod
 from src.tutor import (
     adjust_difficulty,
     difficulty_for_grade,
@@ -140,6 +141,45 @@ class TestGenerateQuestion:
         fake = lambda m: '{"question": "Опишите", "options": null, "answer_type": "open", "topic": "Тема"}'
         card = generate_question("Тема", ["контекст"], "hard", state, llm_call=fake)
         assert card.options is None
+
+    def test_generate_question_includes_hint_and_subtasks(self):
+        state = _state(topic="Циклы", difficulty="hard", num_questions=3)
+        raw_json = json.dumps({
+            "question": "Напиши алгоритм поиска максимума в списке.",
+            "options": None,
+            "answer_type": "open",
+            "topic": "Циклы",
+            "correct_answers": ["пройти по элементам и сравнивать с текущим максимумом"],
+            "excerpt": "Алгоритм: начать с первого элемента…",
+            "hint": "Подумай, с какого значения начинать сравнение.",
+            "subtasks": ["Определи начальное значение", "Сравни с каждым элементом", "Обнови максимум"],
+        })
+        card = tutor_mod.generate_question("Циклы", ["Контекст"], "hard", state, llm_call=lambda m: raw_json)
+        assert card.hint == "Подумай, с какого значения начинать сравнение."
+        assert card.subtasks == ["Определи начальное значение", "Сравни с каждым элементом", "Обнови максимум"]
+
+    def test_generate_question_tolerates_missing_hint(self):
+        state = _state(topic="Тема", difficulty="medium", num_questions=3)
+        raw_json = json.dumps({"question": "Вопрос?", "options": None, "answer_type": "open",
+                               "topic": "Тема", "correct_answers": ["ответ"], "excerpt": "текст"})
+        card = tutor_mod.generate_question("Тема", ["Контекст"], "medium", state, llm_call=lambda m: raw_json)
+        assert card.hint is None
+        assert card.subtasks is None
+
+    def test_generate_question_truncates_subtasks_to_3(self):
+        state = _state(topic="Тема", difficulty="hard", num_questions=3)
+        raw_json = json.dumps({
+            "question": "Реши задачу пошагово.",
+            "options": None,
+            "answer_type": "open",
+            "topic": "Тема",
+            "correct_answers": ["ответ"],
+            "excerpt": "текст",
+            "hint": "начни с малого",
+            "subtasks": ["шаг 1", "шаг 2", "шаг 3", "шаг 4", "шаг 5"],
+        })
+        card = tutor_mod.generate_question("Тема", ["Контекст"], "hard", state, llm_call=lambda m: raw_json)
+        assert len(card.subtasks) == 3
 
 
 class TestSimplicityPrecheck:

@@ -310,7 +310,10 @@ def _question_prompt(
             " Верни строго JSON: {\"question\": \"...\", \"options\": [\"...\"] или null, "
             "\"answer_type\": \"single\"|\"multiple\"|\"open\", \"topic\": \"<тема>\", "
             "\"correct_answers\": [\"правильный вариант/модельный ответ\"], "
-            "\"excerpt\": \"<короткий отрывок текста из контекста, на который ссылается вопрос, до 3 строк>\"}. "
+            "\"excerpt\": \"<короткий отрывок текста из контекста, на который ссылается вопрос, до 3 строк>\", "
+            "\"hint\": \"<короткая наводящая подсказка, 1-2 предложения, НЕ раскрывающая ответ>\", "
+            "\"subtasks\": [\"<шаг 1>\", \"<шаг 2>\"] или null (заполняй ТОЛЬКО для многошаговых открытых задач: 1-3 коротких шага разбиения решения)}\". "
+            "Для простых фактологических вопросов hint краткий (одно слово-подсказка), subtasks=null. "
             "Для open-вопроса options=null, correct_answers = [\"эталонный ответ\"]. "
             "Для single — ровно 1 правильный вариант, для multiple — все правильные. "
             "ВАЖНО: варианты-дистракторы делай правдоподобными — они должны быть похожи "
@@ -398,6 +401,12 @@ def generate_question(
     qid = question_id or f"q{len(state.asked_questions) + 1}"
     excerpt_raw = data.get("excerpt")
     excerpt = str(excerpt_raw).strip() if excerpt_raw else ""
+    hint_raw = data.get("hint")
+    hint = str(hint_raw).strip() if isinstance(hint_raw, str) and hint_raw.strip() else None
+    sub_raw = data.get("subtasks")
+    subtasks = [str(x).strip() for x in sub_raw if str(x).strip()] if isinstance(sub_raw, list) and sub_raw else None
+    if subtasks and len(subtasks) > 3:
+        subtasks = subtasks[:3]
     card = QuizCard(
         question_id=qid,
         question=str(data.get("question", "")).strip(),
@@ -405,6 +414,8 @@ def generate_question(
         answer_type=data.get("answer_type") if data.get("answer_type") in ("single", "multiple", "open") else "open",
         difficulty=difficulty,
         topic=str(data.get("topic") or topic),
+        hint=hint,
+        subtasks=subtasks,
         excerpt=excerpt,
     )
     # Эталонные ответы генерирует LLM (мозг); они НЕ входят в QuizCard/UI.
