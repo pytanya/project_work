@@ -219,3 +219,69 @@ function calling вызывает инструменты (интервью, retr
 - [x] **7. Наблюдаемость** (2026-08-22) — `_log_tool_action` в `agent_loop.py`: структурированный лог
       `agent.action tool=… ok=… elapsed_ms=… args=… reason=…` по каждому инструменту
       (intake- и tutor-циклы, 10.2)
+
+---
+
+## 6. Student Knowledge Graph — полная интеграция (roadmap #4)
+
+**Статус: ✅ Сделано (2026-08-31).** Доведён до рабочего контура и подключён во всех
+точках цикла (раньше интеграция была мёртвым кодом — `StudentKnowledgeGraphStore()`
+без `student_store` + несуществующий метод).
+
+**Что сделано:**
+- [x] **Починка статусов** — `set_topic` уважает явный `status`; `mark_in_progress` не
+      даунгрейдит `mastered`; авто-переход `mastered` при attempts≥3 и mastery≥0.8
+- [x] **Реальная интеграция** — `GraphDeps.student_store` (`StudentStore` из
+      `STUDENTS_DIR`), хелпер `_student_kg` (fail-soft); `content_node` → `in_progress`
+      при уроке, `summary_node` → синк knowledge_map+wiki (починка `NameError`)
+- [x] **Живой синк на каждый ответ** — `evaluation.sync_student_kg` (attempts/correct/
+      mastery/weak_areas) после каждой финализированной оценки
+- [x] **Relations из графа учебника** — `sync_relations_from_knowledge_graph`
+      (prerequisite/related по совпадению title темы и узла)
+- [x] **Mastery-гейт (DeepTutor Guided Learning)** — при первом вопросе темы с
+      неосвоенным пререквизитом WS `system` `kind="mastery.gate"` («стоит повторить: Y»);
+      сводка «знания ученика: освоено/слабые» в контексте агента (`_tutor_context`)
+
+---
+
+## 7. Адаптивное усложнение (Scaffolding)
+
+**Статус: ✅ Сделано (2026-08-31).** Лестница подсказок + декомпозиция задачи
+на подзадачи.
+
+**Что сделано:**
+- [x] **`src/scaffold.py`** — `hint_for` (уровень 1 «наводящая», уровень 2 «начни так»;
+      LLM-опция + rule-based fallback), `subtask_step`
+- [x] **`QuizCard.hint/subtasks`** — LLM генерирует подсказку и (для многошаговых открытых
+      задач) 1–3 шага декомпозиции
+- [x] **Лестница подсказок в оценке** — неверный ответ не финализируется сразу: WS
+      `quiz.hint` (level, attempts_left), повторная попытка; после `MAX_HINTS` (2) —
+      финализация + `explain_error` (как раньше)
+- [x] **Декомпозиция** — `subtask_node`: пошаговый разбор (лёгкая проверка ответа),
+      после очереди — повторный `quiz.card` исходного вопроса (`qid-b`)
+- [x] **Агентный слой** — инструмент `give_hint`, правило в `TUTOR_AGENT_PROMPT`
+      («не более двух подсказок»)
+- [x] Флаги `ENABLE_SCAFFOLDING` / `MAX_HINTS_PER_QUESTION`; при выключении —
+      прежнее поведение
+
+---
+
+## 8. Интервальное повторение (Spaced Repetition, SM-2 Question Bank)
+
+**Статус: ✅ Сделано (2026-08-31).** Ошибочные вопросы копятся в банке карточек;
+по запросу — блиц-опрос с обновлением интервалов SM-2.
+
+**Что сделано:**
+- [x] **`src/review.py`** — `ReviewCard` + `ReviewBank` (JSON `data/review_bank/<sid>.json`,
+      атомарная запись, дедуп по sha256 вопроса, fail-soft при битом файле); SM-2:
+      success → `interval*ease`, fail → `interval=1, lapses++`
+- [x] **Запись карточек** — в `_finalize` при неверном ответе (`add_from_record`)
+- [x] **Блиц-поток** — по запросу (`review_requested`) `generate_question_node` берёт
+      должные карточки (`get_due`, лимит `REVIEW_QUIZ_SIZE`), эмитит `quiz.card`
+      (`review=true`), после оценки — SM-2 + синк KG темы; по исчерпании — `review.done`
+- [x] **API** — `GET /api/students/{id}/review` (статистика+dolжные), `POST
+      /api/sessions/{id}/review` (запуск блица); CLI — флаг `--review` + пост-квиз промпт
+- [x] **Агентный слой** — инструменты `start_review` / `submit_review`
+- [x] **UI** — кнопка «Повторить (N)» в панели «Мои знания» (при `due>0`), бейдж
+      «повторение» на карточке, hint/review-пузыри в чате
+- [x] Флаги `ENABLE_SPACED_REPETITION`, `REVIEW_QUIZ_SIZE`, `REVIEW_BANK_MAX_CARDS`

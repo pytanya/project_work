@@ -175,6 +175,41 @@ curl http://127.0.0.1:8000/api/wiki/философия/Кант        # ста�
 - `урок` — перед квизом тьютор объясняет тему по RAG-контексту, спрашивает «готов к квизу?» (да/нет).
 - `объяснение`, `глубокий разбор` — пояснения и экспертные разборы.
 
+## Адаптивное обучение (roadmap #6–8, 2026-08-31)
+
+Контур «ошибка → знание → повторение»: Student Knowledge Graph, scaffolding и
+интервальное повторение SM-2. Архитектурные идеи — из DeepTutor (mastery-гейт,
+Question Bank) и LlamaTutor (динамический curriculum).
+
+**1. Student Knowledge Graph** (`src/student_kg.py`, JSON-профиль в
+`data/students/<sid>.json`): темы со статусами `not_studied/in_progress/mastered`,
+mastery, weak_areas, relations. Обновляется на каждом ответе (`evaluation.sync_student_kg`),
+при уроке (`in_progress`) и завершении квиза; relations — из графа учебника.
+При выборе темы с неосвоенным пререквизитом агент шлёт `system` `kind="mastery.gate"`.
+API: `GET/POST /api/students/{id}/knowledge-graph`, `GET .../recommendations`.
+
+**2. Scaffolding** (`src/scaffold.py`, флаг `ENABLE_SCAFFOLDING`): при ошибке агент
+не финализирует вопрос сразу, а даёт подсказку (`quiz.hint`, уровень 1 «наводящая»,
+уровень 2 «начни так», лимит `MAX_HINTS_PER_QUESTION`); после исчерпания — объяснение
+или пошаговая декомпозиция (`QuizCard.subtasks`, узел `subtask_node`, возврат к
+исходному вопросу). В агентном режиме — инструмент `give_hint`.
+
+**3. Spaced Repetition** (`src/review.py`, флаг `ENABLE_SPACED_REPETITION`): ошибочные
+вопросы → карточки SM-2 в `data/review_bank/<sid>.json` (дедуп по хэшу). Блиц-опрос
+по должным карточкам запускается по запросу:
+
+```bash
+# API
+curl http://127.0.0.1:8000/api/students/stu_1a2b3c/review          # stats + due-карточки
+curl -X POST http://127.0.0.1:8000/api/sessions/{sid}/review        # запуск блица
+
+# CLI
+python main.py --scenario schoolchild_grade6_geography --mock --review
+```
+
+В UI — кнопка «Повторить (N)» в панели «Мои знания», бейдж «повторение» на карточке,
+hint/review-пузыри в чате. Агентный режим: инструменты `start_review`/`submit_review`.
+
 ## Наблюдаемость, ограничения и SOP
 
 ### Наблюдаемость (JSONL-трассировка запроса)
