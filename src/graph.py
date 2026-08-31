@@ -714,21 +714,45 @@ def agent_tutor_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
 
     # Свободный вопрос ПОСЛЕ урока (квиз ещё не начат): отвечаем по RAG, квиз не запускаем.
     # Слабая модель на вопрос ученика иначе «пересказывает урок» или сразу зовёт generate_quiz.
-    from .agent_loop import _answer_free_question, _is_not_ready, _is_ready_to_quiz
+    from .agent_loop import _answer_free_question, _is_not_ready, _is_ready_to_quiz, _looks_like_agent_command
+
+    prev_qid = st.current_question.question_id if st.current_question else None
+    prev_lesson = st.lesson_text
 
     if st.lesson_done and st.current_question is None and st.answered_count == 0 \
-            and st.pending_answer and not _is_ready_to_quiz(st.pending_answer):
+            and st.pending_answer:
         user_text = st.pending_answer
         st.pending_answer = None
-        if _is_not_ready(user_text):
-            st.agent_message = (
-                "Хорошо. Изучите урок ещё раз — если что-то непонятно, спросите, "
-                "и я объясню. Когда будете готовы — напишите «да»."
-            )
-        else:
-            st.agent_message = _answer_free_question(st, deps, user_text)
-        _emit(deps, "system", message=st.agent_message, kind="agent.message")
-        return st.model_dump()
+
+        # Команда агента (глубокий разбор, показать урок, объяснить тему) → ReAct-цикл
+        if _looks_like_agent_command(user_text):
+            _emit(deps, "source.progress", stage="tutor", url="", status="generating",
+                  message=f"Обрабатываю запрос: «{user_text}»…")
+            st, final_text = run_tutor_agent(st, deps)
+            # Обработка результатов: урок/разбор сгенерирован → обновляем lesson_text
+            if st.lesson_text and st.lesson_text != prev_lesson:
+                _emit(deps, "tutor.lesson", **st.lesson_payload(st.topic or st.subject or "тема"))
+                _emit(deps, "system", message="Готово. Можно задать вопрос или перейти к квизу.",
+                      kind="lesson.ready")
+            # Если агент сгенерировал вопрос → показываем квиз
+            if st.current_question and st.current_question.question_id != prev_qid:
+                card = st.current_question
+                _emit(deps, "quiz.card", question_id=card.question_id, question=card.question,
+                      options=card.options, answer_type=card.answer_type, difficulty=card.difficulty,
+                      topic=card.topic, num_questions=st.num_questions,
+                      question_num=st.answered_count + 1)
+            return st.model_dump()
+
+        if not _is_ready_to_quiz(user_text):
+            if _is_not_ready(user_text):
+                st.agent_message = (
+                    "Хорошо. Изучите урок ещё раз — если что-то непонятно, спросите, "
+                    "и я объясню. Когда будете готовы — напишите «да»."
+                )
+            else:
+                st.agent_message = _answer_free_question(st, deps, user_text)
+            _emit(deps, "system", message=st.agent_message, kind="agent.message")
+            return st.model_dump()
 
     # Готов к квизу: запускаем генерацию первого вопроса напрямую (без агента).
     # Агент не знает как обработать "да/готов/начинаем" — он ждёт ответ на активный вопрос.
@@ -781,8 +805,6 @@ def agent_tutor_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
                       question_num=st.answered_count + 1)
         return st.model_dump()
 
-    prev_qid = st.current_question.question_id if st.current_question else None
-    prev_lesson = st.lesson_text
     _emit(deps, "source.progress", stage="tutor", url="", status="generating",
           message=f"Готовлю задание по теме «{st.topic or st.subject or 'тема'}»…")
     st, final_text = run_tutor_agent(st, deps)

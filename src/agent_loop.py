@@ -362,7 +362,11 @@ _QUESTION_MARKERS = (
 
 
 def _is_ready_to_quiz(text: Optional[str]) -> bool:
-    """Понял ли ученик, что переходим к квизу (подтвердил «да»-семейством)."""
+    """Понял ли ученик, что переходим к квизу (подтвердил «да»-семейством).
+
+    ВАЖНО: если фраза содержит "давай" + другое действие (разбор/вопрос/объяснение/материал),
+    это НЕ подтверждение готовности к квизу — агент должен обработать запрос.
+    """
     t = (text or "").strip().lower()
     if not t:
         return False
@@ -373,12 +377,23 @@ def _is_ready_to_quiz(text: Optional[str]) -> bool:
     if t in _READY_ANSWERS:
         return True
     if t.startswith("да"):
+        # "да, давай квиз" — ок, но "да, давай разберём" — нет
+        # Проверяем: если после "да" есть другие действия, это не квиз
+        remaining = t[2:].strip()
+        if remaining and any(w in remaining for w in (
+            "разбор", "вопрос", "объясн", "материал", "подробн", "глубок",
+            "расскаж", "покаж", "покажи", "узна", "покажи урок"
+        )):
+            return False
         return True
     # «давай квиз», «спасибо, давай квиз», «ну давай начнём» и т.п.
     if ("готов" in t or "давай" in t) and ("квиз" in t or "перейт" in t or "начн" in t):
-        return True
-    # «давай» / «поехали» / «начинаем» как часть более длинной фразы
-    if any(w in t for w in ("давай", "поехали", "начинаем", "начнём", "начнем")):
+        # Но если есть другие действия — не квиз
+        if any(w in t for w in (
+            "разбор", "вопрос", "объясн", "материал", "подробн", "глубок",
+            "расскаж", "покаж", "покажи", "узна", "покажи урок"
+        )):
+            return False
         return True
     return False
 
@@ -386,6 +401,32 @@ def _is_ready_to_quiz(text: Optional[str]) -> bool:
 def _is_not_ready(text: Optional[str]) -> bool:
     t = (text or "").strip().lower().rstrip("!., ").strip()
     return t in _NOT_READY_ANSWERS or t.startswith("не готов")
+
+
+def _looks_like_agent_command(text: Optional[str]) -> bool:
+    """Запрос содержит команду для агента (не вопрос и не подтверждение/отказ).
+
+    Такие запросы должны обрабатываться run_tutor_agent (ReAct-цикл),
+    который вызовет нужный инструмент (deep_dive, generate_lesson и т.п.).
+    """
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    # Прямые команды: "глубокий разбор", "сделай урок", "покажи урок", "объясни тему"
+    agent_commands = (
+        "глубок", "разбор", "deep dive", "deep_dive",
+        "сделай урок", "покажи урок", "начни урок", "сделай объяснение",
+        "объясни тему", "расскажи о теме", "покажи материал",
+    )
+    if any(cmd in t for cmd in agent_commands):
+        return True
+    # "давай" + действие (не квиз)
+    if "давай" in t and any(w in t for w in (
+        "разбор", "вопрос", "объясн", "материал", "подробн", "глубок",
+        "расскаж", "покаж", "покажи", "узна", "покажи урок"
+    )):
+        return True
+    return False
 
 
 def _looks_like_free_question(text: Optional[str]) -> bool:
