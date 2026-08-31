@@ -173,6 +173,24 @@ class TestTutoringTools:
         assert new_state.session_status == "completed"
         assert new_state.quiz_complete is True
 
+    def test_give_hint_tool(self):
+        from api.schemas import QuizCard
+        st = TutorState(subject="t", topic="Тема", mode="quiz",
+                        current_question=QuizCard(question_id="q1", question="Вопрос?",
+                                                  options=None, answer_type="open",
+                                                  difficulty="medium", topic="Тема"),
+                        current_answers=["ключевой правильный ответ"])
+        res, out = execute_agent_tool("give_hint", {"level": 1}, _ctx(st))
+        data = json.loads(res)
+        assert data["ok"] is True
+        assert "hint" in res
+        assert out.hint_level == 1
+        assert out.retry_question_id == "q1"
+
+    def test_give_hint_no_active_question(self):
+        res, _ = execute_agent_tool("give_hint", {}, _ctx(TutorState()))
+        assert json.loads(res)["ok"] is False
+
     def test_unknown_tool_error(self):
         res, _ = execute_agent_tool("no_such_tool", {}, _ctx(TutorState()))
         assert json.loads(res)["ok"] is False

@@ -239,6 +239,21 @@ def explain_error(args: Dict[str, Any], ctx: AgentToolContext) -> Tuple[str, Tut
     return _ok(text=result["text"], citation=result["citation"]), st
 
 
+def give_hint(args: Dict[str, Any], ctx: AgentToolContext) -> Tuple[str, TutorState]:
+    """Подсказка по текущему вопросу (уровень 1 или 2), без раскрытия полного ответа."""
+    from .scaffold import hint_for
+
+    st = ctx.state
+    card = st.current_question
+    if card is None:
+        return _err("Нет активного вопроса"), st
+    level = int(args.get("level") or (st.hint_level + 1))
+    context = [r.chunk.text for r in _rag_results(ctx, card.question, k=3)]
+    hint = hint_for(card.question, ", ".join(st.current_answers), context, level)
+    st = st.model_copy(update={"hint_level": level, "retry_question_id": card.question_id})
+    return _ok(hint=hint, level=level, question_id=card.question_id), st
+
+
 def evaluate_answer(args: Dict[str, Any], ctx: AgentToolContext) -> Tuple[str, TutorState]:
     """Оценить ответ ученика по текущему вопросу (единая логика с детерминированным узлом)."""
     from .evaluation import evaluate_and_record
@@ -297,6 +312,7 @@ AGENT_TOOLS: Dict[str, Callable[[Dict[str, Any], AgentToolContext], Tuple[str, T
     "generate_lesson": generate_lesson,
     "generate_quiz": generate_quiz,
     "explain_error": explain_error,
+    "give_hint": give_hint,
     "evaluate_answer": evaluate_answer,
     "deep_dive": deep_dive,
     "route_to_source": route_to_source,
@@ -366,6 +382,12 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
         "parameters": {"type": "object",
                       "properties": {"answer": _param(type="string", description="ответ ученика")},
                       "required": ["answer"]}}},
+    {"type": "function", "function": {
+        "name": "give_hint",
+        "description": "Дать наводящую подсказку по текущему вопросу (не раскрывать полный ответ).",
+        "parameters": {"type": "object",
+                      "properties": {"level": _param(type="integer", description="1 — наводящая, 2 — раскрывающая")},
+                      "required": []}}},
     {"type": "function", "function": {
         "name": "deep_dive",
         "description": "Режим «глубокий разбор»: развёрнутый синтез по нескольким разделам учебника.",

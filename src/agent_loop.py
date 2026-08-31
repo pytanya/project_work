@@ -302,12 +302,15 @@ TUTOR_AGENT_PROMPT = (
     "8. НИКОГДА не отвечай только текстом при наличии активного вопроса и ответа ученика. "
     "ВСЕГДА: evaluate_answer → generate_quiz → текст.\n"
     "9. Не выдумывай ответы ученика. Отвечай по-русски."
+    "\n10. При ошибке ученика (evaluate_answer вернул correct=false) НЕ выдавай сразу "
+    "правильный ответ: вызови give_hint (уровень 1), затем (при повторной ошибке) "
+    "give_hint (уровень 2) или explain_error. Один вопрос — не более двух подсказок."
 )
 
 
 # Подмножество инструментов для режима занятия (без инструментов интервью)
 TUTOR_TOOL_NAMES = {
-    "evaluate_answer", "generate_quiz", "generate_lesson", "explain_error", "deep_dive", "rag_search", "finish_session",
+    "evaluate_answer", "generate_quiz", "generate_lesson", "explain_error", "give_hint", "deep_dive", "rag_search", "finish_session",
 }
 TUTOR_TOOL_SCHEMAS = [s for s in TOOL_SCHEMAS if s.get("function", {}).get("name") in TUTOR_TOOL_NAMES]
 
