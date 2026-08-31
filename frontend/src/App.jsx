@@ -146,12 +146,9 @@ export default function App() {
     return () => document.removeEventListener('mousedown', handleClick)
   }, [])
 
-  // Паттерн для обнаружения процессных статусов («Ищу...», «Генерирую...», «Объясняю...», «Собираю...»)
-  const PROCESSING_RE = /^(?:Ищу|Генерирую|Объясняю|Собираю|Строю)\b/i
-
-  // Удалить все процессные статусы из feed
+  // Удалить все процессные статусы из feed (source + source-group)
   const removeProcessStatuses = useCallback(() => {
-    setFeed((f) => f.filter((m) => m.kind !== 'source' || !PROCESSING_RE.test(m.text || '')))
+    setFeed((f) => f.filter((m) => m.kind !== 'source' && m.kind !== 'source-group'))
   }, [])
 
   const push = useCallback((kind, text, data) => {
