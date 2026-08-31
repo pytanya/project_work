@@ -37,10 +37,21 @@ describe('deriveStudentId', () => {
 })
 
 describe('resolveStudentId', () => {
-  it('тот же человек (identity совпадает) → сохраняет текущий id', () => {
-    const stored = { student_id: 'stu_x', identity: deriveIdentityKey('Татьяна Петрова', 'student', '') }
+  it('тот же человек (identity + канонический id совпадают) → сохраняет id', () => {
+    const identity = deriveIdentityKey('Татьяна Петрова', 'student', '')
+    const stored = { student_id: deriveStudentId('Татьяна Петрова', 'student', ''), identity }
     const r = resolveStudentId('Татьяна Петрова', 'student', '', stored, null)
-    expect(r.studentId).toBe('stu_x')
+    expect(r.studentId).toBe(stored.student_id)
+    expect(r.legacy).toBe(false)
+  })
+
+  it('identity совпадает, но id — чужой UUID (застрял с багованной версии) → пересоздаёт канонический id', () => {
+    // браузер запомнил «Татьяна-студент», но под id семиклассницы (UUID Тани)
+    const identity = deriveIdentityKey('Татьяна Петрова', 'student', '')
+    const stored = { student_id: 'stu_4139444f2a', identity } // не-канонический id
+    const r = resolveStudentId('Татьяна Петрова', 'student', '', stored, null)
+    expect(r.studentId).toBe(deriveStudentId('Татьяна Петрова', 'student', ''))
+    expect(r.studentId).not.toBe('stu_4139444f2a')
   })
 
   it('другой человек при известной прошлой личности → новый детерминированный id', () => {
@@ -51,12 +62,21 @@ describe('resolveStudentId', () => {
     expect(r.studentId).not.toBe('stu_old')
   })
 
-  it('первое заполнение после апгрейда: тот же профиль → сохраняет исторический id (данные живы)', () => {
+  it('первое заполнение после апгрейда: тот же профиль → сохраняет исторический id и помечает legacy', () => {
     // localStorage старого формата: только id+имя, identity ещё нет; профиль на бэке школьница 7 «Татьяна»
     const stored = { student_id: 'stu_tanya', student_name: 'Татьяна' }
     const c = card({ name: 'Татьяна', type: 'schoolchild', grade: '7' })
     const r = resolveStudentId('Татьяна', 'schoolchild', '7', stored, c)
     expect(r.studentId).toBe('stu_tanya')
+    expect(r.legacy).toBe(true)
+  })
+
+  it('legacy-личность на следующих заходах сохраняет id (legacy: true)', () => {
+    const identity = deriveIdentityKey('Татьяна', 'schoolchild', '7')
+    const stored = { student_id: 'stu_tanya', identity, legacy: true }
+    const r = resolveStudentId('Татьяна', 'schoolchild', '7', stored, null)
+    expect(r.studentId).toBe('stu_tanya')
+    expect(r.legacy).toBe(true)
   })
 
   it('первое заполнение после апгрейда, но другой человек (ИЛИ несовпадение с профилем) → новый id', () => {

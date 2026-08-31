@@ -44,23 +44,32 @@ export function prefilledIdentity(card) {
 // Единственная точка принятия решения «какой student_id использовать».
 //
 // Правила:
-// 1. Тот же человек, что в прошлый раз (identity совпадает) — сохраняем текущий
-//    id (это может быть исторический id, под которым уже живут его данные).
+// 1. Тот же человек, что в прошлый раз (identity совпадает) — сохраняем id ТОЛЬКО
+//    если он канонический (детерминированный для этой identity) или был честно
+//    закреплён за личностью при апгрейде (legacy). Если identity совпадает, но id —
+//    чужой UUID (застрял с багованной версии: карточку заполняла другая личность,
+//    а данные утекли в её namespace), — НЕ сохраняем: расшатанная привязка
+//    пересоздаётся, человек получает свою новую изолированную ветку.
 // 2. Известная прошлая личность, но карточка заполнена ДРУГАЯ → другой человек:
 //    детерминированный id из новой identity (новая изолированная ветка).
 // 3. Первое заполнение (после апгрейда, legacy localStorage без identity) и филл
-//    совпадает с идентичностью профиля → сохраняем исторический id (его данные).
+//    совпадает с идентичностью профиля → сохраняем исторический id (его данные),
+//    помечая legacy: true, чтобы будущие заходы не пересоздавали id.
 // 4. Иначе — детерминированный id из заполненной identity.
 export function resolveStudentId(name, type, grade, stored, card) {
   const identity = deriveIdentityKey(name, type, grade)
   const deterministic = deriveStudentId(name, type, grade)
   if (stored?.identity) {
-    if (stored.identity === identity) return { studentId: stored.student_id, identity }
+    if (stored.identity === identity) {
+      if (stored.student_id === deterministic || stored.legacy === true) {
+        return { studentId: stored.student_id, identity, legacy: stored.legacy === true }
+      }
+    }
     return { studentId: deterministic, identity }
   }
   const legacy = prefilledIdentity(card)
   if (stored?.student_id && legacy === identity) {
-    return { studentId: stored.student_id, identity }
+    return { studentId: stored.student_id, identity, legacy: true }
   }
   return { studentId: deterministic, identity }
 }

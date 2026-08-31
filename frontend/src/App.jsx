@@ -715,7 +715,7 @@ export default function App() {
       // Решение «какой student_id» (см. identity.js): смена ФИО/тип/класс
       // относительно предыдущей личности браузера → новый изолированный id,
       // старые данные (прошлого ученика) не смешиваются и не портятся.
-      const { studentId, identity } = resolveStudentId(
+      const { studentId, identity, legacy } = resolveStudentId(
         name, type, grade,
         student,
         current && current.kind === 'intake_card' ? current.card : null,
@@ -731,6 +731,7 @@ export default function App() {
         learner_type: type || student.learner_type,
         grade: grade || student.grade,
         identity,
+        legacy: legacy === true,
       }
       setStudent(next)
       saveStudent(next)
