@@ -1,9 +1,9 @@
-"""Ученики: профили, история занятий и политика источников (раздел 8.5)."""
+"""Ученики: профили, история занятий, политика источников и knowledge graph (roadmap #4)."""
 
 from __future__ import annotations
 
 import re
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
@@ -91,4 +91,122 @@ def put_source_policy(student_id: str, body: SourcePolicyBody, store: SessionSto
     return {
         "allow_any_sources": bool(profile.allow_any_sources),
         "whitelist": list(profile.source_whitelist),
+    }
+
+
+# ────────────────────────────────────────────────────────────────
+# Knowledge Graph ученика (roadmap #4)
+# ────────────────────────────────────────────────────────────────
+
+
+class KGUpdateBody(BaseModel):
+    """Batch-update knowledge graph: wiki + knowledge_map + in_progress."""
+
+    subject: str = ""
+    wiki_articles: Optional[List[Dict[str, Any]]] = None
+    knowledge_map: Optional[Dict[str, float]] = None
+    in_progress_topics: Optional[List[Dict[str, Any]]] = None
+
+
+@router.get("/{student_id}/knowledge-graph")
+def get_knowledge_graph(
+    student_id: str,
+    subject: Optional[str] = Query(default=None),
+    store: SessionStore = Depends(get_store),
+):
+    """Получить knowledge graph ученика: {topic_id: TopicStatus}.
+
+    Если subject указан — фильтруем по предмету.
+    """
+    kg = store.student_store.get_knowledge_graph(student_id)
+    if kg is None:
+        return {"student_id": student_id, "subject": subject or "", "topics": {}}
+
+    if subject:
+        topics = {
+            k: v.to_dict() for k, v in kg.topics.items() if v.subject == subject
+        }
+    else:
+        topics = {k: v.to_dict() for k, v in kg.topics.items()}
+
+    # Статистика
+    mastered = sum(1 for v in kg.topics.values() if v.is_mastered)
+    in_progress = sum(1 for v in kg.topics.values() if v.is_in_progress)
+    not_studied = sum(1 for v in kg.topics.values() if v.status == "not_studied")
+
+    return {
+        "student_id": student_id,
+        "subject": kg.subject,
+        "topics": topics,
+        "stats": {
+            "mastered": mastered,
+            "in_progress": in_progress,
+            "not_studied": not_studied,
+            "total": len(kg.topics),
+        },
+        "updated_at": kg.updated_at,
+    }
+
+
+@router.post("/{student_id}/knowledge-graph/update")
+def update_knowledge_graph(
+    student_id: str,
+    body: KGUpdateBody,
+    store: SessionStore = Depends(get_store),
+):
+    """Batch-update knowledge graph из wiki + knowledge_map + in_progress.
+
+    Используется после завершения квиза (sync knowledge_map) и при загрузке
+    wiki-статей (mastery/attempts/weak_areas).
+    """
+    updated = store.student_store.update_knowledge_graph(
+        student_id,
+        subject=body.subject,
+        wiki_articles=body.wiki_articles,
+        knowledge_map=body.knowledge_map,
+        in_progress_topics=body.in_progress_topics,
+    )
+
+    # Возвращаем обновлённый граф
+    kg = store.student_store.get_knowledge_graph(student_id)
+    if kg is None:
+        return {"updated": updated, "topics": {}}
+
+    return {
+        "updated": updated,
+        "topics": {k: v.to_dict() for k, v in kg.topics.items()},
+        "stats": {
+            "mastered": sum(1 for v in kg.topics.values() if v.is_mastered),
+            "in_progress": sum(1 for v in kg.topics.values() if v.is_in_progress),
+            "not_studied": sum(1 for v in kg.topics.values() if v.status == "not_studied"),
+            "total": len(kg.topics),
+        },
+    }
+
+
+@router.get("/{student_id}/knowledge-graph/recommendations")
+def get_recommendations(
+    student_id: str,
+    current_topic: Optional[str] = Query(default=None),
+    subject: Optional[str] = Query(default=None),
+    limit: int = Query(default=5, ge=1, le=20),
+    store: SessionStore = Depends(get_store),
+):
+    """Рекомендации по темам: слабые места + неосвоенные пререквизиты."""
+    kg = store.student_store.get_knowledge_graph(student_id)
+    if kg is None:
+        return {"recommendations": []}
+
+    recommendations = kg.get_recommended_topics(
+        current_topic=current_topic,
+        subject=subject,
+        limit=limit,
+    )
+
+    return {
+        "recommendations": [r.to_dict() for r in recommendations],
+        "weak_topics": [t.to_dict() for t in kg.get_weak_topics(subject=subject)],
+        "prerequisite_gaps": [
+            g for g in (kg.get_prerequisite_gaps(current_topic) if current_topic else [])
+        ],
     }

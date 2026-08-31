@@ -1899,3 +1899,110 @@ body.resizing * { cursor: col-resize !important; }
 .graph-zoom-controls button:hover {
   background: rgba(100, 223, 223, 0.15); border-color: #64DFDF; color: #64DFDF;
 }
+
+/* ============================================================
+    Student Knowledge Graph Panel (roadmap #4)
+    ============================================================ */
+.student-kg-panel {
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.student-kg-panel__header {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.student-kg-panel__header h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.student-kg-panel__stats {
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--green-soft);
+}
+.student-kg-stat {
+  flex: 1;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.student-kg-stat-value {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--ink);
+  font-family: var(--font-mono);
+}
+.student-kg-stat-label {
+  font-size: 10px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.student-kg-panel__list {
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+.student-kg-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 12px;
+  transition: background 0.15s ease;
+}
+.student-kg-item:hover {
+  background: var(--green-soft);
+}
+.student-kg-item__status {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-top: 5px;
+  flex-shrink: 0;
+}
+.student-kg-item__content {
+  flex: 1;
+  min-width: 0;
+}
+.student-kg-item__title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.student-kg-item__meta {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+.student-kg-panel__legend {
+  display: flex;
+  gap: 12px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--muted);
+}
+.student-kg-panel__legend i {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 4px;
+  vertical-align: middle;
+}

@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from .config import settings as default_settings
+from .student_kg import StudentKnowledgeGraph, StudentKnowledgeGraphStore
 
 logger = logging.getLogger("edututor.student")
 
@@ -38,6 +39,8 @@ class StudentProfile(BaseModel):
 
     Стабильные атрибуты (имя, тип, класс) переживают сессии; subject/topic/mode
     остаются в сессии (TutorState), т.к. выбираются каждый раз.
+    knowledge_graph — динамический граф знаний (темы + статусы), обновляется
+    из wiki/quiz и используется агентом для адаптивного обучения.
     """
 
     student_id: str
@@ -50,6 +53,9 @@ class StudentProfile(BaseModel):
     # allow_any_sources=True → whitelist игнорируется при поиске.
     source_whitelist: List[str] = Field(default_factory=list)
     allow_any_sources: bool = True
+    # Динамический граф знаний ученика: {topic_id: TopicStatus}
+    # Хранится как dict (JSON) для backwards compatibility.
+    knowledge_graph: Dict[str, Any] = Field(default_factory=dict)
 
     def touch(self) -> None:
         self.updated_at = _now_iso()
@@ -70,6 +76,15 @@ class StudentProfile(BaseModel):
         out["allow_any_sources"] = bool(self.allow_any_sources)
         return out
 
+    def get_knowledge_graph(self) -> StudentKnowledgeGraph:
+        """Получить StudentKnowledgeGraph из профиля (lazy load)."""
+        return StudentKnowledgeGraph.from_dict(self.knowledge_graph or {})
+
+    def set_knowledge_graph(self, kg: StudentKnowledgeGraph) -> None:
+        """Обновить knowledge_graph в профиле."""
+        self.knowledge_graph = kg.to_dict()
+        self.touch()
+
 
 class StudentStore:
     """Хранилище профилей учеников (JSON по файлу на ученика).
@@ -81,6 +96,13 @@ class StudentStore:
     def __init__(self, root_dir: Optional[Any] = None) -> None:
         self.root = Path(root_dir or default_settings.STUDENTS_DIR)
         self.root.mkdir(parents=True, exist_ok=True)
+        self._kg_store: Optional[StudentKnowledgeGraphStore] = None
+
+    def _kg(self) -> StudentKnowledgeGraphStore:
+        """Lazy init knowledge graph store."""
+        if self._kg_store is None:
+            self._kg_store = StudentKnowledgeGraphStore(student_store=self)
+        return self._kg_store
 
     def _path(self, student_id: str) -> Path:
         return self.root / f"{student_id}.json"
@@ -128,6 +150,37 @@ class StudentStore:
 
     def count(self) -> int:
         return len(self.list_ids())
+
+    # ────────────────────────────────────────────────────────────────
+    # Knowledge Graph ученика (roadmap #4)
+    # ────────────────────────────────────────────────────────────────
+
+    def get_knowledge_graph(self, student_id: str) -> Optional[StudentKnowledgeGraph]:
+        """Получить knowledge graph ученика."""
+        return self._kg().get(student_id)
+
+    def save_knowledge_graph(self, student_id: str, kg: StudentKnowledgeGraph) -> None:
+        """Сохранить knowledge graph в профиль ученика."""
+        self._kg().save(student_id, kg)
+
+    def update_knowledge_graph(
+        self,
+        student_id: str,
+        subject: str,
+        wiki_articles: Optional[List[Dict[str, Any]]] = None,
+        knowledge_map: Optional[Dict[str, float]] = None,
+        in_progress_topics: Optional[List[Dict[str, Any]]] = None,
+    ) -> int:
+        """Batch-update knowledge graph из wiki + knowledge_map + in_progress.
+
+        Возвращает количество обновлённых тем.
+        """
+        return self._kg().update_batch(
+            student_id, subject,
+            wiki_articles=wiki_articles,
+            knowledge_map=knowledge_map,
+            in_progress_topics=in_progress_topics,
+        )
 
     # ────────────────────────────────────────────────────────────────
     # История занятий ученика (data/students/sessions/<sid>.json)

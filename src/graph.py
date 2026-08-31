@@ -1311,6 +1311,22 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         logger.warning("sync_concepts (ключевые понятия) не удался: %s", exc)
     _emit(deps, "tutor.lesson", **st.lesson_payload(topic))
     _emit(deps, "system", message=st.agent_message, kind="lesson.ready")
+
+    # Student Knowledge Graph (roadmap #4): тема начата → in_progress
+    try:
+        from .student_kg import StudentKnowledgeGraphStore
+
+        student_id = getattr(st, "student_id", None) or ""
+        if student_id:
+            store = StudentKnowledgeGraphStore()
+            store.update_knowledge_graph(
+                student_id=student_id,
+                subject=getattr(st, "subject", None) or "общая тема",
+                in_progress_topics=[{"topic_id": topic, "title": topic, "subject": getattr(st, "subject", None) or ""}],
+            )
+    except Exception as exc:
+        logger.warning("Student KG mark_in_progress failed: %s", exc)
+
     # 7.3.3: в том же шаге задаём подтверждение перехода к квизу — без «зависшего» хода
     st.agent_question = "Готов(а) перейти к квизу? (да / нет)"
     _emit(deps, "intake.question", question=st.agent_question, missing_fields=["lesson_confirm"])
@@ -1849,6 +1865,32 @@ def summary_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
                   count=len(updated))
     except Exception as exc:
         logger.warning("Knowledge Wiki update failed: %s", exc)
+
+    # Student Knowledge Graph (roadmap #4): синхронизация knowledge_map + wiki → KG
+    try:
+        from .student_kg import StudentKnowledgeGraphStore
+
+        student_id = getattr(st, "student_id", None) or ""
+        subject = getattr(st, "subject", None) or "общая тема"
+        store = StudentKnowledgeGraphStore()
+
+        # Получаем wiki-статьи для этого предмета (для weak_areas/attempts)
+        wiki_articles = []
+        try:
+            wiki_articles = [a.to_dict() for a in wiki.list_articles(subject)]
+        except Exception:
+            pass
+
+        # knowledge_map из квиза + wiki articles → batch update KG
+        store.update_knowledge_graph(
+            student_id=student_id,
+            subject=subject,
+            wiki_articles=wiki_articles,
+            knowledge_map=km,  # knowledge_map из summary_node
+        )
+        logger.info("Student KG: обновлено тем (student_id=%s, subject=%s)", student_id, subject)
+    except Exception as exc:
+        logger.warning("Student Knowledge Graph update failed: %s", exc)
 
     return st.model_dump()
 

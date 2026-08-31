@@ -10,6 +10,7 @@ import KnowledgeGraphPanel from './components/KnowledgeGraphPanel'
 import KnowledgeWikiPanel from './components/KnowledgeWikiPanel'
 import SessionHistoryPanel from './components/SessionHistoryPanel'
 import SourceWhitelistPanel from './components/SourceWhitelistPanel'
+import StudentKGPanel from './components/StudentKGPanel'
 import './index.css'
 
 const STORAGE_KEY = 'edututor_settings'
@@ -988,6 +989,11 @@ export default function App() {
         {/* 4. История занятий */}
         {intake.complete && student.student_id && (
           <SessionHistoryPanel studentId={student.student_id} reloadKey={sessionHistoryReloadKey} />
+        )}
+
+        {/* 5. Student Knowledge Graph (roadmap #4) */}
+        {intake.complete && student.student_id && (
+          <StudentKGPanel studentId={student.student_id} subject={intake.subject} />
         )}
       </aside>
       <div className="sidebar-resizer" ref={sidebarDragRef} title="Изменить ширину панели" />
