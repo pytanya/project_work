@@ -1419,3 +1419,53 @@ def test_wrong_answer_writes_review_card(make_settings, tmp_path):
     assert st.answered_count == 1  # вопрос финализирован
     bank = ReviewBank(tmp_path / "review_bank", "stu_x")
     assert bank.stats()["total"] >= 1
+
+
+def test_review_quiz_flow(make_settings, tmp_path):
+    """Spaced repetition (C3): блиц-опрос по должным карточкам (review=true, SM-2, review.done)."""
+    from src.review import ReviewBank, card_id_for
+
+    s = make_settings(
+        FGOS_REFERENCE_DIR=str(FGOS_DIR),
+        TEXTBOOKS_DOWNLOADS_DIR=str(tmp_path / "downloads"),
+        MAX_INTAKE_ITERATIONS=8,
+        OCR_MIN_TEXT_CHARS=20,
+        KNOWLEDGE_GRAPH_DIR=str(tmp_path / "kg"),
+        KNOWLEDGE_WIKI_DIR=str(tmp_path / "wiki"),
+        SOURCES_CACHE_DIR=str(tmp_path / "sources_cache"),
+        STUDENTS_DIR=str(tmp_path / "students"),
+        REVIEW_BANK_DIR=str(tmp_path / "review_bank"),
+    )
+    bank = ReviewBank(tmp_path / "review_bank", "stu_r")
+    bank.add_from_record({"question": "Что такое атмосфера?",
+                          "options": ["Газовая оболочка Земли", "Океан"],
+                          "answer_type": "single", "difficulty": "easy",
+                          "topic": "Атмосфера", "subject": "география",
+                          "correct_answer": "Газовая оболочка Земли",
+                          "correct": False, "score01": 0.0})
+    store = NumpyVectorStore("t", FakeEmbedder())
+    store.add([DocChunk(
+        id="c1",
+        text="Атмосфера — газовая оболочка Земли. Она состоит из азота и кислорода "
+             "и защищает планету от вредных космических излучений и метеоритов.",
+        subject="география", grade="6", topic="Атмосфера", student_id="stu_r",
+    )])
+    events = []
+    deps = GraphDeps(embedder=FakeEmbedder(), store=store, settings=s,
+                     tutor_llm=lambda m: _GEN, expert_llm=lambda m: _EXPL,
+                     on_event=lambda ev, data: events.append((ev, data)))
+    g = build_graph(deps)
+    st = TutorState(student_id="stu_r", subject="география", topic="Атмосфера",
+                    mode="quiz", num_questions=2, source_status="ready",
+                    learner_type="schoolchild", grade="6", has_textbook=False,
+                    review_requested=True)
+    st = TutorState(**g.invoke(st.model_dump()))
+    st = TutorState(**g.invoke(st.model_dump()))
+    card_events = [d for ev, d in events if ev == "quiz.card" and d.get("review")]
+    assert card_events, "должна показаться review-карточка"
+    st = TutorState(**g.invoke({**st.model_dump(), "pending_answer": "Газовая оболочка Земли"}))
+    done = [d for ev, d in events if ev == "review.done"]
+    assert done, "после ответа на review-карточку должно быть review.done"
+    updated = bank.get(card_id_for("Что такое атмосфера?"))
+    assert updated is not None
+    assert updated.reps == 1  # SM-2 применён при верном повторе

@@ -110,6 +110,34 @@ def evaluate_and_record(
     topic = card.topic if card else ""
     context = rag_context(getattr(deps, "store", None), topic, st, k=3)
 
+    # Spaced repetition: оценка review-карточки (qid "review:<card_id>")
+    if card and str(card.question_id or "").startswith("review:"):
+        context = rag_context(getattr(deps, "store", None), topic, st, k=2)
+        if not context:
+            context = ["Нет контекста по теме."]
+        graded = tutor_mod.evaluate_answer(card.question, answer, context, st,
+                                           llm_call=getattr(deps, "eval_llm", None))
+        from .graph import _review_bank
+
+        bank = _review_bank(deps, st)
+        card_id = str(card.question_id or "").split(":", 1)[1]
+        if bank is not None:
+            bank.review_card(card_id, graded.correct)
+        tutor_mod.update_knowledge_map(st, card.topic, graded.score)
+        sync_student_kg(st, deps, card.topic)
+        st.review_reviewed += 1
+        if graded.correct:
+            st.review_correct += 1
+        st.review_index += 1
+        st.agent_message = f"{'Верно!' if graded.correct else 'Ошибка'} ({round(graded.score * 10, 1)}/10)."
+        st.current_question = None
+        st.pending_answer = None
+        if emit is not None:
+            emit("system" if graded.correct else "tutor.explanation",
+                 message=st.agent_message, citation=None,
+                 correct_count=st.correct_count, answered_count=st.answered_count)
+        return st, st.agent_message, None, None
+
     # Wiki-LLM (roadmap #2): к контексту оценки добавляем накопленную wiki-статью темы —
     # межсессионные знания/заметки дополняют RAG-чанки (сверка «с wiki», а не только с чанками).
     # Если RAG пуст — wiki-статья становится единственным эталоном.

@@ -44,6 +44,7 @@ from .knowledge import (
 from .knowledge_graph import PART_OF, build_or_load_textbook_graph, build_textbook_graph
 from .observability import log_graph_node as _obs_log_node
 from .states import TutorState
+from api.schemas import QuizCard
 
 logger = logging.getLogger("edututor.graph")
 
@@ -1801,6 +1802,56 @@ def _maybe_emit_mastery_gate(st: TutorState, deps: GraphDeps, topic: str) -> Non
 
 def generate_question_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     st = state.model_copy(deep=True)
+    review_bank = _review_bank(deps, st)
+    if review_bank is not None:
+        if st.review_requested and not st.review_active:
+            due = review_bank.get_due(subject=getattr(st, "subject", None) or None,
+                                      limit=getattr(deps.settings, "REVIEW_QUIZ_SIZE", 5))
+            if due:
+                st.review_active = True
+                st.review_cards = [c.to_dict() for c in due]
+                st.review_index = 0
+                st.review_reviewed = 0
+                st.review_correct = 0
+                _emit(deps, "system", message=f"Повторяем {len(due)} карточк(и)…", kind="review.start")
+            else:
+                _emit(deps, "system", message="Карточек на повторение нет.", kind="review.empty")
+            st.review_requested = False
+
+        if st.review_active:
+            if st.review_index < len(st.review_cards):
+                rc = st.review_cards[st.review_index]
+                cid = f"review:{rc['card_id']}"
+                card = QuizCard(
+                    question_id=cid, question=rc.get("question", ""),
+                    options=rc.get("options"), answer_type=rc.get("answer_type", "open"),
+                    difficulty=rc.get("difficulty", "medium"), topic=rc.get("topic", ""),
+                )
+                st.current_question = card
+                st.current_answers = [rc.get("correct_answer", "")]
+                st.agent_question = card.question
+                st.agent_options = card.options
+                st.records.append({
+                    "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    "question_id": cid, "question": card.question, "options": card.options,
+                    "answer_type": card.answer_type, "difficulty": card.difficulty,
+                    "topic": card.topic, "section": st.current_section,
+                    "student_answer": None, "score01": None, "correct": None,
+                    "feedback": None, "correct_answer": rc.get("correct_answer", ""),
+                    "model_used": None, "judge_score": None, "review": True,
+                })
+                _emit(deps, "quiz.card", question_id=cid, question=card.question,
+                      options=card.options, answer_type=card.answer_type,
+                      difficulty=card.difficulty, topic=card.topic,
+                      num_questions=len(st.review_cards), question_num=st.review_index + 1,
+                      review=True)
+                return st.model_dump()
+            st.review_active = False
+            st.review_cards = []
+            st.review_index = 0
+            _emit(deps, "review.done", reviewed=st.review_reviewed,
+                  correct=st.review_correct, lapses=0)
+
     topic = st.topic or st.subject or "общая тема"
     # Единый ключ темы: при активном узле графа используем его НАЗВАНИЕ, а не широкий
     # st.topic — иначе card.topic (ключ knowledge_map/wiki) не совпадёт с title узла,
