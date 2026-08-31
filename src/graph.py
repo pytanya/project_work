@@ -1758,6 +1758,28 @@ def route_tutor_agent(state: TutorState) -> str:
     return NODE_AGENT_TUTOR
 
 
+def _maybe_emit_mastery_gate(st: TutorState, deps: GraphDeps, topic: str) -> None:
+    """Mastery-гейт (DeepTutor): если пререквизиты темы не освоены — мягкое предупреждение."""
+    student_id = getattr(st, "student_id", None) or ""
+    if not student_id or not topic:
+        return
+    try:
+        store = _student_kg(deps)
+        if store is None:
+            return
+        kg = store.get_knowledge_graph(student_id)
+        if kg is None:
+            return
+        gaps = kg.get_prerequisite_gaps(topic)
+        if gaps:
+            titles = [g for g in gaps]
+            _emit(deps, "system",
+                  message=f"Совет: прежде чем «{topic}», стоит повторить: {', '.join(titles)}.",
+                  kind="mastery.gate", gaps=titles)
+    except Exception as exc:
+        logger.warning("mastery.gate failed: %s", exc)
+
+
 def generate_question_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     st = state.model_copy(deep=True)
     topic = st.topic or st.subject or "общая тема"
@@ -1770,6 +1792,8 @@ def generate_question_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]
         title = _node_title(kg, st.active_topic)
         if title:
             topic = title
+    if len(st.asked_questions) == 0:
+        _maybe_emit_mastery_gate(st, deps, topic)
     _emit(deps, "source.progress", stage="quiz", url="", status="generating",
           message=f"Генерирую вопрос по теме «{topic}»…")
     chunks = _rag_chunks(deps.store, topic, st, k=3)

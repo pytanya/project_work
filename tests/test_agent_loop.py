@@ -298,6 +298,29 @@ class TestRunTutorAgent:
         assert st_new.correct_count >= 1  # оценка произошла (детерминированно)
 
 
+class TestTutorContextKG:
+    def test_tutor_context_shows_student_kg_summary(self, tmp_path):
+        from src.agent_loop import _tutor_context
+        from src.student import StudentStore
+        from src.student_kg import StudentKnowledgeGraph
+
+        student_store = StudentStore(root_dir=tmp_path / "students")
+        student_store.get_or_create("stu_test")  # профиль ученика (как в API)
+        kg = StudentKnowledgeGraph(student_id="stu_test", subject="информатика")
+        kg.set_topic(topic_id="Переменные", status="mastered", mastery=0.9, attempts=5, correct=5,
+                     subject="информатика")
+        kg.set_topic(topic_id="Циклы", status="in_progress", attempts=3, correct=1,
+                     subject="информатика")
+        student_store.save_knowledge_graph("stu_test", kg)
+        deps = _tutor_deps(FakeAgentLLM([]))
+        deps.student_store = student_store
+        st = TutorState(student_id="stu_test", subject="информатика", mode="quiz", num_questions=2)
+        ctx = _tutor_context(st, deps)
+        assert "знания ученика" in ctx
+        assert "Переменные" in ctx  # освоено
+        assert "Циклы" in ctx  # слабая
+
+
 class TestReadyQuizHelpers:
     """Помощники различения «готов к квизу» vs «свободный вопрос» (агент-чат после урока)."""
 

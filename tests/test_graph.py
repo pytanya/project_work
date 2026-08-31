@@ -1188,3 +1188,43 @@ def test_answer_updates_kg_live(make_settings, tmp_path):
     topic = next((t for t in kg.topics.values() if card.topic == t.topic_id or card.topic in t.title), None)
     assert topic is not None
     assert topic.attempts >= 1
+
+
+def test_mastery_gate_emits_for_unmastered_prereq(make_settings, tmp_path):
+    """Roadmap #4: первый вопрос темы с неосвоенным пререквизитом → system mastery.gate."""
+    from src.student import StudentStore
+    from src.student_kg import StudentKnowledgeGraph
+
+    s = make_settings(
+        FGOS_REFERENCE_DIR=str(FGOS_DIR),
+        TEXTBOOKS_DOWNLOADS_DIR=str(tmp_path / "downloads"),
+        MAX_INTAKE_ITERATIONS=8,
+        OCR_MIN_TEXT_CHARS=20,
+        KNOWLEDGE_GRAPH_DIR=str(tmp_path / "kg"),
+        KNOWLEDGE_WIKI_DIR=str(tmp_path / "wiki"),
+        SOURCES_CACHE_DIR=str(tmp_path / "sources_cache"),
+    )
+    store = NumpyVectorStore("t", FakeEmbedder())
+    store.add([DocChunk(
+        id="c1",
+        text="Переменные — именованная область памяти. Циклы — повторение действий.",
+        subject="информатика", grade="7", topic="Циклы", student_id="stu_test",
+    )])
+    student_store = StudentStore(root_dir=tmp_path / "students")
+    student_store.get_or_create("stu_test")  # профиль ученика (как в API)
+    kg = StudentKnowledgeGraph(student_id="stu_test", subject="информатика")
+    kg.set_topic(topic_id="Переменные", status="in_progress")
+    kg.set_topic(topic_id="Циклы", status="in_progress",
+                 relations={"prerequisite": ["Переменные"]})
+    student_store.save_knowledge_graph("stu_test", kg)
+    events = []
+    deps = GraphDeps(embedder=FakeEmbedder(), store=store, settings=s, student_store=student_store,
+                     tutor_llm=lambda m: _GEN,
+                     on_event=lambda ev, data: events.append((ev, data)))
+    g = build_graph(deps)
+    st = TutorState(student_id="stu_test", learner_type="schoolchild", grade="7",
+                    subject="информатика", topic="Циклы", mode="quiz",
+                    num_questions=1, source_status="ready", has_textbook=False)
+    g.invoke(st.model_dump())
+    g.invoke(st.model_dump())  # вопрос по теме сгенерирован
+    assert any(ev == "system" and data.get("kind") == "mastery.gate" for ev, data in events)

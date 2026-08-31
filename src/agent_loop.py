@@ -312,11 +312,26 @@ TUTOR_TOOL_NAMES = {
 TUTOR_TOOL_SCHEMAS = [s for s in TOOL_SCHEMAS if s.get("function", {}).get("name") in TUTOR_TOOL_NAMES]
 
 
-def _tutor_context(st: TutorState) -> str:
+def _tutor_context(st: TutorState, deps: Optional[Any] = None) -> str:
     """Состояние занятия для промпта агента (7.3.1)."""
+    kg_summary = "—"
+    try:
+        if deps is not None:
+            from .graph import _student_kg
+
+            store = _student_kg(deps)
+            if store is not None:
+                kg = store.get_knowledge_graph(getattr(st, "student_id", None) or "")
+                if kg is not None:
+                    weak = [t.topic_id for t in kg.get_weak_topics(subject=st.subject, threshold=0.5)]
+                    mastered = [t.topic_id for t in kg.get_mastered_topics(subject=st.subject)]
+                    kg_summary = f"освоено: {mastered or '—'}; слабые: {weak or '—'}"
+    except Exception:
+        pass
     parts = [
         "Состояние занятия:",
         f"- режим: {st.mode or 'quiz'}",
+        f"- знания ученика: {kg_summary}",
         f"- урок показан: {'да' if st.lesson_done else 'нет'}",
         f"- отвечено вопросов: {st.answered_count}/{st.num_questions}",
         f"- правильных: {st.correct_count}",
@@ -562,7 +577,7 @@ def run_tutor_agent(state: TutorState, deps: Any) -> Tuple[TutorState, Optional[
             logger.warning("run_tutor_agent: исчерпан бюджет %ss (шаг %d)", MAX_AGENT_TIME_SEC, _step)
             break
         call_messages = [
-            {"role": "system", "content": TUTOR_AGENT_PROMPT + "\n\n" + _tutor_context(st)},
+            {"role": "system", "content": TUTOR_AGENT_PROMPT + "\n\n" + _tutor_context(st, deps)},
         ] + messages[1:]
         resp = _agent_llm_response(deps, call_messages, tools=TUTOR_TOOL_SCHEMAS)
         if resp is None:
