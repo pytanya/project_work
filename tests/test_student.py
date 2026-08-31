@@ -103,3 +103,23 @@ def test_auto_mastery_requires_status_none():
     assert ts.status == "mastered"
     ts = kg.set_topic(topic_id="t1", mastery=0.3, attempts=1, correct=0)
     assert ts.status == "in_progress"
+
+
+def test_sync_relations_from_knowledge_graph():
+    kg = StudentKnowledgeGraph(student_id="s1")
+    kg.set_topic(topic_id="Переменные", status="in_progress")
+    kg.set_topic(topic_id="Циклы", status="in_progress")
+    nodes = [
+        {"id": "n1", "title": "Переменные"},
+        {"id": "n2", "title": "Циклы"},
+    ]
+    edges = [
+        {"source": "n2", "target": "n1", "type": "prerequisite"},
+        {"source": "n1", "target": "n2", "type": "related"},
+    ]
+    updated = kg.sync_relations_from_knowledge_graph(nodes, edges)
+    assert updated >= 1
+    ts = kg.get_topic("Циклы")
+    assert "Переменные" in ts.relations.get("prerequisite", [])
+    ts2 = kg.get_topic("Переменные")
+    assert "Циклы" in ts2.relations.get("related", [])

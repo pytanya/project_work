@@ -234,6 +234,42 @@ class StudentKnowledgeGraph(BaseModel):
             updated += 1
         return updated
 
+    def sync_relations_from_knowledge_graph(
+        self, nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]
+    ) -> int:
+        """Проставить relations тем по графу учебника (по совпадению title темы и title узла)."""
+        by_title: Dict[str, str] = {}
+        for n in nodes or []:
+            title = str(n.get("title") or "").strip().lower()
+            if title:
+                by_title[title] = str(n.get("id") or "")
+        title_to_topic = {ts.title.strip().lower(): ts.topic_id for ts in self.topics.values() if ts.title}
+        updated = 0
+        for low_title, topic_id in title_to_topic.items():
+            node_id = by_title.get(low_title)
+            if not node_id:
+                continue
+            prereq, related = [], []
+            for e in edges or []:
+                if e.get("source") != node_id:
+                    continue
+                target_id = e.get("target")
+                target_title = next((str(n.get("title") or "").strip().lower() for n in (nodes or []) if str(n.get("id") or "") == target_id), "")
+                target_topic = title_to_topic.get(target_title) if target_title else None
+                if not target_topic:
+                    continue
+                if e.get("type") == "prerequisite":
+                    prereq.append(target_topic)
+                elif e.get("type") == "related":
+                    related.append(target_topic)
+            if prereq or related:
+                ts = self.topics[topic_id]
+                ts.relations = _merge_relations(ts.relations, {"prerequisite": prereq, "related": related})
+                updated += 1
+        if updated:
+            self.touch()
+        return updated
+
     def get_mastered_topics(self, subject: Optional[str] = None) -> List[TopicStatus]:
         """Освоенные темы (по предмету, если указан)."""
         return sorted(

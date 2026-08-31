@@ -1909,6 +1909,14 @@ def summary_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
                     knowledge_map=km,  # knowledge_map из summary_node
                 )
                 logger.info("Student KG: обновлено тем (student_id=%s, subject=%s)", student_id, subject)
+
+                kg_obj = store.get_knowledge_graph(student_id)
+                if kg_obj is not None:
+                    kg_obj.sync_relations_from_knowledge_graph(
+                        (st.knowledge_graph or {}).get("nodes", []),
+                        (st.knowledge_graph or {}).get("edges", []),
+                    )
+                    store.save_knowledge_graph(student_id, kg_obj)
         except Exception as exc:
             logger.warning("Student Knowledge Graph update failed: %s", exc)
 
