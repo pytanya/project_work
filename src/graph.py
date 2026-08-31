@@ -1859,6 +1859,66 @@ def evaluate_answer_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     return st.model_dump()
 
 
+def subtask_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
+    """Декомпозиция (B6): пошаговый разбор сложной задачи.
+
+    Маршрутизируется из route_tutor при subtask_queue is not None. Обрабатывает
+    по одному шагу за invoke:
+      - ответ короче 3 символов → переспрашиваем текущий шаг;
+      - нормальный ответ → продвигаем subtask_index;
+      - очередь исчерпана → исходный вопрос перезадаётся (новый question_id "-b").
+    """
+    st = state.model_copy(deep=True)
+    if not st.subtask_queue:
+        return st.model_dump()
+    current = st.subtask_queue[st.subtask_index] if 0 <= st.subtask_index < len(st.subtask_queue) else st.subtask_queue[-1]
+    if st.pending_answer is not None:
+        ans = st.pending_answer.strip()
+        st.pending_answer = None
+        if len(ans) < 3:
+            st.agent_question = f"Коротко ответь на шаг: {current}"
+            return st.model_dump()
+        st.subtask_index += 1
+        st.subtask_answer_ok = True
+    if st.subtask_index >= len(st.subtask_queue):
+        # Разбор завершён: возвращаемся к исходному вопросу (он не финализировался)
+        st.subtask_queue = None
+        st.subtask_index = 0
+        card = st.current_question
+        new_qid = f"{card.question_id}-b" if card else ""
+        new_card = card.model_copy(update={"question_id": new_qid})
+        st.current_question = new_card
+        st.agent_question = new_card.question
+        st.agent_options = new_card.options
+        st.records.append({
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "question_id": new_qid,
+            "question": new_card.question,
+            "options": new_card.options,
+            "answer_type": new_card.answer_type,
+            "difficulty": new_card.difficulty,
+            "topic": new_card.topic,
+            "section": st.current_section,
+            "student_answer": None,
+            "score01": None,
+            "correct": None,
+            "feedback": None,
+            "correct_answer": ", ".join(st.current_answers) or None,
+            "model_used": None,
+            "judge_score": None,
+        })
+        _emit(deps, "quiz.card", question_id=new_card.question_id, question=new_card.question,
+              options=new_card.options, answer_type=new_card.answer_type, difficulty=new_card.difficulty,
+              topic=new_card.topic, num_questions=st.num_questions,
+              question_num=st.answered_count + 1)
+        return st.model_dump()
+    current = st.subtask_queue[st.subtask_index]
+    _emit(deps, "quiz.hint", hint=current, level=0, attempts_left=0,
+          subtask=True, subtask_index=st.subtask_index + 1, subtask_total=len(st.subtask_queue))
+    st.agent_question = current
+    return st.model_dump()
+
+
 def summary_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     st = state.model_copy(deep=True)
     total = st.answered_count
@@ -1990,6 +2050,7 @@ def build_graph(deps: Optional[GraphDeps] = None, checkpointer: Any = None) -> A
     g.add_node(NODE_AGENT_TUTOR, _logged_node(deps, NODE_AGENT_TUTOR, lambda s: agent_tutor_node(s, deps)))
     g.add_node(NODE_GENERATE_QUESTION, _logged_node(deps, NODE_GENERATE_QUESTION, lambda s: generate_question_node(s, deps)))
     g.add_node(NODE_EVALUATE_ANSWER, _logged_node(deps, NODE_EVALUATE_ANSWER, lambda s: evaluate_answer_node(s, deps)))
+    g.add_node(NODE_SUBTASK, _logged_node(deps, NODE_SUBTASK, lambda s: subtask_node(s, deps)))
     g.add_node(NODE_SUMMARY, _logged_node(deps, NODE_SUMMARY, lambda s: summary_node(s, deps)))
 
     use_agent_intake = getattr(deps.settings, "USE_AGENT_INTAKE", True)
@@ -2085,12 +2146,14 @@ def build_graph(deps: Optional[GraphDeps] = None, checkpointer: Any = None) -> A
             {
                 NODE_GENERATE_QUESTION: NODE_GENERATE_QUESTION,
                 NODE_EVALUATE_ANSWER: NODE_EVALUATE_ANSWER,
+                NODE_SUBTASK: NODE_SUBTASK,
                 NODE_SUMMARY: NODE_SUMMARY,
                 END: END,
             },
         )
         g.add_edge(NODE_GENERATE_QUESTION, END)
         g.add_edge(NODE_EVALUATE_ANSWER, NODE_TUTOR_NEXT)
+        g.add_edge(NODE_SUBTASK, END)
     g.add_edge(NODE_SUMMARY, END)
 
     return g.compile(checkpointer=checkpointer)

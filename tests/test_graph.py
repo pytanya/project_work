@@ -21,6 +21,14 @@ _EVAL_OK = '{"score": 8, "correct": true, "feedback": "Верно!", "citation_o
 _EVAL_WRONG = '{"score": 2, "correct": false, "feedback": "Неверно.", "citation_ok": false}'
 _EXPL = '{"text": "Атмосфера — газовая оболочка.", "citation": {"paragraph": "§12", "source": "учебник"}}'
 _JUDGE = '{"criteria": {"grade_correct": 9, "feedback_ok": 8, "difficulty_fit": 7}}'
+_GEN_WITH_SUBTASKS = (
+    '{"question": "Опиши алгоритм поиска максимума в списке чисел.", '
+    '"options": null, "answer_type": "open", "topic": "Алгоритмы", '
+    '"correct_answers": ["Пройти по элементам списка и сравнивать с текущим максимумом"], '
+    '"excerpt": "Алгоритм поиска максимума — перебор всех элементов списка.", '
+    '"hint": "Подумай, с какого элемента начать сравнение.", '
+    '"subtasks": ["шаг1", "шаг2", "шаг3"]}'
+)
 
 
 class FakeEmbedder:
@@ -1319,3 +1327,54 @@ def test_second_wrong_after_hints_finalizes(make_settings, tmp_path):
     assert st.hint_level == 0  # сброшен после финализации
     assert st.attempts_on_question == 0
     assert st.retry_question_id is None
+
+
+def test_decomposition_walks_subtasks_then_reasks(make_settings, tmp_path):
+    """Scaffolding (B6): после исчерпания подсказок сложная задача декомпозируется
+    на подзадачи (subtask_node), ученик отвечает на каждый шаг, затем исходный
+    вопрос задаётся повторно (с новым question_id -b)."""
+    s = make_settings(
+        FGOS_REFERENCE_DIR=str(FGOS_DIR),
+        TEXTBOOKS_DOWNLOADS_DIR=str(tmp_path / "downloads"),
+        MAX_INTAKE_ITERATIONS=8,
+        OCR_MIN_TEXT_CHARS=20,
+        KNOWLEDGE_GRAPH_DIR=str(tmp_path / "kg"),
+        KNOWLEDGE_WIKI_DIR=str(tmp_path / "wiki"),
+        SOURCES_CACHE_DIR=str(tmp_path / "sources_cache"),
+        STUDENTS_DIR=str(tmp_path / "students"),
+    )
+    store = NumpyVectorStore("t", FakeEmbedder())
+    store.add([DocChunk(
+        id="c1",
+        text="Алгоритм поиска максимума в списке: начать с первого элемента, "
+             "сравнить его со всеми остальными и запомнить наибольшее значение. "
+             "Такой перебор элементов называется линейным поиском.",
+        subject="информатика", grade="7", topic="Алгоритмы", student_id="stu_subtask",
+    )])
+    events = []
+    deps = GraphDeps(embedder=FakeEmbedder(), store=store, settings=s,
+                     tutor_llm=lambda m: _GEN_WITH_SUBTASKS,
+                     eval_llm=lambda m: _EVAL_WRONG, expert_llm=lambda m: _EXPL,
+                     judge_llm=lambda m: _JUDGE,
+                     on_event=lambda ev, data: events.append((ev, data)))
+    g = build_graph(deps)
+    st = TutorState(student_id="stu_subtask", learner_type="schoolchild", grade="7",
+                    subject="информатика", topic="Алгоритмы", mode="quiz",
+                    has_textbook=False, num_questions=1, source_status="ready")
+    st = _invoke(g, st.model_dump())
+    st = _invoke(g, st.model_dump())  # вопрос сгенерирован
+    card = st.current_question
+    assert card is not None
+    assert card.subtasks == ["шаг1", "шаг2", "шаг3"]
+    # лестница подсказок: level 1, level 2, затем 3-й неверный → декомпозиция
+    for _ in range(3):
+        st = _invoke(g, {**st.model_dump(), "pending_answer": "не знаю"})
+    assert st.subtask_queue is not None  # запущен пошаговый разбор
+    assert st.current_question is not None  # вопрос остаётся смонтированным
+    assert st.answered_count == 0  # ещё не финализирован
+    # пошаговый разбор: ответ на каждый шаг
+    for _ in range(3):
+        st = _invoke(g, {**st.model_dump(), "pending_answer": "понял"})
+    assert st.subtask_queue is None  # разбор завершён
+    assert st.current_question is not None  # исходный вопрос перезадан (-b)
+    assert st.current_question.question_id == f"{card.question_id}-b"

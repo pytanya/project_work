@@ -268,4 +268,21 @@ def evaluate_and_record(
                      attempts_left=max_hints - st.hint_level, subtask=False)
             return st, st.agent_message, None, None
 
+    # Декомпозиция: после исчерпания подсказок у сложной задачи (subtasks) — пошаговый разбор.
+    # Ошибка фиксируется в records (score01/correct/feedback), но вопрос НЕ сбрасывается:
+    # он остаётся смонтированным, и route_tutor уводит граф на NODE_SUBTASK.
+    if enable_scaffolding and card is not None and not graded.correct and getattr(card, "subtasks", None):
+        st.pending_answer = None
+        st.subtask_queue = list(card.subtasks)
+        st.subtask_index = 0
+        st.hint_level = 0
+        st.attempts_on_question = 0
+        st.retry_question_id = None
+        st.agent_message = "Разберём по шагам."
+        if st.records and st.records[-1].get("question_id") == card.question_id:
+            st.records[-1].update({
+                "student_answer": answer, "score01": round(graded.score, 4),
+                "correct": False, "feedback": graded.feedback or "Неверно — разбираем по шагам",
+            })
+        return st, st.agent_message, None, None
     return _finalize(graded.correct)
