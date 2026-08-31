@@ -10,6 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from api.schemas import IntakeStatusResponse, MessageResponse, QuizCard, WsEvent
+from src.states import TutorState
 
 
 class TestIntakeStatusResponse:
@@ -121,3 +122,27 @@ class TestWsEvent:
     def test_invalid_event_rejected(self):
         with pytest.raises(ValidationError):
             WsEvent(event="nope.event", data={})
+
+
+def test_tutor_state_scaffold_review_fields():
+    st = TutorState()
+    assert st.hint_level == 0
+    assert st.attempts_on_question == 0
+    assert st.retry_question_id is None
+    assert st.subtask_queue is None
+    assert st.subtask_answer_ok is False
+    assert st.review_requested is False
+    assert st.review_active is False
+    assert st.review_cards == []
+    assert st.review_index == 0
+
+    st2 = TutorState(
+        hint_level=2,
+        review_active=True,
+        review_cards=[{"card_id": "x"}],
+    )
+    d = st2.model_dump()
+    restored = TutorState.model_validate(d)
+    assert restored.hint_level == 2
+    assert restored.review_active is True
+    assert restored.review_cards == [{"card_id": "x"}]

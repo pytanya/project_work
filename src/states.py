@@ -131,6 +131,22 @@ class TutorState(IntakeState):
     # JSON-безопасный dict {d, alpha, arms:[{A, b, n}]}. None — эвристика adjust_difficulty.
     bandit: Optional[Dict[str, Any]] = None
 
+    # --- Scaffolding (адаптивное усложнение, roadmap) ---
+    hint_level: int = 0
+    attempts_on_question: int = 0
+    retry_question_id: Optional[str] = None
+    subtask_queue: Optional[List[str]] = None
+    subtask_index: int = 0
+    subtask_answer_ok: bool = False
+
+    # --- Spaced repetition (SM-2 Question Bank, roadmap) ---
+    review_requested: bool = False
+    review_active: bool = False
+    review_cards: List[Dict[str, Any]] = Field(default_factory=list)
+    review_index: int = 0
+    review_reviewed: int = 0
+    review_correct: int = 0
+
     def update_knowledge(self, topic: str, score01: float) -> None:
         """Экспоненциальное сглаживание мастерства (Ж-6): 0.7*текущее + 0.3*результат."""
         current = self.knowledge_map.get(topic, 0.5)
