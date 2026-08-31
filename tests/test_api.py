@@ -16,6 +16,11 @@ from src.config import BASE_DIR, Settings
 from src.graph import GraphDeps
 from src.knowledge import DocChunk, NumpyVectorStore
 
+
+def _persona(n: int) -> str:
+    """Синтетическое имя фикстуры (ФИО ≥2 слов) — реальные имена в код не зашиваются."""
+    return f"Персона {n:02d}"
+
 _GEN = '{"question": "Что такое атмосфера?", "options": ["А", "Б"], "answer_type": "single", "topic": "Атмосфера"}'
 _EVAL = '{"score": 8, "correct": true, "feedback": "Верно!", "citation_ok": true}'
 _EXPL = '{"text": "Объяснение ошибки.", "citation": {"paragraph": "§12", "source": "учебник"}}'
@@ -430,7 +435,7 @@ class TestStudentProfile:
         return client.post("/api/sessions", json=kw)
 
     def _fill_card(self, client, sid, student_id=None, **over):
-        values = {"name": "Маша Иванова", "learner_type": "schoolchild", "grade": "6",
+        values = {"name": _persona(1), "learner_type": "schoolchild", "grade": "6",
                   "subject": "география", "topic": "Атмосфера",
                   "has_textbook": "false", "mode": "quiz", **over}
         return client.post(f"/api/sessions/{sid}/intake/card", json={"values": values, "student_id": student_id})
@@ -465,7 +470,7 @@ class TestStudentProfile:
 
         p = client.app.state.store.student_store.get(stu_id)
         assert p is not None
-        assert p.name == "Маша Иванова"
+        assert p.name == _persona(1)
         assert p.learner_type == "schoolchild"
         assert p.grade == "6"
 
@@ -477,19 +482,19 @@ class TestStudentProfile:
         r2 = self._create(client, student_id=stu_id)
         st = client.get(f"/api/sessions/{r2.json()['session_id']}").json()
         assert st["student_id"] == stu_id
-        assert st["student_name"] == "Маша Иванова"
+        assert st["student_name"] == _persona(1)
         assert st["learner_type"] == "schoolchild"
         assert st["grade"] == "6"
 
     def test_card_blocks_profanity_name(self, client):
         r = self._create(client)
-        resp = self._fill_card(client, r.json()["session_id"], name="Хуйня Иванов")
+        resp = self._fill_card(client, r.json()["session_id"], name="Хуйня Один")
         assert resp.status_code == 200
         assert resp.json()["complete"] is False
 
     def test_card_requires_two_word_name(self, client):
         r = self._create(client)
-        resp = self._fill_card(client, r.json()["session_id"], name="Маша")
+        resp = self._fill_card(client, r.json()["session_id"], name="Однослов")
         assert resp.status_code == 200
         assert resp.json()["complete"] is False
 
@@ -499,32 +504,32 @@ class TestStudentProfile:
         а старая (предыдущего ученика) остаётся нетронутой."""
         r = self._create(client, initial={"sources": [{"type": "web", "url": "x"}], "collection_id": "web"})
         sid, old_id = r.json()["session_id"], r.json()["student_id"]
-        # профиль «школьницы Маши» — под её id
-        resp = self._fill_card(client, sid, name="Маша Иванова", learner_type="schoolchild", grade="7")
+        # профиль первого человека — под его id
+        resp = self._fill_card(client, sid, name=_persona(1), learner_type="schoolchild", grade="7")
         assert resp.json()["complete"] is True
         st = client.get(f"/api/sessions/{sid}").json()
         assert st["student_id"] == old_id
         profile_old = client.app.state.store.student_store.get(old_id)
-        assert profile_old is not None and profile_old.name == "Маша Иванова"
+        assert profile_old is not None and profile_old.name == _persona(1)
 
-        # тот же браузер, но карточка другого человека (студент Татьяна) —
-        # фронт присылает детерминированный id; сессия перепривязывается
-        new_id = "stu_tatiana_student"
+        # тот же браузер, но карточка другого человека — фронт присылает
+        # детерминированный id; сессия перепривязывается
+        new_id = "stu_second"
         n = client.get(f"/api/sessions/{sid}").json()["learner_type"]
         assert n == "schoolchild"
         resp2 = self._fill_card(
             client, sid, student_id=new_id,
-            name="Татьяна Петрова", learner_type="student", grade="",
+            name=_persona(2), learner_type="student", grade="",
         )
         assert resp2.json()["complete"] is True
         st2 = client.get(f"/api/sessions/{sid}").json()
         assert st2["student_id"] == new_id
-        # старый профиль (Маши) не перезаписан, остался под своим id
+        # старый профиль не перезаписан, остался под своим id
         profile_old2 = client.app.state.store.student_store.get(old_id)
-        assert profile_old2 is not None and profile_old2.name == "Маша Иванова"
+        assert profile_old2 is not None and profile_old2.name == _persona(1)
         # новый профиль создан под новым id
         profile_new = client.app.state.store.student_store.get(new_id)
-        assert profile_new is not None and profile_new.name == "Татьяна Петрова"
+        assert profile_new is not None and profile_new.name == _persona(2)
         assert profile_new.learner_type == "student"
 
 

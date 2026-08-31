@@ -253,7 +253,7 @@ class TestIntakeCard:
         s = IntakeState(student_id="stu_old")
         st = apply_intake_card(
             s,
-            {"name": "Татьяна Петрова", "learner_type": "student",
+            {"name": "Персона 01", "learner_type": "student",
              "subject": "физика", "topic": "Оптика", "has_textbook": "true", "mode": "lesson"},
             student_id="stu_new",
         )
