@@ -1378,3 +1378,44 @@ def test_decomposition_walks_subtasks_then_reasks(make_settings, tmp_path):
     assert st.subtask_queue is None  # разбор завершён
     assert st.current_question is not None  # исходный вопрос перезадан (-b)
     assert st.current_question.question_id == f"{card.question_id}-b"
+
+
+def test_wrong_answer_writes_review_card(make_settings, tmp_path):
+    """Spaced repetition (C2): финальный неверный ответ → карточка в ReviewBank."""
+    from src.review import ReviewBank
+
+    s = make_settings(
+        FGOS_REFERENCE_DIR=str(FGOS_DIR),
+        TEXTBOOKS_DOWNLOADS_DIR=str(tmp_path / "downloads"),
+        MAX_INTAKE_ITERATIONS=8,
+        OCR_MIN_TEXT_CHARS=20,
+        KNOWLEDGE_GRAPH_DIR=str(tmp_path / "kg"),
+        KNOWLEDGE_WIKI_DIR=str(tmp_path / "wiki"),
+        SOURCES_CACHE_DIR=str(tmp_path / "sources_cache"),
+        STUDENTS_DIR=str(tmp_path / "students"),
+        REVIEW_BANK_DIR=str(tmp_path / "review_bank"),
+    )
+    store = NumpyVectorStore("t", FakeEmbedder())
+    store.add([DocChunk(
+        id="c1",
+        text="Атмосфера — воздушная оболочка Земли: азот 78%, кислород 21%. "
+             "Именно она защищает планету и определяет погоду на её поверхности.",
+        subject="география", grade="6", topic="Атмосфера", student_id="stu_x",
+    )])
+    deps = GraphDeps(embedder=FakeEmbedder(), store=store, settings=s,
+                     tutor_llm=lambda m: _GEN, expert_llm=lambda m: _EXPL,
+                     judge_llm=lambda m: _JUDGE)
+    g = build_graph(deps)
+    st = TutorState(student_id="stu_x", learner_type="schoolchild", grade="6",
+                    subject="география", topic="Атмосфера", mode="quiz",
+                    has_textbook=False, num_questions=2, source_status="ready")
+    st = _invoke(g, st.model_dump())
+    st = _invoke(g, st.model_dump())  # вопрос сгенерирован
+    card = st.current_question
+    assert card is not None
+    # лестница подсказок: level 1, level 2, затем 3-й неверный → финализация + карточка
+    for _ in range(3):
+        st = _invoke(g, {**st.model_dump(), "pending_answer": "не знаю"})
+    assert st.answered_count == 1  # вопрос финализирован
+    bank = ReviewBank(tmp_path / "review_bank", "stu_x")
+    assert bank.stats()["total"] >= 1

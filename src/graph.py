@@ -354,6 +354,22 @@ def _student_kg(deps: GraphDeps) -> Optional[Any]:
         return None
 
 
+def _review_bank(deps: GraphDeps, st: TutorState):
+    """ReviewBank для студента (fail-soft: None при выключенной фиче/ошибке)."""
+    try:
+        if not getattr(getattr(deps, "settings", None), "ENABLE_SPACED_REPETITION", True):
+            return None
+        if not getattr(st, "student_id", None):
+            return None
+        from .review import ReviewBank
+
+        return ReviewBank(deps.settings.REVIEW_BANK_DIR, st.student_id,
+                          max_cards=getattr(deps.settings, "REVIEW_BANK_MAX_CARDS", 200))
+    except Exception as exc:
+        logger.warning("ReviewBank unavailable: %s", exc)
+        return None
+
+
 def _rag_filters(state: TutorState) -> Dict[str, Any]:
     """Метаданные-фильтры RAG-поиска (subject/grade/topic/раздел активной темы/ученик)."""
     filters: Dict[str, Any] = {}

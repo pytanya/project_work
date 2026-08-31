@@ -201,6 +201,19 @@ def evaluate_and_record(
                 "correct_answer": ", ".join(st.current_answers) or "",
             })
 
+        # Spaced repetition (roadmap): ошибочный вопрос → карточка в ReviewBank
+        if not graded.correct:
+            try:
+                from .graph import _review_bank
+
+                bank = _review_bank(deps, st)
+                if bank is not None and st.records and st.records[-1].get("question_id") == card.question_id:
+                    rec = dict(st.records[-1])
+                    rec.setdefault("subject", getattr(st, "subject", None) or "")
+                    bank.add_from_record(rec)
+            except Exception as exc:
+                logger.warning("Review card add failed: %s", exc)
+
         if emit is not None:
             emit("tutor.explanation" if not graded.correct else "system",
                  message=message,
