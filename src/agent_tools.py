@@ -302,6 +302,51 @@ def finish_session(args: Dict[str, Any], ctx: AgentToolContext) -> Tuple[str, Tu
     return _ok(action="finish_session", answered=st.answered_count, correct=st.correct_count), st
 
 
+# ----------------------------------------------------------------------
+# Интервальное повторение (SM-2 Question Bank, roadmap)
+# ----------------------------------------------------------------------
+def start_review(args: Dict[str, Any], ctx: AgentToolContext) -> Tuple[str, TutorState]:
+    """Начать блиц-опрос по должным карточкам (SM-2)."""
+    from .graph import _review_bank
+
+    st = ctx.state
+    bank = _review_bank(ctx.deps, st)
+    if bank is None:
+        return _err("Интервальное повторение выключено или нет student_id"), st
+    due = bank.get_due(subject=getattr(st, "subject", None) or None,
+                       limit=getattr(ctx.deps.settings, "REVIEW_QUIZ_SIZE", 5))
+    if not due:
+        return _ok(due_count=0, message="Карточек на повторение нет"), st
+    st = st.model_copy(update={
+        "review_requested": False, "review_active": True,
+        "review_cards": [c.to_dict() for c in due], "review_index": 0,
+        "review_reviewed": 0, "review_correct": 0,
+    })
+    return _ok(due_count=len(due), cards=[c.question for c in due]), st
+
+
+def submit_review(args: Dict[str, Any], ctx: AgentToolContext) -> Tuple[str, TutorState]:
+    """Оценить ответ по карточке и применить SM-2."""
+    from .graph import _review_bank
+
+    st = ctx.state
+    card_id = str(args.get("card_id") or "")
+    answer = str(args.get("answer") or "")
+    bank = _review_bank(ctx.deps, st)
+    if bank is None or not card_id:
+        return _err("Review недоступен"), st
+    card = bank.get(card_id)
+    if card is None:
+        return _err("Карточка не найдена"), st
+    from .tutor import evaluate_answer
+
+    graded = evaluate_answer(card.question, answer, [card.correct_answer], st,
+                             llm_call=ctx.llm_call)
+    bank.review_card(card_id, graded.correct)
+    return _ok(card_id=card_id, correct=graded.correct,
+               score=round(graded.score, 4)), st
+
+
 AGENT_TOOLS: Dict[str, Callable[[Dict[str, Any], AgentToolContext], Tuple[str, TutorState]]] = {
     "interview_progress": interview_progress,
     "set_intake": set_intake,
@@ -317,6 +362,8 @@ AGENT_TOOLS: Dict[str, Callable[[Dict[str, Any], AgentToolContext], Tuple[str, T
     "deep_dive": deep_dive,
     "route_to_source": route_to_source,
     "finish_session": finish_session,
+    "start_review": start_review,
+    "submit_review": submit_review,
 }
 
 
@@ -404,6 +451,17 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
         "name": "finish_session",
         "description": "Завершить сессию: суммаризация результатов + экспорт.",
         "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "start_review",
+        "description": "Начать блиц-опрос по должным карточкам интервального повторения (SM-2): показать карточки ученику.",
+        "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "submit_review",
+        "description": "Оценить ответ ученика по карточке интервального повторения и применить SM-2 (интервал/повторы).",
+        "parameters": {"type": "object",
+                      "properties": {"card_id": _param(type="string", description="ID карточки из start_review"),
+                                     "answer": _param(type="string", description="ответ ученика")},
+                      "required": ["card_id", "answer"]}}},
 ]
 
 

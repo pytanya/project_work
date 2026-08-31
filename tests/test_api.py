@@ -94,6 +94,28 @@ def _new_session(client, **initial) -> str:
     return r.json()["session_id"]
 
 
+def test_student_review_endpoint(client):
+    """SM-2 Question Bank: GET /students/{id}/review + POST /sessions/{id}/review."""
+    r = client.post("/api/sessions", json={"student_id": "stu_review"})
+    assert r.status_code == 201
+    sid = r.json()["session_id"]
+
+    rr = client.get("/api/students/stu_review/review")
+    assert rr.status_code == 200
+    body = rr.json()
+    assert "stats" in body
+    assert "due" in body
+    assert body["stats"]["total"] == 0
+    assert body["due"] == []
+
+    pr = client.post(f"/api/sessions/{sid}/review")
+    # 200 — повторение запущено; 409 — предыдущий шаг графа ещё выполняется
+    assert pr.status_code in (200, 409)
+    if pr.status_code == 200:
+        assert pr.json()["ok"] is True
+        assert "due_count" in pr.json()
+
+
 class TestStreaming:
     def test_token_event_schema(self):
         ev = WsEvent(event="token", data={"text": "Привет"})

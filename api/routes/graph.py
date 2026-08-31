@@ -253,6 +253,34 @@ async def select_topic(session_id: str, body: TopicBody, store: SessionStore = D
         raise
 
 
+@router.post("/review")
+async def start_review(session_id: str, store: SessionStore = Depends(get_store)):
+    """Запустить блиц-опрос по должным карточкам SM-2 (по запросу ученика)."""
+    session = get_session(store, session_id)
+    if session.step_active:
+        raise HTTPException(status_code=409, detail="Шаг уже выполняется")
+
+    from src.review import ReviewBank
+
+    student_id = getattr(session.state, "student_id", None) or ""
+    due_count = 0
+    try:
+        bank = ReviewBank(default_settings.REVIEW_BANK_DIR, student_id)
+        due_count = len(bank.get_due(limit=50))
+    except Exception:
+        due_count = 0
+
+    session.state = session.state.model_copy(
+        update={"review_requested": True, "agent_message": None, "pending_answer": None}
+    )
+
+    # Закрываем окно между проверкой и стартом задачи (fix #1: без двойного run_step)
+    session.step_active = True
+    task = asyncio.create_task(_run_step_background(session))
+    _track_background_task(task)
+    return {"ok": True, "due_count": due_count}
+
+
 @router.get("/knowledge-package")
 def knowledge_package(session_id: str, store: SessionStore = Depends(get_store)):
     """OKF-бандл знаний учебника (index + log + topics/*.md с YAML-frontmatter)."""

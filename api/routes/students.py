@@ -210,3 +210,18 @@ def get_recommendations(
             g for g in (kg.get_prerequisite_gaps(current_topic) if current_topic else [])
         ],
     }
+
+
+@router.get("/{student_id}/review")
+def student_review(student_id: str, store: SessionStore = Depends(get_store)):
+    """SM-2 Question Bank: статистика + должные карточки."""
+    from src.review import ReviewBank
+    from src.config import settings as default_settings
+
+    try:
+        bank_settings = getattr(store, "settings", None) or default_settings
+        bank = ReviewBank(bank_settings.REVIEW_BANK_DIR, student_id)
+        return {"stats": bank.stats(),
+                "due": [c.to_dict() for c in bank.get_due(limit=50)]}
+    except Exception:
+        return {"stats": {"total": 0, "due": 0, "lapses": 0, "by_topic": {}}, "due": []}

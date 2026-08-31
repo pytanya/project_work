@@ -194,3 +194,37 @@ class TestTutoringTools:
     def test_unknown_tool_error(self):
         res, _ = execute_agent_tool("no_such_tool", {}, _ctx(TutorState()))
         assert json.loads(res)["ok"] is False
+
+
+class TestReviewTools:
+    def test_start_review_tool(self, tmp_path):
+        from src.review import ReviewBank
+
+        ReviewBank(tmp_path, "s1").add_from_record({"question": "q?", "options": None,
+            "answer_type": "open", "topic": "Тема", "subject": "s", "correct_answer": "a",
+            "correct": False, "score01": 0.0})
+        from src.states import TutorState
+
+        st = TutorState(student_id="s1", subject="s", topic="Тема", mode="quiz")
+        ctx = _ctx(st)
+        ctx.deps.settings = type("S", (), {"REVIEW_BANK_DIR": tmp_path,
+                                           "REVIEW_QUIZ_SIZE": 5,
+                                           "ENABLE_SPACED_REPETITION": True})()
+        res, out = execute_agent_tool("start_review", {}, ctx)
+        assert '"ok": true' in res
+        assert out.review_active is True
+        assert out.review_cards and out.review_cards[0]["question"] == "q?"
+
+    def test_start_review_no_due(self, tmp_path):
+        from src.states import TutorState
+
+        st = TutorState(student_id="s1", subject="s", topic="Тема", mode="quiz")
+        ctx = _ctx(st)
+        ctx.deps.settings = type("S", (), {"REVIEW_BANK_DIR": tmp_path,
+                                           "REVIEW_QUIZ_SIZE": 5,
+                                           "ENABLE_SPACED_REPETITION": True})()
+        res, out = execute_agent_tool("start_review", {}, ctx)
+        data = json.loads(res)
+        assert data["ok"] is True
+        assert data["due_count"] == 0
+        assert out.review_active is False

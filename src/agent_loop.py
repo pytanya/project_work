@@ -305,12 +305,15 @@ TUTOR_AGENT_PROMPT = (
     "\n10. При ошибке ученика (evaluate_answer вернул correct=false) НЕ выдавай сразу "
     "правильный ответ: вызови give_hint (уровень 1), затем (при повторной ошибке) "
     "give_hint (уровень 2) или explain_error. Один вопрос — не более двух подсказок."
+    "\n11. Для интервального повторения: вызови start_review; показывай карточки ученику "
+    "и принимай ответы через submit_review(card_id, answer)."
 )
 
 
 # Подмножество инструментов для режима занятия (без инструментов интервью)
 TUTOR_TOOL_NAMES = {
     "evaluate_answer", "generate_quiz", "generate_lesson", "explain_error", "give_hint", "deep_dive", "rag_search", "finish_session",
+    "start_review", "submit_review",
 }
 TUTOR_TOOL_SCHEMAS = [s for s in TOOL_SCHEMAS if s.get("function", {}).get("name") in TUTOR_TOOL_NAMES]
 

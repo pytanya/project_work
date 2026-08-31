@@ -126,6 +126,7 @@ def run(cli_args) -> int:
         mode=scenario.get("mode"),
         has_textbook=scenario.get("has_textbook"),
         textbook_author=scenario.get("textbook_author"),
+        review_requested=cli_args.review,
     )
     textbook_file = cli_args.file or scenario.get("textbook_file")
     if textbook_file and not textbook_file.startswith("auto"):
@@ -149,42 +150,59 @@ def run(cli_args) -> int:
     last_lesson = ""
 
     while True:
-        # Завершение — выводим финальное сообщение один раз
-        if res.quiz_complete or res.session_status in ("completed", "failed"):
+        while True:
+            # Завершение — выводим финальное сообщение один раз
+            if res.quiz_complete or res.session_status in ("completed", "failed"):
+                if res.agent_message and res.agent_message != last_message:
+                    style = "ok" if "Квиз завершён" in res.agent_message else "err"
+                    print_panel("Итог", res.agent_message, style)
+                break
+
+            # урок/разбор показываем (CLI — без WS; структура остаётся в JSON-экспорте)
+            if res.lesson_text and res.lesson_text != last_lesson:
+                print_panel("Урок", res.lesson_text, "ok")
+                last_lesson = res.lesson_text
+
+            # выводим новые сообщения агента
             if res.agent_message and res.agent_message != last_message:
-                style = "ok" if "Квиз завершён" in res.agent_message else "err"
-                print_panel("Итог", res.agent_message, style)
-            break
+                print_panel("Агент", res.agent_message, "warn")
+                last_message = res.agent_message
+            if res.agent_question:
+                print_panel("Вопрос", res.agent_question, "metric")
+                if res.agent_options:
+                    print("Варианты:", ", ".join(res.agent_options))
 
-        # урок/разбор показываем (CLI — без WS; структура остаётся в JSON-экспорте)
-        if res.lesson_text and res.lesson_text != last_lesson:
-            print_panel("Урок", res.lesson_text, "ok")
-            last_lesson = res.lesson_text
-
-        # выводим новые сообщения агента
-        if res.agent_message and res.agent_message != last_message:
-            print_panel("Агент", res.agent_message, "warn")
-            last_message = res.agent_message
-        if res.agent_question:
-            print_panel("Вопрос", res.agent_question, "metric")
-            if res.agent_options:
-                print("Варианты:", ", ".join(res.agent_options))
-
-        if res.agent_question is None and res.intake_field is None:
-            # внутренний шаг (индексация и т.п.) — продолжаем
-            res = _invoke(graph, res.model_dump())
-            continue
-
-        if auto:
-            answer = _demo_auto_answer(res, scenario)
-            print(">", answer)
-        else:
-            answer = input("Вы: ").strip()
-            guard = guard_user_input(answer)
-            if guard["blocked"]:
-                print_panel("Блокировка", guard["message"], "err")
+            if res.agent_question is None and res.intake_field is None:
+                # внутренний шаг (индексация и т.п.) — продолжаем
+                res = _invoke(graph, res.model_dump())
                 continue
-        res = _invoke(graph, {**res.model_dump(), "pending_answer": answer})
+
+            if auto:
+                answer = _demo_auto_answer(res, scenario)
+                print(">", answer)
+            else:
+                answer = input("Вы: ").strip()
+                guard = guard_user_input(answer)
+                if guard["blocked"]:
+                    print_panel("Блокировка", guard["message"], "err")
+                    continue
+            res = _invoke(graph, {**res.model_dump(), "pending_answer": answer})
+
+        # Пост-квиз (--review): предложить интервальное повторение карточек SM-2
+        if not cli_args.review:
+            break
+        answer = input("Повторить карточки? (да/нет): ").strip().lower()
+        if answer not in ("да", "д", "yes", "y"):
+            break
+        res = res.model_copy(update={
+            "quiz_complete": False,
+            "session_status": None,
+            "review_requested": True,
+            "answered_count": 0,
+            "correct_count": 0,
+        })
+        last_message = ""
+        last_lesson = ""
 
     # Финальный вывод (завершающее сообщение уже выведено в цикле)
     if res.source_status == "failed" and res.agent_message:
@@ -234,6 +252,8 @@ def main() -> int:
     parser.add_argument("--subject", type=str, default=None, help="переопределить предмет")
     parser.add_argument("--grade", type=str, default=None, help="переопределить класс")
     parser.add_argument("--topic", type=str, default=None, help="переопределить тему")
+    parser.add_argument("--review", action="store_true",
+                        help="после квиза предложить повторение карточек (SM-2)")
     args = parser.parse_args()
     return run(args)
 
