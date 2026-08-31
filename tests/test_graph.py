@@ -1108,3 +1108,41 @@ class TestWikiIndexExtraction:
 
         _wiki_extract_from_graph(st, deps, limit=3, llm_call=llm_call)
         assert calls["n"] == 3  # кап сработал
+
+
+def test_lesson_marks_kg_in_progress(make_settings, tmp_path):
+    """Roadmap #4: прохождение урока по теме помечает тему in_progress в Student KG."""
+    from src.student import StudentStore
+
+    s = make_settings(
+        FGOS_REFERENCE_DIR=str(FGOS_DIR),
+        TEXTBOOKS_DOWNLOADS_DIR=str(tmp_path / "downloads"),
+        MAX_INTAKE_ITERATIONS=8,
+        OCR_MIN_TEXT_CHARS=20,
+        KNOWLEDGE_GRAPH_DIR=str(tmp_path / "kg"),
+        KNOWLEDGE_WIKI_DIR=str(tmp_path / "wiki"),
+        SOURCES_CACHE_DIR=str(tmp_path / "sources_cache"),
+    )
+    store = NumpyVectorStore("t", FakeEmbedder())
+    store.add([DocChunk(
+        id="c1",
+        text="Параграф 12: Атмосфера. Атмосфера — газовая оболочка Земли, "
+             "состоит из азота (78%) и кислорода (21%). Азот и кислород — её основа.",
+        subject="география", grade="6", topic="Атмосфера", student_id="stu_test",
+    )])
+    student_store = StudentStore(root_dir=tmp_path / "students")
+    student_store.get_or_create("stu_test")  # профиль создаётся на intake-карточке (как в API)
+    deps = GraphDeps(embedder=FakeEmbedder(), store=store, settings=s,
+                     student_store=student_store,
+                     tutor_llm=lambda m: _GEN, expert_llm=lambda m: _EXPL)
+    g = build_graph(deps)
+    st = TutorState(student_id="stu_test", learner_type="schoolchild", grade="6",
+                    subject="география", topic="Атмосфера", mode="lesson",
+                    has_textbook=False, source_status="ready")
+    res = _invoke(g, st.model_dump())
+    assert res.lesson_done is True  # content_node отработал по RAG-контексту
+    kg = student_store.get_knowledge_graph("stu_test")
+    assert kg is not None
+    topic = next((t for t in kg.topics.values() if "Атмосфера" in t.title), None)
+    assert topic is not None
+    assert topic.status == "in_progress"
