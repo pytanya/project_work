@@ -73,6 +73,15 @@ class TestQuizCard:
                 topic="t",
             )
 
+    def test_quiz_card_optional_hint_subtasks(self):
+        card = QuizCard(question_id="q1", question="?", answer_type="open", difficulty="medium", topic="t")
+        assert card.hint is None
+        assert card.subtasks is None
+        card2 = QuizCard(question_id="q2", question="?", answer_type="open", difficulty="hard", topic="t",
+                         hint="подумай", subtasks=["шаг1", "шаг2"])
+        assert card2.hint == "подумай"
+        assert card2.subtasks == ["шаг1", "шаг2"]
+
 
 class TestMessageResponse:
     def test_types(self):
@@ -104,6 +113,10 @@ class TestWsEvent:
         )
         ev = WsEvent(event="quiz.card", data=card.model_dump())
         assert ev.data["question_id"] == "q1"
+
+    def test_ws_event_quiz_hint_and_review_done(self):
+        WsEvent(event="quiz.hint", data={"hint": "x", "level": 1, "attempts_left": 1})
+        WsEvent(event="review.done", data={"reviewed": 3, "correct": 2})
 
     def test_invalid_event_rejected(self):
         with pytest.raises(ValidationError):

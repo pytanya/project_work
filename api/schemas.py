@@ -28,6 +28,9 @@ class QuizCard(BaseModel):
     answer_type: Literal["single", "multiple", "open"]
     difficulty: Literal["easy", "medium", "hard"]
     topic: str
+    hint: Optional[str] = None
+    subtasks: Optional[List[str]] = None
+    excerpt: Optional[str] = None
 
 
 class LessonSection(BaseModel):
@@ -143,9 +146,11 @@ class WsEvent(BaseModel):
         "source.progress",
         "source.failed",
         "quiz.card",
+        "quiz.hint",
         "tutor.lesson",
         "tutor.explanation",
         "tutor.summary",
+        "review.done",
         "token",
         "graph.ready",
         "wiki.updated",

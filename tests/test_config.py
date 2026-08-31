@@ -58,6 +58,15 @@ class TestDefaults:
         assert s.TEXTBOOKS_DOWNLOADS_DIR.is_absolute()
         assert s.TEXTBOOKS_DOWNLOADS_DIR == (BASE_DIR / "downloads").resolve()
 
+    def test_adaptive_learning_defaults(self, make_settings):
+        s = make_settings()
+        assert s.ENABLE_SCAFFOLDING is True
+        assert s.ENABLE_SPACED_REPETITION is True
+        assert s.MAX_HINTS_PER_QUESTION == 2
+        assert s.REVIEW_QUIZ_SIZE == 5
+        assert s.REVIEW_BANK_MAX_CARDS == 200
+        assert s.REVIEW_BANK_DIR == BASE_DIR / "data" / "review_bank"
+
 
 class TestProviderCascade:
     """Каскад по провайдерам (раздел 4.1)."""

@@ -169,6 +169,14 @@ class Settings(BaseSettings):
     # нового вопроса к уже заданным; при превышении — регенерация (≤ RETRIES раз).
     QUESTION_DEDUPE_THRESHOLD: float = Field(default=0.85, ge=0.0, le=1.0)
     QUESTION_DEDUPE_RETRIES: int = Field(default=2, ge=0)
+
+    # --- Адаптивное обучение (roadmap: scaffolding + spaced repetition) ---
+    ENABLE_SCAFFOLDING: bool = Field(default=True)
+    ENABLE_SPACED_REPETITION: bool = Field(default=True)
+    MAX_HINTS_PER_QUESTION: int = Field(default=2)
+    REVIEW_QUIZ_SIZE: int = Field(default=5)
+    REVIEW_BANK_MAX_CARDS: int = Field(default=200)
+    REVIEW_BANK_DIR: Path = Field(default=BASE_DIR / "data" / "review_bank")
     # TTL бездействия сессии (сек) — устаревшие сессии очищаются сервером
     SESSION_IDLE_TTL_SEC: float = Field(default=1800.0, gt=0)
     # Таймаут одного шага графа (сек) — зависшие операции не блокируют сессию
