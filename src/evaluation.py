@@ -8,6 +8,7 @@ records, knowledge_map, LinUCB bandit, судья (К-4), объяснение �
 
 from __future__ import annotations
 
+import datetime
 import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -56,6 +57,41 @@ def _topic_source(store: Any, topic: str, state: TutorState) -> str:
     except Exception:
         pass
     return ""
+
+
+def sync_student_kg(st: TutorState, deps: Any, topic: str) -> None:
+    """Идемпотентный пер-ответный синк темы в Student KG (fail-soft)."""
+    student_id = getattr(st, "student_id", None) or ""
+    if not student_id or not topic:
+        return
+    try:
+        store = getattr(deps, "student_store", None)
+        if store is None and deps.settings is not None:
+            from .student import StudentStore
+
+            store = StudentStore(root_dir=deps.settings.STUDENTS_DIR)
+        if store is None:
+            return
+        recs = [r for r in (st.records or []) if r.get("topic") == topic and r.get("score01") is not None]
+        attempts = len(recs)
+        correct = sum(1 for r in recs if r.get("correct"))
+        weak = [str(r.get("feedback", "")).strip() for r in recs if not r.get("correct") and r.get("feedback")]
+        mastery = st.knowledge_map.get(topic, 0.0)
+        store.update_knowledge_graph(
+            student_id=student_id,
+            subject=getattr(st, "subject", None) or "общая тема",
+            wiki_articles=[{
+                "topic": topic,
+                "subject": getattr(st, "subject", None) or "общая тема",
+                "mastery": mastery,
+                "attempts": attempts,
+                "correct": correct,
+                "weak_areas": weak[:3],
+                "last_studied": datetime.datetime.now().isoformat(timespec="seconds"),
+            }],
+        )
+    except Exception as exc:
+        logger.warning("Student KG live sync failed (topic=%s): %s", topic, exc)
 
 
 def evaluate_and_record(
@@ -178,6 +214,10 @@ def evaluate_and_record(
                     wiki.set_source(st, card.topic, src)
     except Exception as exc:
         logger.warning("Knowledge Wiki per-answer update failed: %s", exc)
+
+    # Student Knowledge Graph (roadmap #4): живой синк темы на каждый ответ
+    if card and card.topic:
+        sync_student_kg(st, deps, card.topic)
 
     if st.answered_count >= st.num_questions:
         st.quiz_complete = True

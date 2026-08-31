@@ -1146,3 +1146,45 @@ def test_lesson_marks_kg_in_progress(make_settings, tmp_path):
     topic = next((t for t in kg.topics.values() if "Атмосфера" in t.title), None)
     assert topic is not None
     assert topic.status == "in_progress"
+
+
+def test_answer_updates_kg_live(make_settings, tmp_path):
+    """Roadmap #4: каждый ответ ученика синхронит тему в Student KG (attempts/correct/mastery/weak_areas)."""
+    from src.student import StudentStore
+
+    s = make_settings(
+        FGOS_REFERENCE_DIR=str(FGOS_DIR),
+        TEXTBOOKS_DOWNLOADS_DIR=str(tmp_path / "downloads"),
+        MAX_INTAKE_ITERATIONS=8,
+        OCR_MIN_TEXT_CHARS=20,
+        KNOWLEDGE_GRAPH_DIR=str(tmp_path / "kg"),
+        KNOWLEDGE_WIKI_DIR=str(tmp_path / "wiki"),
+        SOURCES_CACHE_DIR=str(tmp_path / "sources_cache"),
+    )
+    store = NumpyVectorStore("t", FakeEmbedder())
+    store.add([DocChunk(
+        id="c1",
+        text="Параграф 12: Атмосфера. Атмосфера — газовая оболочка Земли, "
+             "состоит из азота (78%) и кислорода (21%). Азот и кислород — её основа.",
+        subject="география", grade="6", topic="Атмосфера", student_id="stu_test",
+    )])
+    student_store = StudentStore(root_dir=tmp_path / "students")
+    student_store.get_or_create("stu_test")  # профиль ученика (как в API)
+    deps = GraphDeps(embedder=FakeEmbedder(), store=store, settings=s,
+                     student_store=student_store,
+                     tutor_llm=lambda m: _GEN, eval_llm=lambda m: _EVAL_OK,
+                     expert_llm=lambda m: _EXPL)
+    g = build_graph(deps)
+    st = TutorState(student_id="stu_test", learner_type="schoolchild", grade="6",
+                    subject="география", topic="Атмосфера", mode="quiz",
+                    has_textbook=False, num_questions=2, source_status="ready")
+    res = _invoke(g, st.model_dump())
+    card = res.current_question
+    assert card is not None
+    answer = card.options[0] if card.options else "верный ответ"
+    res = _invoke(g, {**res.model_dump(), "pending_answer": answer})
+    kg = student_store.get_knowledge_graph("stu_test")
+    assert kg is not None
+    topic = next((t for t in kg.topics.values() if card.topic == t.topic_id or card.topic in t.title), None)
+    assert topic is not None
+    assert topic.attempts >= 1
