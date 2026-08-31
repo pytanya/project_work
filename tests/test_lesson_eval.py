@@ -127,3 +127,68 @@ class TestEvalLesson:
         d = eval_lesson(_good_lesson(), "7").to_dict()
         assert set(d) == {"criteria", "avg_score", "verdict", "grade_budget"}
         assert 0.0 <= d["avg_score"] <= 1.0
+
+
+class TestSourceMetadata:
+    """Метаданные источника заполняют citation секций → groundedness честный."""
+
+    def test_apply_source_metadata_section_number(self):
+        from src.tutor import _apply_source_metadata
+        lesson = Lesson(
+            title="Атмосфера",
+            sections=[
+                LessonSection(heading="Состав", body="Азот и кислород — основа."),
+                LessonSection(heading="Роль", body="Атмосфера защищает планету."),
+            ],
+        )
+        _apply_source_metadata(lesson, [
+            {"source": "Учебник География", "section_number": "12"},
+            {"source": "Учебник География", "section_number": "12"},
+        ])
+        assert lesson.sections[0].citation == "§12"
+        assert lesson.sections[1].citation == "§12"
+        assert lesson.sections[0].source == "Учебник География"
+
+    def test_apply_source_metadata_url_becomes_domain(self):
+        from src.tutor import _apply_source_metadata
+        lesson = Lesson(sections=[LessonSection(body="текст")])
+        _apply_source_metadata(lesson, [{"source": "https://www.infourok.ru/konspekt"}])
+        assert lesson.sections[0].citation == "infourok.ru"
+
+    def test_apply_source_metadata_inline_fallback(self):
+        # нет метаданных → ищем §N/страницу прямо в теле секции
+        from src.tutor import _apply_source_metadata, _extract_inline_citation
+        # напрямую хелпер
+        assert _extract_inline_citation("Подробнее в §5 учебника.") == "§5"
+        lesson = Lesson(sections=[LessonSection(body="Определение по §5 источника.")])
+        _apply_source_metadata(lesson, None)
+        assert lesson.sections[0].citation == "§5"
+
+    def test_source_metadata_makes_citations_nonzero(self):
+        # после применения метаданных citations перестаёт быть 0 → судья не режет groundedness
+        from src.tutor import _apply_source_metadata
+        lesson = Lesson(
+            title="Атмосфера",
+            hook="Почему небо голубое?",
+            definition="Атмосфера — газовая оболочка.",
+            sections=[
+                LessonSection(heading="Состав", body="Азот и кислород — основа."),
+                LessonSection(heading="Роль", body="Атмосфера защищает планету."),
+            ],
+            summary="Атмосфера защищает жизнь на Земле.",
+        )
+        _apply_source_metadata(lesson, [
+            {"source": "Учебник", "section_number": "2"},
+            {"source": "Учебник", "section_number": "3"},
+        ])
+        res = eval_lesson(lesson, "7")
+        assert res.criteria["citations"] >= 0.5
+
+    def test_existing_citation_not_overwritten(self):
+        from src.tutor import _apply_source_metadata
+        lesson = Lesson(sections=[LessonSection(body="текст", citation="стр. 9")])
+        _apply_source_metadata(lesson, [{"source": "Другое", "section_number": "12"}])
+        # уже проставленная цитата не затирается чужими метаданными
+        assert lesson.sections[0].citation == "стр. 9"
+        assert lesson.sections[0].source == ""
+

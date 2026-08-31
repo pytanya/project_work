@@ -23,7 +23,7 @@ from .knowledge import DocChunk, SearchResult, VectorStore
 logger = logging.getLogger("edututor.qdrant")
 
 # Поля, которые хранятся в payload для metadata-фильтрации (roadmap #1)
-_PAYLOAD_FIELDS = ("source", "subject", "grade", "section_number", "section_title", "page_number")
+_PAYLOAD_FIELDS = ("source", "subject", "grade", "topic", "section_number", "section_title", "page_number")
 
 
 def _chunk_uuid(chunk_id: str) -> uuid.UUID:
@@ -123,6 +123,7 @@ class QdrantStore:
             source=str(payload.get("source", "")),
             subject=payload.get("subject"),
             grade=payload.get("grade"),
+            topic=payload.get("topic") or None,
             section_number=payload.get("section_number"),
             section_title=payload.get("section_title"),
             page_number=payload.get("page_number"),
