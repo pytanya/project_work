@@ -451,6 +451,12 @@ export default function App() {
           push('error', d.message)
           // Удалить процессные статусы при ошибке сессии
           removeProcessStatuses()
+          // Сбросить busy если ждали ответ — иначе UI «зависнет»
+          if (isWaitingForAnswer.current || isPreparingTopic.current) {
+            setChatBusy(false)
+            isWaitingForAnswer.current = false
+            isPreparingTopic.current = false
+          }
           break
         default:
           break
@@ -719,7 +725,20 @@ export default function App() {
         current && current.kind === 'intake_card' ? current.card : null,
       )
 
-      await api.postIntakeCard(sessionId, values, studentId)
+      const cardResponse = await api.postIntakeCard(sessionId, values, studentId)
+
+      // Бэкенд мог вернуть ошибку (неполное ФИО, пустые поля) — check HTTP-ответ
+      // ДО intakeStatus, чтобы не делать лишний запрос.
+      if (!cardResponse.complete) {
+        setChatBusy(false)
+        isWaitingForAnswer.current = false
+        const errMsg = cardResponse.next_question ||
+          (cardResponse.missing_fields && cardResponse.missing_fields.length > 0
+            ? `Заполните: ${cardResponse.missing_fields.join(', ')}`
+            : 'Не удалось заполнить карточку знакомства')
+        push('error', errMsg)
+        return
+      }
 
       // Профиль ученика обновляем локально (имя/тип/класс/id) — для шапки/панели
       const next = {
@@ -743,6 +762,8 @@ export default function App() {
       }
     } catch (e) {
       push('error', String(e.message || e))
+      setChatBusy(false)
+      isWaitingForAnswer.current = false
     } finally {
       if (answerTimeoutRef.current) clearTimeout(answerTimeoutRef.current)
     }
