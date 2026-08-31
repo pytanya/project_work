@@ -40,12 +40,15 @@ function clean(v, field) {
   if (field === undefined && typeof v === 'string') field = 'unknown'
   const s = String(v ?? '').trim().replace(/^\ufeff/, '')
   if (!s) return ''
-  if (s.startsWith('{') || s.startsWith('[')) {
-    return ''
-  }
-  const inner = s.replace(/^['"]/g, '').replace(/['"]$/g, '')
-  if (inner.startsWith('{') || inner.startsWith('[')) {
-    return ''
+  // Если вся строка представляет собой сплошной сырой JSON-объект/массив со структурой ключей
+  if ((s.startsWith('{') && s.endsWith('}')) || (s.startsWith('[') && s.endsWith(']'))) {
+    // Проверим, парсится ли это как JSON
+    try {
+      JSON.parse(s)
+      return ''
+    } catch {
+      // не валидный JSON, обычный текст в фигурных/квадратных скобках
+    }
   }
   return s
 }
@@ -152,54 +155,11 @@ function extractSummary(mdText) {
 
 /* ═══════════════════════════════════════════
    Markdown Inline-парсер для контента секций
+   Использует LatexText для рендеринга формул
+   и поддержки markdown-изображений.
    ═══════════════════════════════════════════ */
 
-/** Экранирует специальные HTML-символы */
-function escapeHtml(str) {
-  const A = String.fromCharCode(38) + 'amp;'
-  const L = String.fromCharCode(38) + 'lt;'
-  const G = String.fromCharCode(38) + 'gt;'
-  return str
-.replace(/&/gu, A)
-.replace(/</gu, L)
-.replace(/>/gu, G)
-}
-
-function renderMarkdownLine(line) {
-  let html = String(line || '')
-  
-  // Извлекаем markdown-изображения ![alt](url) ДО экранирования
-  // (иначе URL может содержать &lt; или другие экранированные символы)
-  const imagePlaceholders = []
-  html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt, url) => {
-    const placeholder = `__IMG_${imagePlaceholders.length}__`
-    imagePlaceholders.push(`<img src="${url}" alt="${alt}" loading="lazy" class="lesson-image" />`)
-    return placeholder
-  })
-  
-  // Экранируем HTML (порядок важен: & первым!)
-  html = escapeHtml(html)
-  
-  // Жирный текст: **текст** или __текст__
-  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/__(.+?)__/g, '<strong>$1</strong>')
-  
-  // Курсив: *текст* или _текст_
-  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>')
-    .replace(/(?<!\w)_(.+?)_(?!\w)/g, '<em>$1</em>')
-  
-  // Код: `текст`
-  html = html.replace(/`(.+?)`/g, '<code>$1</code>')
-  
-  // Восстанавливаем изображения
-  for (let i = 0; i < imagePlaceholders.length; i++) {
-    html = html.replace(`__IMG_${i}__`, imagePlaceholders[i])
-  }
-  
-  return html
-}
-
-/** Парсит блок текста и возвращает массив React-фрагментов (абзацы, списки). */
+/** Парсит блок текста и возвращает массив React-фрагментов (абзацы, списки, изображения). */
 function parseInlineMarkdown(text) {
   if (!text) return null
   
@@ -207,6 +167,9 @@ function parseInlineMarkdown(text) {
   const fragments = []
   let inList = false
   let listItems = []
+  // Нумерованный список
+  let inOrderedList = false
+  let orderedItems = []
   
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
@@ -215,21 +178,73 @@ function parseInlineMarkdown(text) {
     // Маркированный список
     const bulletMatch = trimmed.match(/^[-*•]\s+(.+)$/)
     if (bulletMatch) {
+      // Завершаем нумерованный список, если был
+      if (inOrderedList) {
+        fragments.push(<ol key={`ol-${fragments.length}`}>{orderedItems.map((item, j) => (
+          <li key={j}><LatexText text={item} /></li>
+        ))}</ol>)
+        inOrderedList = false
+        orderedItems = []
+      }
       if (!inList) {
         inList = true
         listItems = []
       }
-      listItems.push(renderMarkdownLine(bulletMatch[1]))
+      listItems.push(bulletMatch[1])
       continue
     }
     
-    // Завершаем список если строка не является элементом списка
+    // Нумерованный список: 1. текст, 2) текст
+    const orderedMatch = trimmed.match(/^\d+[.)\s]+(.+)$/)
+    if (orderedMatch) {
+      // Завершаем маркированный список, если был
+      if (inList) {
+        fragments.push(<ul key={`ul-${fragments.length}`}>{listItems.map((item, j) => (
+          <li key={j}><LatexText text={item} /></li>
+        ))}</ul>)
+        inList = false
+        listItems = []
+      }
+      if (!inOrderedList) {
+        inOrderedList = true
+        orderedItems = []
+      }
+      orderedItems.push(orderedMatch[1])
+      continue
+    }
+    
+    // Завершаем списки если строка не является элементом списка
     if (inList) {
-      fragments.push(<ul key={`list-${fragments.length}`}>{listItems.map((item, j) => (
-        <li key={j}><span dangerouslySetInnerHTML={{ __html: item }} /></li>
+      fragments.push(<ul key={`ul-${fragments.length}`}>{listItems.map((item, j) => (
+        <li key={j}><LatexText text={item} /></li>
       ))}</ul>)
       inList = false
       listItems = []
+    }
+    if (inOrderedList) {
+      fragments.push(<ol key={`ol-${fragments.length}`}>{orderedItems.map((item, j) => (
+        <li key={j}><LatexText text={item} /></li>
+      ))}</ol>)
+      inOrderedList = false
+      orderedItems = []
+    }
+    
+    // Markdown-изображение: ![alt](url)
+    const imgMatch = trimmed.match(/^!\[([^\]]*)\]\(([^)]+)\)$/)
+    if (imgMatch) {
+      fragments.push(
+        <figure key={`img-${fragments.length}`} className="lesson-figure">
+          <img
+            src={imgMatch[2]}
+            alt={imgMatch[1] || ''}
+            className="lesson-image"
+            loading="lazy"
+            onError={(e) => { e.target.style.display = 'none' }}
+          />
+          {imgMatch[1] && <figcaption className="lesson-image-caption">{imgMatch[1]}</figcaption>}
+        </figure>
+      )
+      continue
     }
     
     // Горизонтальный разделитель
@@ -238,17 +253,22 @@ function parseInlineMarkdown(text) {
       continue
     }
     
-    // Обычный текст — добавляем как абзац
+    // Обычный текст — абзац с поддержкой LaTeX-формул и изображений
     if (trimmed) {
-      fragments.push(<p key={`p-${fragments.length}`}><span dangerouslySetInnerHTML={{ __html: renderMarkdownLine(trimmed) }} /></p>)
+      fragments.push(<p key={`p-${fragments.length}`}><LatexText text={trimmed} /></p>)
     }
   }
   
-  // Завершаем остаток списка
+  // Завершаем остаток списков
   if (inList && listItems.length > 0) {
-    fragments.push(<ul key={`list-${fragments.length}`}>{listItems.map((item, j) => (
-      <li key={j}><span dangerouslySetInnerHTML={{ __html: item }} /></li>
+    fragments.push(<ul key={`ul-${fragments.length}`}>{listItems.map((item, j) => (
+      <li key={j}><LatexText text={item} /></li>
     ))}</ul>)
+  }
+  if (inOrderedList && orderedItems.length > 0) {
+    fragments.push(<ol key={`ol-${fragments.length}`}>{orderedItems.map((item, j) => (
+      <li key={j}><LatexText text={item} /></li>
+    ))}</ol>)
   }
   
   return fragments.length === 0 ? null : fragments
@@ -574,6 +594,8 @@ export default function LessonPanel({ text, topic, lesson }) {
       (Array.isArray(lesson.sections) && lesson.sections.length > 0) ||
       lesson.definition ||
       lesson.hook ||
+      lesson.summary ||
+      lesson.diagram ||
       (Array.isArray(lesson.key_terms) && lesson.key_terms.length > 0)
     )
     if (!isStructured) return null

@@ -398,6 +398,26 @@ class KnowledgeWiki:
         self._write_index(article.subject)
         return p
 
+    def delete(self, subject: str, topic: str) -> bool:
+        """Удалить wiki-статью темы (персонально для ученика). Возвращает True, если файл был.
+
+        Полностью персональная операция: путь строится через self.root (ученик),
+        поэтому данные других учеников/предметов не затрагиваются. После удаления
+        пересоздаём предметный индекс (без удалённой темы).
+        """
+        p = self.article_path(subject, topic)
+        if not p.exists():
+            return False
+        try:
+            p.unlink()
+        except Exception:
+            return False
+        try:
+            self._write_index(subject)
+        except Exception:
+            pass
+        return True
+
     def _write_index(self, subject: str) -> None:
         articles = [a for a in self.list_articles(subject)]
         if not articles:

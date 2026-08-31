@@ -1,6 +1,7 @@
 // NoteItem — аккордеон-карточка структурированной заметки
 import { useState } from 'react'
 import { normalizeNote } from '../utils/parseNote'
+import LatexText from './LatexText'
 
 /**
  * Определение типа заметки по наличию полей
@@ -50,7 +51,7 @@ export default function NoteItem({ note, index }) {
         aria-expanded={open}
       >
         <span className="topic-modal__note-icon">{icon}</span>
-        <span className="topic-modal__note-feedback">{feedback || 'Заметка'}</span>
+        <span className="topic-modal__note-feedback"><LatexText text={feedback || 'Заметка'} /></span>
         {date && <span className="topic-modal__note-date">{date}</span>}
         <span className={`topic-modal__note-arrow ${open ? 'open' : ''}`}>▾</span>
       </button>
@@ -60,26 +61,26 @@ export default function NoteItem({ note, index }) {
           {question && (
             <div className="topic-modal__note-question">
               <span className="topic-modal__note-label">Вопрос:</span>
-              <span>{question}</span>
+              <span><LatexText text={question} /></span>
             </div>
           )}
           {studentAnswer && (
             <div className="topic-modal__note-student-answer">
               <span className="topic-modal__note-label">Ваш ответ:</span>
-              <span>«{studentAnswer}»</span>
+              <span>«<LatexText text={studentAnswer} />»</span>
             </div>
           )}
           {correctAnswer && (
             <div className="topic-modal__note-correct-answer">
               <span className="topic-modal__note-label">Правильный ответ:</span>
-              <span>{correctAnswer}</span>
+              <span><LatexText text={correctAnswer} /></span>
             </div>
           )}
           {/* Дополнительный комментарий — только если он не дублирует «Неверно»/правильный ответ */}
           {feedback && type !== 'error' && (
             <div className="topic-modal__note-feedback-text">
               <span className="topic-modal__note-label">{type === 'clarification' ? 'Заметка:' : 'Комментарий:'}</span>
-              <span>{feedback}</span>
+              <span><LatexText text={feedback} /></span>
             </div>
           )}
         </div>

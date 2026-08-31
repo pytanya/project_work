@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, wsUrl } from './api'
+import { resolveStudentId } from './identity'
 import ChatStream from './components/ChatStream'
 import IntakeWizard from './components/IntakeWizard'
 import IntakeCard from './components/IntakeCard'
@@ -156,10 +157,11 @@ export default function App() {
   const push = useCallback((kind, text, data) => {
     setFeed((f) => {
       // Глобальная проверка на дубли по тексту (исправляет повторение одного сообщения разными kind)
-      const normalized = text.trim().toLowerCase()
-      const alreadyExists = f.some((m) => (m.text || '').trim().toLowerCase() === normalized)
-      if (alreadyExists) return f
-      return [...f, { id: `${Date.now()}-${Math.random()}`, kind, text, data }]
+      const textStr = typeof text === 'string' ? text : String(text || '')
+      const normalized = textStr.trim().toLowerCase()
+      const alreadyExists = f.some((m) => (typeof m.text === 'string' ? m.text : String(m.text || '')).trim().toLowerCase() === normalized)
+      if (alreadyExists && normalized) return f
+      return [...f, { id: `${Date.now()}-${Math.random()}`, kind, text: textStr, data }]
     })
   }, [])
 
@@ -175,8 +177,17 @@ export default function App() {
     })
   }, [])
 
-  // Завершение стриминга: финальное событие завершает «живой» пузырь.
+  // Завершение стриминга: снимаем каретку с текущего пузыря (мигающая
+  // зелёная полоса уже не «листает»), если посередине потока пришло
+  // событие без финализации (system / source.progress / source.failed).
+  // streamRef обнуляем, чтобы следующие token'ы создали новый пузырь.
+  // id захватываем в локальную переменную: updater setFeed выполняется
+  // асинхронно, а streamRef.current к тому моменту уже null.
   const endStream = useCallback(() => {
+    const id = streamRef.current
+    if (id) {
+      setFeed((f) => f.map((m) => (m.id === id ? { ...m, streamEnded: true } : m)))
+    }
     streamRef.current = null
   }, [])
 
@@ -353,6 +364,8 @@ export default function App() {
           if (!cProg || cProg.kind !== 'quiz') {
             setCurrent(null)
           }
+          setFeed((f) => f.filter((m) => m.kind !== 'intake'))
+          setIntake({ missingFields: [], complete: true })
           push('source', d.message)
           // Гранулярный прогресс при подготовке темы (оптимизация #1)
           if (isPreparingTopic.current && d.message && d.status !== 'done' && d.status !== 'ready') {
@@ -379,18 +392,19 @@ export default function App() {
           break
         case 'source.failed':
           endStream()
-          setSource({ status: 'failed', note: d.message })
+          const errMsg = d.message || d.error || 'Ошибка источника'
+          setSource({ status: 'failed', note: errMsg })
           const cFail = currentRef.current
           if (!cFail || cFail.kind !== 'quiz') {
             setCurrent(null)
           }
-          push('error', d.message)
+          push('error', errMsg)
           // Удалить процессные статусы при ошибке поиска
           removeProcessStatuses()
           // Белый список: поиск не нашёл ничего по разрешённым доменам —
           // предлагаем включить любые источники или изменить список.
           if (d.reason === 'whitelist_blocked') {
-            setSourceProposal({ type: 'whitelist_blocked', message: d.message })
+            setSourceProposal({ type: 'whitelist_blocked', message: errMsg })
           }
           break
         case 'graph.ready':
@@ -451,6 +465,16 @@ export default function App() {
     sessionIdRef.current = sessionId
   }, [sessionId])
 
+  const handleEventRef = useRef(handleEvent)
+  useEffect(() => {
+    handleEventRef.current = handleEvent
+  }, [handleEvent])
+
+  const pushRef = useRef(push)
+  useEffect(() => {
+    pushRef.current = push
+  }, [push])
+
   useEffect(() => {
     let cancelled = false
     let reconnectAttempts = 0
@@ -465,7 +489,9 @@ export default function App() {
       const ws = new WebSocket(wsUrl(sid))
       ws.onmessage = (e) => {
         try {
-          handleEvent(JSON.parse(e.data))
+          if (handleEventRef.current) {
+            handleEventRef.current(JSON.parse(e.data))
+          }
         } catch (_) {}
       }
       ws.onopen = () => {
@@ -490,15 +516,16 @@ export default function App() {
     async function init() {
       try {
         // retry: бэкенд может быть ещё на старте (Qdrant/embedder ~15с) — переживаем
-        let sessionId = null
+        let sid = null
         for (let attempt = 1; attempt <= 5; attempt++) {
           try {
-            // Стабильный профиль ученика: сессии одного ученика делят Wiki/мастерство/заметки
             const r = await api.createSession(student.student_id)
-            sessionId = r.session_id
-            if (r.student_id !== student.student_id || r.student_name !== student.student_name) {
-              setStudent({ student_id: r.student_id, student_name: r.student_name || '' })
-              saveStudent({ student_id: r.student_id, student_name: r.student_name || '' })
+            sid = r?.session_id
+            if (r && r.student_id && (r.student_id !== student.student_id || r.student_name !== student.student_name)) {
+              // merge: не теряем identity/тип/класс при расхождении имён
+              const next = { ...student, student_id: r.student_id, student_name: r.student_name || '' }
+              setStudent(next)
+              saveStudent(next)
             }
             break
           } catch (e) {
@@ -507,23 +534,29 @@ export default function App() {
             await new Promise((resolve) => setTimeout(resolve, 2000 * attempt))
           }
         }
-        if (cancelled || !sessionId) return
-        setSessionId(sessionId)
-        connectWs(sessionId)
-        const st = await api.intakeStatus(sessionId)
+        if (cancelled || !sid) {
+          return
+        }
+        setSessionId(sid)
+        sessionIdRef.current = sid
+        connectWs(sid)
+        const st = await api.intakeStatus(sid)
         setIntake({ missingFields: st.missing_fields, complete: st.complete })
         // Карточка знакомства (agent_card) имеет приоритет: ждёт заполнения формы.
         // getSession — авторитетный снимок (WS мог ещё не успеть прислать intake.card).
-        const sess = await api.getSession(sessionId)
+        const sess = (await api.getSession(sid)) || {}
         if (sess.agent_card) {
           setCurrent({ kind: 'intake_card', card: sess.agent_card, question: sess.agent_question })
         } else if (!st.complete && st.next_question) {
           setCurrent({ kind: 'intake', question: st.next_question, missingFields: st.missing_fields, options: sess.agent_options || [] })
-          push('intake', st.next_question)
+          if (pushRef.current) pushRef.current('intake', st.next_question)
         }
         refreshGraph()
       } catch (e) {
-        push('error', `Не удалось создать сессию: ${e.message}. Проверьте, что бэкенд запущен (uvicorn api.app:app --port 8000).`)
+        console.error('init error:', e)
+        if (pushRef.current) {
+          pushRef.current('error', `Не удалось создать сессию: ${e.message}. Проверьте, что бэкенд запущен (uvicorn api.app:app --port 8000).`)
+        }
       }
     }
     init()
@@ -537,7 +570,7 @@ export default function App() {
       if (reconnectTimer) clearTimeout(reconnectTimer)
       if (wsRef.current) wsRef.current.close()
     }
-  }, [handleEvent, push])
+  }, [])
 
   // resync: подтягиваем актуальное состояние сессии по HTTP
   const resync = useCallback(async () => {
@@ -675,13 +708,34 @@ export default function App() {
     isWaitingForAnswer.current = true
     resetBusyAfterTimeout()
     try {
-      await api.postIntakeCard(sessionId, values)
-      // Профиль ученика обновляем локально (имя) — для шапки/панели
-      if (values.name) {
-        const next = { ...student, student_name: values.name }
-        setStudent(next)
-        saveStudent(next)
+      const name = String(values.name || '').trim()
+      const type = values.learner_type || ''
+      const grade = String(values.grade || '').trim()
+
+      // Решение «какой student_id» (см. identity.js): смена ФИО/тип/класс
+      // относительно предыдущей личности браузера → новый изолированный id,
+      // старые данные (прошлого ученика) не смешиваются и не портятся.
+      const { studentId, identity, legacy } = resolveStudentId(
+        name, type, grade,
+        student,
+        current && current.kind === 'intake_card' ? current.card : null,
+      )
+
+      await api.postIntakeCard(sessionId, values, studentId)
+
+      // Профиль ученика обновляем локально (имя/тип/класс/id) — для шапки/панели
+      const next = {
+        ...student,
+        student_id: studentId,
+        student_name: name,
+        learner_type: type || student.learner_type,
+        grade: grade || student.grade,
+        identity,
+        legacy: legacy === true,
       }
+      setStudent(next)
+      saveStudent(next)
+
       const st = await api.intakeStatus(sessionId)
       setIntake({ missingFields: st.missing_fields, complete: st.complete })
       if (st.complete) {
@@ -905,11 +959,8 @@ export default function App() {
           </div>
         </div>
         {sessionId && <div className="session-id">сессия: {sessionId}</div>}
-        {/* intake.complete — истинен, когда карточка заполнена (статус из intakeStatus) */}
-        <KnowledgeWikiPanel key={wikiReloadKey} studentId={student.student_id} studentName={student.student_name} intakeComplete={intake.complete} />
-        {intake.complete && student.student_id && (
-          <SessionHistoryPanel studentId={student.student_id} reloadKey={sessionHistoryReloadKey} />
-        )}
+
+        {/* 1. Источники + загрузка учебника — откуда берутся материалы */}
         <SourceWhitelistPanel
           studentId={student.student_id}
           openSignal={sourcePanelSignal}
@@ -921,6 +972,11 @@ export default function App() {
           onFind={handleFind}
           busy={uploadBusy}
         />
+        {source.status !== 'ready' && source.status !== 'done' && (
+          <FileUpload onUpload={handleUpload} busy={uploadBusy} />
+        )}
+
+        {/* 2. Граф знаний — визуальная карта темы */}
         <KnowledgeGraphPanel
           nodes={graph.nodes}
           edges={graph.edges}
@@ -928,8 +984,13 @@ export default function App() {
           onSelect={handleSelectTopic}
           sessionId={sessionId}
         />
-        {source.status !== 'ready' && source.status !== 'done' && (
-          <FileUpload onUpload={handleUpload} busy={uploadBusy} />
+
+        {/* 3. База знаний — прогресс, темы, мастерство */}
+        <KnowledgeWikiPanel key={wikiReloadKey} studentId={student.student_id} studentName={student.student_name} intakeComplete={intake.complete} />
+
+        {/* 4. История занятий */}
+        {intake.complete && student.student_id && (
+          <SessionHistoryPanel studentId={student.student_id} reloadKey={sessionHistoryReloadKey} />
         )}
       </aside>
       <div className="sidebar-resizer" ref={sidebarDragRef} title="Изменить ширину панели" />

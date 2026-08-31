@@ -19,8 +19,13 @@ export default function IntakeCard({ card, onSubmit, disabled }) {
     .filter((f) => f.required && !String(values[f.key] ?? '').trim())
     .map((f) => f.label)
 
+  // ФИО: имя + фамилия (минимум два слова) — ключ персональной изоляции
+  const nameWords = String(values.name ?? '').trim().split(/\s+/).filter(Boolean).length
+  const nameInvalid = values.name !== undefined && values.name !== '' && nameWords < 2
+  const badName = !String(values.name ?? '').trim() ? null : nameInvalid ? 'Укажи имя и фамилию (минимум два слова).' : null
+
   const submit = async () => {
-    if (requiredMissing.length > 0 || sending || disabled) return
+    if (requiredMissing.length > 0 || badName || sending || disabled) return
     setSending(true)
     try {
       await onSubmit(values)
@@ -70,7 +75,10 @@ export default function IntakeCard({ card, onSubmit, disabled }) {
       {requiredMissing.length > 0 && (
         <div className="intake-card__hint muted">Заполните: {requiredMissing.join(', ')}</div>
       )}
-      <button className="btn-primary" onClick={submit} disabled={sending || disabled || requiredMissing.length > 0}>
+      {badName && (
+        <div className="intake-card__hint muted">Укажи имя и фамилию (минимум два слова).</div>
+      )}
+      <button className="btn-primary" onClick={submit} disabled={sending || disabled || requiredMissing.length > 0 || !!badName}>
         {sending ? 'Отправляем…' : 'Начать занятие'}
       </button>
     </div>

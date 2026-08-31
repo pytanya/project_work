@@ -2,6 +2,7 @@
 // subject sections, topic cards with mastery progress bars, stats, notes.
 // Клик по теме → модальное окно чтения (источник + изложение + понятия).
 import { useEffect, useState, useMemo, useRef } from 'react'
+import LatexText from './LatexText'
 import MasteryWall from './MasteryWall'
 import TopicModal from './TopicModal'
 
@@ -131,6 +132,27 @@ export default function KnowledgeWikiPanel({ studentId = '', studentName = '', i
     setReading({ subject: subjects[si].subject || 'тема', article: subjects[si].articles[ai] })
   }
 
+  const deleteTopic = async () => {
+    if (!reading) return
+    const subject = reading.subject
+    const topic = reading.article.topic || reading.article.title
+    setEnriching(false)
+    setEnrichNote(null)
+    try {
+      const res = await fetch(`/api/wiki/${encodeURIComponent(subject)}/${encodeURIComponent(topic)}?student_id=${encodeURIComponent(studentId || '')}`, {
+        method: 'DELETE',
+      })
+      if (res.ok) {
+        setReading(null)
+        await fetchWiki()
+      } else {
+        setEnrichNote('Не удалось удалить карточку (ошибка сервера).')
+      }
+    } catch (_) {
+      setEnrichNote('Не удалось удалить карточку: нет связи с сервером.')
+    }
+  }
+
   const enrichTopic = async () => {
     if (!reading) return
     setEnriching(true)
@@ -254,7 +276,7 @@ export default function KnowledgeWikiPanel({ studentId = '', studentName = '', i
                               onClick={() => setReading({ subject: s.subject || 'тема', article: a })}
                               title="Открыть для чтения">
                               <span className={`wiki-article__dot ${masteryClass(a.mastery)}`} />
-                              <span className="wiki-article__title">{a.title || a.topic}</span>
+                              <span className="wiki-article__title"><LatexText text={a.title || a.topic} /></span>
                               {a.okf_version && <span className="wiki-article__src" title="источник OKF/LLM-wiki">OKF</span>}
                               <span className="wiki-article__pct">{pct}%</span>
                             </button>
@@ -278,7 +300,7 @@ export default function KnowledgeWikiPanel({ studentId = '', studentName = '', i
       )}
       <TopicModal article={reading?.article} subject={reading?.subject}
         onClose={() => setReading(null)} onEnrich={enrichTopic} enriching={enriching}
-        enrichNote={enrichNote} />
+        enrichNote={enrichNote} onDelete={deleteTopic} />
     </div>
   )
 }

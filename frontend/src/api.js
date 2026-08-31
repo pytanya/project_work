@@ -39,8 +39,11 @@ export const api = {
     jsonFetch(`/api/sessions/${id}/intake`, { method: 'POST', body: JSON.stringify({ answer }) }),
 
   // Карточка знакомства: все поля чек-листа сразу (быстрое заполнение)
-  postIntakeCard: (id, values) =>
-    jsonFetch(`/api/sessions/${id}/intake/card`, { method: 'POST', body: JSON.stringify({ values }) }),
+  postIntakeCard: (id, values, studentId) =>
+    jsonFetch(`/api/sessions/${id}/intake/card`, {
+      method: 'POST',
+      body: JSON.stringify({ values, student_id: studentId || null }),
+    }),
 
   postMessage: (id, text) =>
     jsonFetch(`/api/sessions/${id}/message`, { method: 'POST', body: JSON.stringify({ text }) }),
@@ -60,8 +63,16 @@ export const api = {
 
   getGraph: (id) => jsonFetch(`/api/sessions/${id}/graph`),
 
+  // OKF-бандл знаний учебника (index + log + topics/*.md) — переносимый экспорт
+  getKnowledgePackage: (id) => jsonFetch(`/api/sessions/${id}/knowledge-package`),
+
   selectTopic: (id, topicId) =>
     jsonFetch(`/api/sessions/${id}/topic`, { method: 'POST', body: JSON.stringify({ topic_id: topicId }) }),
+
+  // Удалить wiki-статью темы (персонально для ученика) — очистка мусорных карточек
+  deleteWikiArticle: (studentId, subject, topic) =>
+    fetch(`${BASE}/api/wiki/${encodeURIComponent(subject)}/${encodeURIComponent(topic)}?student_id=${encodeURIComponent(studentId || '')}`,
+      { method: 'DELETE' }),
 
   history: (id) => jsonFetch(`/api/sessions/${id}/history`),
 

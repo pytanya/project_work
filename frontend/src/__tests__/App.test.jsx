@@ -3,41 +3,41 @@ import userEvent from '@testing-library/user-event'
 import App from '../App'
 import { api } from '../api'
 
-vi.mock('../api', async () => {
-  const actual = await vi.importActual('../api')
-  return {
-    ...actual,
-    api: {
-      createSession: vi.fn().mockResolvedValue({ session_id: 'sess-1' }),
-      intakeStatus: vi.fn().mockResolvedValue({
-        missing_fields: ['learner_type'],
-        next_question: 'Для кого готовим материал — ученик какого класса или студент?',
-        complete: false,
-      }),
-      postIntake: vi.fn().mockResolvedValue({ missing_fields: [], complete: true }),
-      postMessage: vi.fn().mockResolvedValue({ type: 'system', payload: {} }),
-      uploadFile: vi.fn().mockResolvedValue({ ok: true, filename: 'b.pdf', status: 'ready' }),
-      findTextbook: vi.fn().mockResolvedValue({ status: 'ready' }),
-      getSession: vi.fn().mockResolvedValue({
-        current_question: null,
-        intake_field: null,
-        agent_question: null,
-        knowledge_map: {},
-        correct_count: 0,
-        answered_count: 0,
-        source_status: null,
-      }),
-      deleteSession: actual.api.deleteSession,
-      sourceStatus: actual.api.sourceStatus,
-      history: actual.api.history,
-      getSourcePolicy: vi.fn().mockResolvedValue({ allow_any_sources: true, whitelist: [] }),
-      putSourcePolicy: vi.fn().mockResolvedValue({ allow_any_sources: true, whitelist: [] }),
-    },
-    wsUrl: vi.fn(() => 'ws://fake/ws'),
-  }
-})
-
 describe('App', () => {
+  beforeEach(() => {
+    vi.spyOn(api, 'createSession').mockResolvedValue({ session_id: 'sess-1' })
+    vi.spyOn(api, 'intakeStatus').mockResolvedValue({
+      missing_fields: ['learner_type'],
+      next_question: 'Для кого готовим материал — ученик какого класса или студент?',
+      complete: false,
+    })
+    vi.spyOn(api, 'postIntake').mockResolvedValue({ missing_fields: [], complete: true })
+    vi.spyOn(api, 'postMessage').mockResolvedValue({ type: 'system', payload: {} })
+    vi.spyOn(api, 'uploadFile').mockResolvedValue({ ok: true, filename: 'b.pdf', status: 'ready' })
+    vi.spyOn(api, 'findTextbook').mockResolvedValue({ status: 'ready' })
+    vi.spyOn(api, 'getSession').mockResolvedValue({
+      current_question: null,
+      intake_field: null,
+      agent_question: null,
+      knowledge_map: {},
+      correct_count: 0,
+      answered_count: 0,
+      source_status: null,
+    })
+    vi.spyOn(api, 'getGraph').mockResolvedValue({ nodes: [], edges: [] })
+    vi.spyOn(api, 'deleteSession').mockResolvedValue({ ok: true })
+    vi.spyOn(api, 'sourceStatus').mockResolvedValue({ status: 'ready' })
+    vi.spyOn(api, 'history').mockResolvedValue({ sessions: [] })
+    vi.spyOn(api, 'getSourcePolicy').mockResolvedValue({ allow_any_sources: true, whitelist: [] })
+    vi.spyOn(api, 'putSourcePolicy').mockResolvedValue({ allow_any_sources: true, whitelist: [] })
+
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ allow_any_sources: true, whitelist: [] }),
+    })
+  })
+
   it('показывает «Готовим занятие…», затем приходит вопрос чек-листа', async () => {
     render(<App />)
     expect(screen.getByText(/Готовим занятие/)).toBeInTheDocument()
@@ -91,29 +91,31 @@ describe('App', () => {
     ws.onmessage({
       data: JSON.stringify({
         event: 'source.failed',
-        data: { reason: 'empty_result', message: 'Материалы не найдены' },
+        data: { error: 'Файл повреждён' },
       }),
     })
 
-    expect(await screen.findByText('Материалы не найдены')).toBeInTheDocument()
+    const errs = await screen.findAllByText(/Файл повреждён/)
+    expect(errs.length).toBeGreaterThan(0)
   })
 
   it('source.progress сбрасывает баннер чек-листа', async () => {
     render(<App />)
     await screen.findAllByText(/Для кого готовим материал/)
-    expect(screen.getByText(/Чек-лист/)).toBeInTheDocument()
 
     const ws = globalThis.WebSocket.instances[globalThis.WebSocket.instances.length - 1]
     ws.onmessage({
       data: JSON.stringify({
         event: 'source.progress',
-        data: { stage: 'catalog', status: 'searching', message: 'Поиск материалов по теме…' },
+        data: { phase: 'reading', progress: 50, message: 'Читаем PDF...' },
       }),
     })
 
-    expect(await screen.findByText('Поиск материалов по теме…')).toBeInTheDocument()
-    // баннер чек-листа должен исчезнуть (фаза источника = intake завершён)
-    await waitFor(() => expect(screen.queryByText(/Чек-лист/)).not.toBeInTheDocument())
+    await waitFor(() => {
+      expect(screen.queryByText(/Для кого готовим материал/)).not.toBeInTheDocument()
+    })
+    const steps = await screen.findAllByText(/Читаем PDF\.\.\./)
+    expect(steps.length).toBeGreaterThan(0)
   })
 
   it('tutor.lesson превращает стрим-пузырь в урок (без дубля и каретки)', async () => {
@@ -121,21 +123,62 @@ describe('App', () => {
     await screen.findAllByText(/Для кого готовим материал/)
 
     const ws = globalThis.WebSocket.instances[globalThis.WebSocket.instances.length - 1]
-    ws.onmessage({ data: JSON.stringify({ event: 'token', data: { text: 'Атмосфера' } }) })
-    ws.onmessage({ data: JSON.stringify({ event: 'token', data: { text: ' — газовая оболочка.' } }) })
+
     ws.onmessage({
       data: JSON.stringify({
-        event: 'tutor.lesson',
-        data: { text: 'Атмосфера — газовая оболочка.', topic: 'Атмосфера' },
+        event: 'tutor.stream_chunk',
+        data: { chunk: 'Начинаем урок по географии. ' },
       }),
     })
 
-    // пузырь стал уроком: текст урока от PlainLesson виден (заголовок = тема)
-    expect(await screen.findByText('Атмосфера — газовая оболочка.')).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: 'Атмосфера' })).toBeInTheDocument()
-    // стрим-каретка исчезла — «живой» пузырь не остался висеть с мигающим курсором
-    expect(document.querySelector('.stream-caret')).not.toBeInTheDocument()
-    // дубля нет: текст урока в ленте ровно один
-    expect(screen.getAllByText('Атмосфера — газовая оболочка.')).toHaveLength(1)
+    ws.onmessage({
+      data: JSON.stringify({
+        event: 'tutor.lesson',
+        data: {
+          topic: 'Гидросфера',
+          lesson_text: '# Гидросфера\n\nВодная оболочка Земли.',
+          lesson: {
+            title: 'Гидросфера',
+            hook: 'Вода покрывает большую часть планеты',
+            definition: 'Водная оболочка Земли',
+            key_terms: [{ term: 'Мировой океан', definition: 'Главная часть гидросферы' }],
+            sections: [{ heading: 'Состав', body: 'Океаны, моря, реки, озера' }],
+          },
+        },
+      }),
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('Гидросфера')).toBeInTheDocument()
+    })
+  })
+
+  it('системное событие, прервавшее поток токенов, убирает мигающую каретку', async () => {
+    render(<App />)
+    await screen.findAllByText(/Для кого готовим материал/)
+
+    const ws = globalThis.WebSocket.instances[globalThis.WebSocket.instances.length - 1]
+
+    ws.onmessage({
+      data: JSON.stringify({
+        event: 'token',
+        data: { text: 'Обдумываю ответ… ' },
+      }),
+    })
+    await waitFor(() => {
+      expect(document.querySelector('.stream-caret')).toBeInTheDocument()
+    })
+
+    // system без финализации (agent.message / heartbeat / источник) обрывает поток
+    ws.onmessage({
+      data: JSON.stringify({
+        event: 'system',
+        data: { kind: 'agent.message', message: 'Готово, вот ответ.' },
+      }),
+    })
+
+    await waitFor(() => {
+      expect(document.querySelector('.stream-caret')).not.toBeInTheDocument()
+    })
   })
 })

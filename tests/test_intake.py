@@ -249,6 +249,19 @@ class TestIntakeCard:
         assert st.subject == "физика"
         assert "topic" in compute_missing(st)
 
+    def test_apply_card_rebind_student_id(self):
+        s = IntakeState(student_id="stu_old")
+        st = apply_intake_card(
+            s,
+            {"name": "Персона 01", "learner_type": "student",
+             "subject": "физика", "topic": "Оптика", "has_textbook": "true", "mode": "lesson"},
+            student_id="stu_new",
+        )
+        assert st.student_id == "stu_new"
+        # без изменения передаваемого идентичности — старый id сохраняется
+        st2 = apply_intake_card(s, {"subject": "физика"}, student_id="stu_old")
+        assert st2.student_id == "stu_old"
+
     def test_maybe_start_card_only_fresh(self):
         s = IntakeState()
         st, started = maybe_start_card(s)

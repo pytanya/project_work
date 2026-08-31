@@ -336,12 +336,16 @@ def make_graph_deps(settings: Any = None) -> GraphDeps:
 
 
 def _rag_filters(state: TutorState) -> Dict[str, Any]:
-    """Метаданные-фильтры RAG-поиска (subject/grade/раздел активной темы/ученик)."""
+    """Метаданные-фильтры RAG-поиска (subject/grade/topic/раздел активной темы/ученик)."""
     filters: Dict[str, Any] = {}
     if state.subject:
         filters["subject"] = state.subject
     if state.grade:
         filters["grade"] = state.grade
+    # Фильтр по теме: чтобы источники разных тем не смешивались
+    topic = getattr(state, "topic", None)
+    if topic and topic != "all":
+        filters["topic"] = topic
     # Материалы персональны: чанки другого ученика не смешиваются
     if getattr(state, "student_id", None):
         filters["student_id"] = state.student_id
@@ -350,6 +354,7 @@ def _rag_filters(state: TutorState) -> Dict[str, Any]:
         section = _active_topic_section(state)
         if section:
             filters["section_number"] = section
+    logger.debug("RAG-фильтры: %s", filters)
     return filters
 
 
@@ -366,14 +371,40 @@ def _rag_chunks(store: VectorStore, query: str, state: TutorState, k: int = 3) -
     from .knowledge import SearchResult
 
     filters = _rag_filters(state)
+    logger.debug("RAG-поиск: query=%r, k=%d, filters=%s", query, k, filters)
     results: List[SearchResult] = store.search(query, k=k, filters=filters or None)
     if not results:
+        logger.info("RAG-поиск без результатов: query=%r, filters=%s", query, filters)
+        # Обратная совместимость: старые чанки не имеют поля topic в метаданных.
+        # Если topic-фильтр дал 0 результатов — пробуем ПЕРВЕЙДОМ без topic.
+        active_filters = filters
+        if "topic" in filters:
+            no_topic = {k: v for k, v in filters.items() if k != "topic"}
+            if no_topic:
+                results = store.search(query, k=k, filters=no_topic)
+                active_filters = no_topic
+            else:
+                results = store.search(query, k=k, filters=None)
+                active_filters = {}
+            if results:
+                logger.info("RAG-поиск succeed после снятия topic-фильтра (обратная совместимость): найдено %d", len(results))
+    if not results:
         for drop in ("grade", "section_number"):
-            relaxed = {kk: vv for kk, vv in filters.items() if kk != drop}
+            relaxed = {kk: vv for kk, vv in active_filters.items() if kk != drop}
             results = store.search(query, k=k, filters=relaxed or None)
             if results:
+                logger.info("RAG-поиск succeed после снятия фильтра %s: найдено %d", drop, len(results))
                 break
-    return [r for r in results if _chunk_has_meaningful_content(r.chunk.text)]
+    meaningful = [r for r in results if _chunk_has_meaningful_content(r.chunk.text)]
+    if len(meaningful) < len(results):
+        logger.info("RAG-поиск: отсеяно шумных чанков %d из %d", len(results) - len(meaningful), len(results))
+    if meaningful:
+        topics_seen = set()
+        for r in meaningful[:5]:
+            t = getattr(r.chunk, "topic", None) or (r.chunk.metadata().get("topic") if isinstance(r.chunk.metadata(), dict) else None)
+            topics_seen.add(t or "(none)")
+        logger.debug("RAG-поиск: найдено %d осмысленных чанков, темы: %s", len(meaningful), topics_seen)
+    return meaningful
 
 
 def _chunk_has_meaningful_content(text: str) -> bool:
@@ -646,16 +677,20 @@ def agent_tutor_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
             _emit(deps, "system", message=st.agent_message, kind="content.empty")
             return st.model_dump()
         context = [_clean_text_lines(c.chunk.text) for c in chunks]
+        # Метаданные источника параллельно context (для честного groundedness):
+        # wiki-статьи не имеют чанка-источника → None, чанки — их meta.
+        sources: List[Optional[Dict[str, Any]]] = [c.chunk.metadata() for c in chunks]
         # Баг #6: wiki-статьи дополняют RAG-контекст урока (качественный контент первым).
         wiki_bodies = _wiki_articles_for(st, deps)
         if wiki_bodies:
             context = wiki_bodies + context
+            sources = [None] * len(wiki_bodies) + sources
         _emit(deps, "source.progress", stage="content", url="", status="generating",
               message=f"Генерирую урок по теме «{topic}» ({len(context)} фрагментов)…")
         # Стриминг токенов урока: on_token → WS event "token" → фронтенд pushToken → пользователь видит прогресс
         on_token_fn = deps.on_token  # реальный стриминг токенов в браузер (stream=True)
         lesson = tutor_mod.generate_lesson(
-            topic, context, st, llm_call=deps.tutor_llm, on_token=on_token_fn
+            topic, context, st, llm_call=deps.tutor_llm, on_token=on_token_fn, sources=sources
         )
         # Quality gate удалён: новый стриминговый pipeline генерирует чистый текст,
         # fallback на контекст встроен в generate_lesson — мусор не проходит.
@@ -852,7 +887,7 @@ def _reindex_cached_sources(st: TutorState, deps: GraphDeps, sources: List[Dict[
         if not text:
             continue
         sc = _make_chunks(text, source=url, subject=st.subject, grade=st.grade,
-                          student_id=getattr(st, "student_id", None) or None)
+                          topic=st.topic, student_id=getattr(st, "student_id", None) or None)
         if not sc:
             continue
         chunks.extend(sc)
@@ -1212,11 +1247,14 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         _emit(deps, "intake.question", question=st.agent_question, missing_fields=["textbook_file"])
         return st.model_dump()
     context = [_clean_text_lines(c.chunk.text) for c in chunks]
+    # Метаданные источника параллельно context (честный groundedness); None для wiki.
+    sources = [c.chunk.metadata() for c in chunks]
     # Баг #6: wiki-статьи (накопленные между сессиями) часто качественнее сырых чанков —
     # добавляем их ПЕРВЫМИ в контекст урока/объяснения.
     wiki_bodies = _wiki_articles_for(st, deps)
     if wiki_bodies:
         context = wiki_bodies + context
+        sources = [None] * len(wiki_bodies) + sources
         logger.info("content_node: +%d wiki-статей к контексту темы «%s»", len(wiki_bodies), topic)
     _emit(deps, "source.progress", stage="content", url="", status="generating",
           message=f"Генерирую {_MODE_LABELS.get(mode, 'материал')} по теме «{topic}» ({len(context)} фрагментов)…")
@@ -1233,7 +1271,7 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         if on_token is not None:
             _emit(deps, "source.progress", stage="content", url="", status="generating",
                   message=f"Генерирую урок по теме «{topic}»…")
-        lesson = tutor_mod.generate_lesson(topic, context, st, llm_call=deps.tutor_llm, on_token=on_token)
+        lesson = tutor_mod.generate_lesson(topic, context, st, llm_call=deps.tutor_llm, on_token=on_token, sources=sources)
         st.set_lesson(lesson)
         st.agent_message = "Урок по теме готов. Можно задать вопрос или перейти к квизу."
         # Кэш урока (3.1/7.2): сохраняем для повторного прохождения темы.
@@ -1429,7 +1467,7 @@ def handle_doc_pages_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     source_name = st.textbook_name or path.name
     try:
         chunks = _make_chunks(text, source=source_name, subject=st.subject, grade=st.grade,
-                              student_id=getattr(st, "student_id", None) or None)
+                              topic=st.topic, student_id=getattr(st, "student_id", None) or None)
         offset = st.page_offset or 0
         printed_start = phys_start + offset
         printed_end = phys_end + offset
@@ -1509,7 +1547,7 @@ def find_textbook_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         chunks: List[Any] = []
         for s, t in zip(col.sources, col.texts):
             sc = _make_chunks(t, source=s.get("url", "web"), subject=st.subject, grade=st.grade,
-                              student_id=getattr(st, "student_id", None) or None)
+                              topic=st.topic, student_id=getattr(st, "student_id", None) or None)
             if not sc:
                 logger.info("Источник %s: нет осмысленных чанков — пропускаем",
                             s.get("url", "web"))

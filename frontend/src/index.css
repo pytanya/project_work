@@ -142,7 +142,13 @@ body {
 .graph-float-backdrop {
   position: fixed; inset: 0; z-index: 300;
   background: rgba(10, 14, 18, 0.55); backdrop-filter: blur(3px);
-  animation: rise 0.18s ease;
+  animation: backdrop-in 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/*Backdrop fade — мягкое затемнение фона */
+@keyframes backdrop-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 .graph-float-sizer {
   position: fixed; width: min(1200px, 96vw); max-height: 92vh; display: flex;
@@ -150,7 +156,7 @@ body {
 .graph-panel--float {
   flex: 1; max-height: 92vh; overflow-y: auto;
   border-radius: 18px; box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
-  animation: graph-expand-in 0.22s ease;
+  animation: graph-expand-in 0.3s cubic-bezier(0.22, 1, 0.36, 1);
 }
 .graph-panel--float .graph-panel__header { cursor: grab; user-select: none; }
 .graph-panel--float .graph-panel__header:active { cursor: grabbing; }
@@ -159,8 +165,14 @@ body {
   font-size: 13px; color: var(--muted); line-height: 1.5; padding: 4px 2px;
 }
 @keyframes graph-expand-in {
-  from { opacity: 0; transform: scale(0.95); }
-  to { opacity: 1; transform: scale(1); }
+  from {
+    opacity: 0;
+    transform: scale(0.93) translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
 }
 
 /* Tooltip (shared with old graph) */
@@ -173,8 +185,14 @@ body {
   animation: kg-tooltip-in 0.12s ease;
 }
 @keyframes kg-tooltip-in {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 .kg-tooltip-title { font-weight: 700; font-size: 12px; margin-bottom: 4px; color: #e6edf3; }
 .kg-tooltip-meta { display: flex; flex-wrap: wrap; gap: 4px 8px; color: #8b949e; font-size: 10.5px; }
@@ -413,7 +431,20 @@ body {
   position: relative; width: min(640px, 92vw); max-height: 84vh; overflow-y: auto;
   background: var(--card); border: 1px solid var(--line); border-radius: 16px;
   padding: 22px 24px; box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
-  animation: rise 0.18s ease;
+  animation: modal-enter 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform, opacity;
+}
+
+/* Модальное окно — появление с перспективой */
+@keyframes modal-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.94) translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
 }
 .topic-modal__close {
   position: absolute; top: 12px; right: 12px; width: 30px; height: 30px; border-radius: 8px;
@@ -421,6 +452,12 @@ body {
   font-size: 14px; cursor: pointer;
 }
 .topic-modal__close:hover { border-color: var(--err); color: var(--err); }
+.topic-modal__delete {
+  position: absolute; top: 12px; right: 48px; width: 30px; height: 30px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--card); color: var(--ink-soft);
+  font-size: 14px; cursor: pointer;
+}
+.topic-modal__delete:hover { border-color: var(--err); color: var(--err); background: var(--red-soft); }
 .topic-modal__meta { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .topic-modal__subject {
   font-family: var(--font-mono); font-size: 11px; font-weight: 700; text-transform: uppercase;
@@ -503,8 +540,16 @@ body {
   display: flex; flex-direction: column; gap: 6px;
 }
 @keyframes note-body-in {
-  from { opacity: 0; max-height: 0; }
-  to { opacity: 1; max-height: 500px; }
+  from {
+    opacity: 0;
+    max-height: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    max-height: 500px;
+    transform: translateY(0);
+  }
 }
 
 .topic-modal__note-label {
@@ -586,7 +631,7 @@ body {
 /* Раскрытые детали прогресса */
 .topic-modal__progress-details {
   padding: 0 12px 10px; border-top: 1px dashed var(--line);
-  animation: note-body-in 0.2s ease;
+  animation: note-body-in 0.25s cubic-bezier(0.22, 1, 0.36, 1);
   display: flex; flex-direction: column; gap: 4px;
 }
 .topic-modal__progress-detail-row {
@@ -631,8 +676,16 @@ body {
   animation: wiki-details-in 0.2s ease;
 }
 @keyframes wiki-details-in {
-  from { opacity: 0; max-height: 0; }
-  to { opacity: 1; max-height: 400px; }
+  from {
+    opacity: 0;
+    max-height: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    max-height: 400px;
+    transform: translateY(0);
+  }
 }
 .wiki-detail-grid {
   display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px;
@@ -664,6 +717,27 @@ body {
 .source-status.ready { border-color: var(--ok); color: var(--ok); background: var(--green-soft); }
 .source-status.failed { border-color: var(--err); color: var(--err); background: var(--red-soft); }
 .source-status.indexing, .source-status.searching { border-color: var(--green); color: var(--green-strong); background: var(--green-soft); }
+.source-status { display: flex; align-items: center; gap: 8px; }
+.source-status__pulse {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--green);
+  animation: source-pulse 1.2s ease-in-out infinite;
+  flex-shrink: 0;
+}
+@keyframes source-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.7); }
+}
+.source-status__text { flex: 1; }
+.source-status__count {
+  font-family: var(--font-mono); font-size: 11px; font-weight: 700;
+  padding: 1px 7px; border-radius: 10px;
+  background: var(--card); border: 1px solid var(--line); color: var(--ink-soft);
+}
+.source-domain-badge {
+  display: inline-block; font-size: 10px; font-family: var(--font-mono);
+  padding: 0 5px; border-radius: 6px; margin-left: 4px;
+  background: var(--paper-deep); color: var(--muted); border: 1px solid var(--line);
+}
 .source-note { font-size: 12px; color: var(--ink-soft); margin: 6px 0; }
 .source-author { font-size: 13px; margin: 6px 0; }
 .source-author strong { color: var(--ink); }
@@ -832,12 +906,38 @@ body.resizing * { cursor: col-resize !important; }
 .source-proposal__text { flex: 1; min-width: 160px; line-height: 1.45; }
 .source-proposal__actions { display: flex; gap: 6px; flex-wrap: wrap; }
 
+/* ============================================================
+   Page-flip & Card Entry Animations (элегантные переходы)
+   ============================================================ */
+
+/* Базовый чатстрим — без собственных анимаций */
 .chatstream { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 4px 2px; }
 .chatstream::-webkit-scrollbar { width: 8px; }
 .chatstream::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
 
-.msg { display: flex; animation: rise 0.2s ease; }
-@keyframes rise { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+/* Сообщение чата — изящный "page flip" entry с перспективой */
+.msg {
+  display: flex;
+  animation: card-enter 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform, opacity;
+}
+
+/* Ключевые кадры: мягкое появление снизу с лёгким rotateX tilt */
+@keyframes card-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px) rotateX(-6deg);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) rotateX(0deg);
+  }
+}
+
+/* Альтернативная простая версия для prefers-reduced-motion */
+@media (prefers-reduced-motion: reduce) {
+  .msg { animation: none !important; }
+}
 .bubble {
   max-width: 74%; min-width: 0; padding: 11px 16px; border-radius: 14px;
   font-size: 14.5px; line-height: 1.55;
@@ -854,12 +954,76 @@ body.resizing * { cursor: col-resize !important; }
 @keyframes stream-blink { to { visibility: hidden; } }
 .bubble.agent.intake { border-left: 3px solid var(--red); }   /* тьютор «пишет красным» */
 .bubble.agent.quiz { border-left: 3px solid var(--amber); }   /* квиз = маркер */
-.bubble.agent.tutor-chat { border-left: 3px solid var(--green); background: linear-gradient(135deg, var(--card), var(--green-soft)); }
+.bubble.agent.tutor-chat {
+  border-left: 3px solid var(--green);
+  background: var(--card);
+}
 .bubble.summary { background: var(--green-soft); border: 1px solid var(--ok); color: var(--ok); }
-.bubble.system, .bubble.source { background: var(--paper); border: 1px solid var(--line); color: var(--ink-soft); font-size: 13.5px; }
+.bubble.system {
+  background: var(--paper); border: 1px solid var(--line); color: var(--ink-soft); font-size: 13.5px;
+  display: flex; align-items: flex-start; gap: 8px;
+}
+.bubble.source {
+  background: linear-gradient(135deg, var(--paper), rgba(47, 107, 79, 0.04));
+  border: 1px solid rgba(47, 107, 79, 0.25); color: var(--ink-soft); font-size: 13.5px;
+  display: flex; align-items: flex-start; gap: 8px;
+  border-left: 3px solid var(--green);
+}
 .bubble.error { background: var(--red-soft); border: 1px solid var(--err); color: var(--err); }
+.source-bubble-icon, .system-icon { font-size: 15px; flex-shrink: 0; line-height: 1.4; }
+.source-bubble-text, .system-text { flex: 1; min-width: 0; line-height: 1.5; }
+.source-link {
+  color: var(--green-strong); font-weight: 600; text-decoration: none;
+  border-bottom: 1px dashed var(--green); transition: all 0.12s;
+}
+.source-link:hover { color: var(--green); border-bottom-style: solid; }
 
-/* ---Thinking / три точки (busy без progressPhase) --- */
+/* --- Source progress card: схлопнутые source-пузыри в одну карточку --- */
+.source-progress-card {
+  max-width: 74%; min-width: 0; padding: 0;
+  border-radius: 14px; border: 1px solid var(--line);
+  background: var(--card); box-shadow: var(--shadow);
+  overflow: hidden; animation: card-enter 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform, opacity;
+  border-bottom-left-radius: 4px;
+}
+.source-progress-card.active { border-color: rgba(47, 107, 79, 0.3); }
+.source-progress-card.complete { border-color: var(--green); }
+.source-progress-card__header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px; background: var(--paper);
+  border-bottom: 1px solid var(--line);
+}
+.source-progress-card.complete .source-progress-card__header {
+  background: var(--green-soft);
+}
+.source-progress-card__icon { font-size: 15px; }
+.source-progress-card__title {
+  flex: 1; font-size: 13.5px; font-weight: 600; color: var(--ink);
+}
+.source-progress-card__count {
+  font-family: var(--font-mono); font-size: 10.5px; color: var(--muted);
+  padding: 1px 7px; border-radius: 10px;
+  background: var(--card); border: 1px solid var(--line);
+}
+.source-progress-card__timeline {
+  padding: 8px 14px; display: flex; flex-direction: column; gap: 4px;
+  max-height: 200px; overflow-y: auto;
+}
+.source-progress-card__step {
+  display: flex; align-items: flex-start; gap: 8px;
+  font-size: 12.5px; line-height: 1.45; color: var(--ink-soft);
+  padding: 3px 0; transition: opacity 0.15s;
+}
+.source-progress-card__step.done { opacity: 0.65; }
+.source-progress-card__step.current { opacity: 1; color: var(--ink); font-weight: 500; }
+.source-progress-card__step-icon { font-size: 13px; flex-shrink: 0; line-height: 1.45; }
+.source-progress-card__step-text { flex: 1; min-width: 0; }
+.source-progress-card__bar {
+  height: 4px; background: var(--paper-deep); overflow: hidden;
+}
+
+/* --- Thinking / три точки (busy без progressPhase) --- */
 .bubble.agent.progress {
   display: inline-flex; align-items: center; padding: 10px 16px;
 }
@@ -978,7 +1142,7 @@ body.resizing * { cursor: col-resize !important; }
    Карточное представление урока (LessonCard)
    ============================================================ */
 
-/* Основной контейнер карточки */
+/* Основной контейнер карточки — без анимации fade/flip (убрана зелёная полоса) */
 .lesson-card {
   background: var(--card);
   border: 1px solid var(--line);
@@ -987,11 +1151,7 @@ body.resizing * { cursor: col-resize !important; }
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  animation: lesson-card-in 0.35s ease both;
-}
-@keyframes lesson-card-in {
-  from { opacity: 0; transform: translateY(12px); }
-  to   { opacity: 1; transform: translateY(0); }
+  /* Убрана анимация lesson-card-in — она создавала зелёный gradient band */
 }
 
 /* Fallback — нераспознанный урок */
@@ -1000,13 +1160,13 @@ body.resizing * { cursor: col-resize !important; }
   background: linear-gradient(135deg, var(--card), var(--amber-soft));
 }
 
-/* Header карточки */
+/* Header карточки — без градиента (убрана зелёная полоса) */
 .lesson-card__header {
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 16px 20px;
-  background: linear-gradient(135deg, var(--green-soft), var(--card));
+  background: var(--card);
   border-bottom: 1px solid var(--line);
 }
 .lesson-card--fallback .lesson-card__header {
@@ -1089,7 +1249,7 @@ body.resizing * { cursor: col-resize !important; }
   word-break: break-word;
 }
 
-/* ── Секция внутри карточки ── */
+/* ── Секции внутри карточки — без анимации fade/flip (убрана зелёная полоса) ── */
 .lesson-section {
   padding: 14px 16px;
   background: var(--card);
@@ -1098,17 +1258,6 @@ body.resizing * { cursor: col-resize !important; }
   display: flex;
   flex-direction: column;
   gap: 8px;
-  animation: lesson-section-in 0.3s ease both;
-}
-.lesson-section:nth-child(1) { animation-delay: 0.05s; }
-.lesson-section:nth-child(2) { animation-delay: 0.1s; }
-.lesson-section:nth-child(3) { animation-delay: 0.15s; }
-.lesson-section:nth-child(4) { animation-delay: 0.2s; }
-.lesson-section:nth-child(5) { animation-delay: 0.25s; }
-.lesson-section:nth-child(6) { animation-delay: 0.3s; }
-@keyframes lesson-section-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to   { opacity: 1; transform: translateY(0); }
 }
 
 .lesson-section__header {
@@ -1483,9 +1632,19 @@ body.resizing * { cursor: col-resize !important; }
   width: 280px; padding: 14px 16px; background: var(--card);
   border: 1px solid var(--line); border-radius: var(--radius);
   box-shadow: 0 8px 32px rgba(33, 40, 46, 0.14);
-  animation: popup-in 0.2s ease;
+  animation: popup-enter 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform, opacity;
 }
-@keyframes popup-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+@keyframes popup-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
 
 .settings-header {
   font-family: var(--font-mono); font-weight: 700; font-size: 11px;
@@ -1528,7 +1687,8 @@ body.resizing * { cursor: col-resize !important; }
   display: flex; align-items: center; gap: 8px; padding: 8px 14px;
   background: var(--amber-soft); border: 1px solid var(--amber);
   border-radius: 12px; font-size: 13.5px; color: var(--ink);
-  animation: rise 0.2s ease;
+  animation: card-enter 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform, opacity;
 }
 .confirm-bar strong { color: var(--green-strong); }
 .btn-confirm {
@@ -1655,3 +1815,87 @@ body.resizing * { cursor: col-resize !important; }
   .progress-bar-indeterminate, .graph-spinner { animation: none !important; }
 }
 
+/* ============================================================
+   Изображения в уроках (markdown ![alt](url))
+   ============================================================ */
+.lesson-figure {
+  margin: 14px 0; text-align: center;
+  border-radius: 12px; overflow: hidden;
+  background: var(--paper); border: 1px solid var(--line);
+}
+.lesson-image {
+  display: block; max-width: 100%; height: auto;
+  margin: 0 auto; border-radius: 10px;
+  transition: transform 0.2s ease;
+}
+.lesson-image:hover { transform: scale(1.02); }
+.lesson-image-caption {
+  display: block; padding: 8px 12px;
+  font-size: 12px; color: var(--muted); font-style: italic;
+  text-align: center; line-height: 1.4;
+  border-top: 1px solid var(--line); background: var(--card);
+}
+
+/* Изображения внутри LatexText (инлайновые) */
+.lesson-image-wrap {
+  display: block; margin: 10px 0; text-align: center;
+}
+.lesson-image-wrap .lesson-image {
+  border-radius: 8px; box-shadow: var(--shadow);
+  max-width: 90%;
+}
+.lesson-image-wrap .lesson-image-caption {
+  font-size: 11px; color: var(--muted); margin-top: 4px;
+  font-style: italic;
+}
+
+/* ============================================================
+   LaTeX display mode (блочные формулы $$...$$)
+   ============================================================ */
+.latex-display {
+  display: block; text-align: center;
+  margin: 12px 0; padding: 10px 16px;
+  background: linear-gradient(135deg, var(--paper), rgba(47, 107, 79, 0.03));
+  border: 1px solid var(--line); border-radius: 10px;
+  overflow-x: auto;
+}
+.latex-display .katex-display {
+  margin: 0; padding: 0;
+}
+.latex-error {
+  font-family: var(--font-mono); font-size: 12px;
+  color: var(--err); background: var(--red-soft);
+  padding: 2px 6px; border-radius: 4px;
+}
+
+/* KaTeX тонкая настройка */
+.katex { font-size: 1.05em; }
+.lesson-card .katex { font-size: 1.08em; }
+.bubble .katex { font-size: 1em; }
+
+/* ============================================================
+   Sidebar toggle (свёртка графа)
+   ============================================================ */
+.graph-panel__toggle {
+  width: 28px; height: 28px; border-radius: 7px; border: 1px solid var(--line);
+  background: var(--card); color: var(--ink-soft); cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.2s ease; margin-left: 4px;
+}
+.graph-panel__toggle:hover { border-color: var(--green); color: var(--green-strong); background: var(--green-soft); }
+
+/* ============================================================
+   Улучшенный zoom controls (граф)
+   ============================================================ */
+.graph-zoom-controls {
+  position: absolute; left: 8px; top: 8px; display: flex; flex-direction: column; gap: 4px; z-index: 10;
+}
+.graph-zoom-controls button {
+  width: 28px; height: 28px; border-radius: 7px; border: 1px solid rgba(100, 223, 223, 0.2);
+  background: rgba(13, 17, 23, 0.85); color: #c9d1d9; font-size: 16px;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  transition: all 0.15s ease;
+}
+.graph-zoom-controls button:hover {
+  background: rgba(100, 223, 223, 0.15); border-color: #64DFDF; color: #64DFDF;
+}

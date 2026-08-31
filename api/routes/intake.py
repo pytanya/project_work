@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
@@ -27,6 +27,10 @@ class IntakeAnswer(BaseModel):
 
 class IntakeCardBody(BaseModel):
     values: Dict[str, Any]
+    # Детерминированный ID личности (ФИО+тип+класс) с фронта. Если сессия уже
+    # привязана к другому student_id — перепривязываем: это другой человек,
+    # ему выделяется новая изолированная ветка данных (Wiki/история/мастерство).
+    student_id: Optional[str] = None
 
 
 @router.post("/intake", response_model=IntakeStatusResponse)
@@ -73,7 +77,22 @@ async def post_intake_card(session_id: str, body: IntakeCardBody, store: Session
             complete=False,
         )
 
-    st = apply_intake_card(session.state, body.values)
+    # ФИО: требуем минимум два слова (имя + фамилия) — это ключ надёжной
+    # персональной изоляции (детерминированный student_id из ФИО+тип+класс).
+    full_name = str(body.values.get("name") or "").strip()
+    if len(full_name.split()) < 2:
+        session.queue.put(WsEvent(
+            event="session.error",
+            data={"message": "Укажи имя и фамилию (минимум два слова) — так мы не перепутаем разных учеников."},
+        ))
+        st = session.state
+        return IntakeStatusResponse(
+            missing_fields=list(st.missing_fields),
+            next_question="",
+            complete=False,
+        )
+
+    st = apply_intake_card(session.state, body.values, student_id=body.student_id)
 
     # Персистентный профиль ученика: имя/тип/класс — на будущие сессии
     if st.student_id:

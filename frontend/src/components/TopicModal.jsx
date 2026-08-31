@@ -4,6 +4,7 @@
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import NoteItem from './NoteItem'
+import LatexText from './LatexText'
 
 function masteryClass(m) {
   if (m >= 0.75) return 'high'
@@ -22,7 +23,7 @@ function levelEmoji(m) {
 
 const PLACEHOLDER = /^Материал по теме .+ накапливается/
 
-export default function TopicModal({ article, subject, onClose, onEnrich, enriching = false, enrichNote = null }) {
+export default function TopicModal({ article, subject, onClose, onEnrich, enriching = false, enrichNote = null, onDelete = null }) {
   const [progressExpanded, setProgressExpanded] = useState(false)
 
   useEffect(() => {
@@ -45,13 +46,18 @@ export default function TopicModal({ article, subject, onClose, onEnrich, enrich
     <div className="topic-modal-backdrop" onClick={onClose}>
       <div className="topic-modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
         <button className="topic-modal__close" onClick={onClose} title="Закрыть (Esc)">✕</button>
+        {onDelete && (
+          <button className="topic-modal__delete" onClick={() => {
+            if (window.confirm(`Удалить карточку «${article.title || article.topic}» из базы знаний?`)) onDelete()
+          }} title="Удалить карточку из базы знаний">🗑</button>
+        )}
         <div className="topic-modal__meta">
           <span className="topic-modal__subject">{subject || 'тема'}</span>
           {article.grade && <span className="topic-modal__badge">класс {article.grade}</span>}
           {showCurriculum && <span className="topic-modal__badge" title="программа/ФГОС">{article.curriculum}</span>}
           {article.okf_version && <span className="topic-modal__badge okf">OKF {article.okf_version}</span>}
         </div>
-        <h2 className="topic-modal__title">{article.title || article.topic}</h2>
+        <h2 className="topic-modal__title"><LatexText text={article.title || article.topic} /></h2>
 
         {/* Прогресс: отдельный визуальный блок с аккордеоном */}
         <div className={`topic-modal__progress ${cls}`}>
@@ -117,7 +123,7 @@ export default function TopicModal({ article, subject, onClose, onEnrich, enrich
         {hasBody && (
           <div className="topic-modal__body">
             <div className="topic-modal__section-label">Изложение темы</div>
-            <div className="topic-modal__body-text">{article.body}</div>
+            <div className="topic-modal__body-text"><LatexText text={article.body} /></div>
           </div>
         )}
 

@@ -1,28 +1,26 @@
-// Vitest setup: jest-dom матчеры + фейковый WebSocket + React 19 act polyfill
-import '@testing-library/jest-dom/vitest'
-import { vi } from 'vitest'
-import * as ReactActual from 'react'
-
-// Polyfill: в React 19 `act` доступен как named export.
-// react-dom/test-utils (CJS) делает require('react').act, что возвращает undefined.
-// Патчим через vi.mock чтобы при импорте react свойство `act` существовало.
-vi.mock('react', async () => {
-  const actual = await vi.importActual('react')
-  const mod = {}
-  for (const key of Object.keys(actual)) {
-    mod[key] = actual[key]
-  }
-  return mod
-})
+// Vitest setup: jest-dom матчеры + фейковый WebSocket
+import '@testing-library/jest-dom'
 
 class FakeWebSocket {
   static instances = []
+  static CONNECTING = 0
+  static OPEN = 1
+  static CLOSING = 2
+  static CLOSED = 3
+
   constructor(url) {
     this.url = url
+    this.readyState = FakeWebSocket.OPEN
     FakeWebSocket.instances.push(this)
   }
-  close() {}
+  close() {
+    this.readyState = FakeWebSocket.CLOSED
+  }
   send() {}
 }
+
+beforeEach(() => {
+  FakeWebSocket.instances = []
+})
 
 globalThis.WebSocket = FakeWebSocket
