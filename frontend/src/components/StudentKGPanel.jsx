@@ -1,6 +1,7 @@
 // StudentKGPanel — «Мои знания»: список тем ученика со статусами (roadmap #4).
 // Показывает: освоенные / в процессе / не изученные + слабые места.
 import { useEffect, useState, useMemo } from 'react'
+import { api } from '../api'
 
 const STATUS_COLORS = {
   not_studied: '#9ca3af',    // серый
@@ -13,10 +14,18 @@ const STATUS_LABELS = {
   mastered: 'Освоено',
 }
 
-export default function StudentKGPanel({ studentId = '', subject = '' }) {
+export default function StudentKGPanel({ studentId = '', subject = '', onStartReview = null, busy = false }) {
   const [kg, setKg] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  const [dueCount, setDueCount] = useState(0)
+
+  useEffect(() => {
+    if (!studentId) return
+    api.getReview(studentId)
+      .then((d) => setDueCount(d.stats?.due || 0))
+      .catch(() => setDueCount(0))
+  }, [studentId])
 
   useEffect(() => {
     if (!studentId) return
@@ -63,6 +72,12 @@ export default function StudentKGPanel({ studentId = '', subject = '' }) {
       <div className="student-kg-panel__header">
         <h3>Мои знания</h3>
         {subject && <span className="muted">· {subject}</span>}
+        {onStartReview && dueCount > 0 && (
+          <button className="btn btn-small student-kg-review-btn"
+                  onClick={onStartReview} disabled={busy}>
+            Повторить ({dueCount})
+          </button>
+        )}
       </div>
 
       {loading && <div className="muted" style={{ padding: '8px 12px' }}>Загрузка…</div>}

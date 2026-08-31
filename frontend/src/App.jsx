@@ -322,7 +322,18 @@ export default function App() {
             difficulty: d.difficulty,
             questionId: d.question_id,
             excerpt: d.excerpt || '',
+            review: d.review,
           })
+          break
+        case 'quiz.hint':
+          setFeed((f) => [...f, { id: `hint-${Date.now()}`, kind: 'hint', text: d.hint, data: d }])
+          break
+        case 'review.done':
+          setFeed((f) => [...f, {
+            id: `review-${Date.now()}`, kind: 'review',
+            text: `Повторение завершено: верно ${d.correct} из ${d.reviewed}.`,
+            data: d,
+          }])
           break
         case 'tutor.explanation':
           finalizeStream('explanation', d.message, d)
@@ -1014,7 +1025,15 @@ export default function App() {
 
         {/* 5. Student Knowledge Graph (roadmap #4) */}
         {intake.complete && student.student_id && (
-          <StudentKGPanel studentId={student.student_id} subject={intake.subject} />
+          <StudentKGPanel
+            studentId={student.student_id}
+            subject={intake.subject}
+            onStartReview={() => {
+              const sid = sessionId
+              if (sid) api.startReview(sid).catch(() => {})
+            }}
+            busy={chatBusy}
+          />
         )}
       </aside>
       <div className="sidebar-resizer" ref={sidebarDragRef} title="Изменить ширину панели" />

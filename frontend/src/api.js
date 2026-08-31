@@ -87,6 +87,12 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(body),
     }),
+
+  getReview: (studentId) =>
+    jsonFetch(`/api/students/${encodeURIComponent(studentId)}/review`),
+
+  startReview: (id) =>
+    jsonFetch(`/api/sessions/${id}/review`, { method: 'POST' }),
 }
 
 export function wsUrl(sessionId) {

@@ -60,6 +60,7 @@ export default function QuizCard({ q, onSelect, questionNum, totalQuestions, sel
       {q.excerpt && <ExcerptDisplay excerpt={q.excerpt} fullExcerpt={q.excerpt} />}
 
       <div className="quiz-meta">
+        {q.review && <span className="badge review">повторение</span>}
         <span className="badge">{q.difficulty}</span>
         <span className="badge topic">{q.topic}</span>
         <span className="badge type">{q.answerType}</span>
