@@ -93,6 +93,13 @@ export const api = {
 
   startReview: (id) =>
     jsonFetch(`/api/sessions/${id}/review`, { method: 'POST' }),
+
+  // Судья-оценщик по запросу (кнопка в UI): урок или вопрос квиза
+  judge: (id, target, questionId) =>
+    jsonFetch(`/api/sessions/${id}/judge`, {
+      method: 'POST',
+      body: JSON.stringify({ target, question_id: questionId || null }),
+    }),
 }
 
 export function wsUrl(sessionId) {

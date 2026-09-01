@@ -27,6 +27,7 @@ QUESTION_CRITERIA = ["relevance", "grade_fit", "clarity", "factual_ok"]
 EXPLANATION_CRITERIA = ["accuracy", "comprehensibility", "citation_ok"]
 EVALUATION_CRITERIA = ["grade_correct", "feedback_ok", "difficulty_fit"]
 LESSON_CRITERIA = ["groundedness", "coherence", "grade_fit", "no_contradiction"]
+QUIZ_QUESTION_CRITERIA = ["answerable", "unambiguous", "difficulty_fit", "factual_ok", "clarity"]
 
 
 @dataclass
@@ -108,6 +109,50 @@ def judge_question(
             "topic": topic,
             "grade": grade or "не указан",
             "grade_guidance": grade_prompt(grade),
+        },
+        judge_call=judge_call,
+    )
+
+
+def judge_quiz_question(
+    question: str,
+    topic: str,
+    grade: Optional[str],
+    answer_type: Optional[str] = None,
+    options: Optional[List[str]] = None,
+    correct_answers: Optional[List[str]] = None,
+    difficulty: Optional[str] = None,
+    judge_call: Optional[Callable[[List[Dict[str, str]]], str]] = None,
+) -> JudgeResult:
+    """Контракт «вопрос квиза»: answerable, unambiguous, difficulty_fit, factual_ok, clarity.
+
+    Оценивает качество вопроса с точки зрения обучающего квиза:
+    - answerable — по вопросу/вариантам можно однозначно ответить, используя контекст;
+    - unambiguous — для single ровно один верный вариант, дистракторы правдоподобны;
+    - difficulty_fit — сложность соответствует заявленной (easy/medium/hard);
+    - factual_ok — факты в вопросе и вариантах соответствуют контексту;
+    - clarity — формулировка ясная, без двойного отрицания и ловушек.
+    """
+    return _judge(
+        "quiz_question",
+        QUIZ_QUESTION_CRITERIA,
+        {
+            "question": question,
+            "topic": topic,
+            "grade": grade or "не указан",
+            "answer_type": answer_type or "open",
+            "options": options or [],
+            "correct_answers": correct_answers or [],
+            "difficulty": difficulty or "medium",
+            "grade_guidance": grade_prompt(grade),
+            "instructions": (
+                "Оцени вопрос учебного квиза: answerable — по нему можно дать "
+                "однозначный ответ по материалу; unambiguous — для single ровно один "
+                "верный вариант, дистракторы правдоподобны и не перекрываются; "
+                "difficulty_fit — сложность соответствует easy/medium/hard; "
+                "factual_ok — вопрос и варианты не содержат фактических ошибок; "
+                "clarity — нет двойного отрицания, двусмысленности, ловушек."
+            ),
         },
         judge_call=judge_call,
     )

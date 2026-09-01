@@ -585,7 +585,7 @@ function SummarySection({ summary }) {
    Главный компонент LessonPanel
    ═══════════════════════════════════════════ */
 
-export default function LessonPanel({ text, topic, lesson }) {
+export default function LessonPanel({ text, topic, lesson, onJudge = null }) {
   /* ═ Hooks вызываем всегда в одинаковом порядке, ДО любых return = */
   
   /* ── Санитизация структурированного урока (всегда вызывается) ── */
@@ -677,6 +677,13 @@ export default function LessonPanel({ text, topic, lesson }) {
 
       {/* Footer — оценка */}
       <EvalBadge evalData={data.eval} />
+      {onJudge && (
+        <div className="lesson-card__actions">
+          <button className="btn btn-small" onClick={onJudge} title="Запустить LLM-судью качества урока">
+            🔍 Оценить урок
+          </button>
+        </div>
+      )}
     </div>
   )
 }

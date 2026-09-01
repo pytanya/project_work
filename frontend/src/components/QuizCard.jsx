@@ -52,7 +52,7 @@ function ExcerptDisplay({ excerpt, fullExcerpt }) {
   )
 }
 
-export default function QuizCard({ q, onSelect, questionNum, totalQuestions, selectedOption, quickAnswer, correctCount, onHint = null }) {
+export default function QuizCard({ q, onSelect, questionNum, totalQuestions, selectedOption, quickAnswer, correctCount, onHint = null, onJudge = null }) {
   const progress = totalQuestions > 0 ? Math.min(100, Math.round((questionNum / totalQuestions) * 100)) : 0
   return (
     <div className="card quiz">
@@ -97,6 +97,11 @@ export default function QuizCard({ q, onSelect, questionNum, totalQuestions, sel
       {onHint && !q.review && (
         <button className="btn btn-small quiz-hint-btn" onClick={() => onHint()}>
           💡 Подсказка
+        </button>
+      )}
+      {onJudge && !q.review && (
+        <button className="btn btn-small quiz-judge-btn" onClick={() => onJudge()}>
+          🔍 Оценить вопрос
         </button>
       )}
     </div>

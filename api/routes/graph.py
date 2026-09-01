@@ -7,7 +7,7 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -301,3 +301,108 @@ def knowledge_package(session_id: str, store: SessionStore = Depends(get_store))
         "files": validation["files"],
         "index": (bundle / "index.md").read_text(encoding="utf-8"),
     }
+
+
+class JudgeBody(BaseModel):
+    """Запрос судьи-оценщика: target=lesson|question (+ question_id для вопроса)."""
+
+    target: str  # "lesson" | "question"
+    question_id: Optional[str] = None
+
+
+@router.post("/judge")
+def judge_session(session_id: str, body: JudgeBody, store: SessionStore = Depends(get_store)):
+    """Судья-оценщик по запросу (кнопка в UI): урок или вопрос квиза.
+
+    Синхронный HTTP: ждём LLM-судью (~5-10с) и возвращаем результат сразу;
+    дополнительно публикуем WS-событие system kind="judge.result" для ленты.
+    """
+    from src.judge import judge_lesson, judge_quiz_question
+    from src.llm_client import LLMClient
+
+    session = get_session(store, session_id)
+    target = (body.target or "").strip().lower()
+    if target not in ("lesson", "question"):
+        raise HTTPException(422, "target должен быть 'lesson' или 'question'")
+    if session.step_active:
+        raise HTTPException(409, "Шаг уже выполняется — дождитесь завершения")
+
+    st = session.state
+    def _run() -> Dict[str, Any]:
+        deps_judge = getattr(session.deps, "judge_llm", None)
+        if deps_judge is not None:
+            judge_call = deps_judge
+        else:
+            client = LLMClient(role="judge")
+            judge_call = lambda msgs: client.chat(msgs, temperature=0.0, max_tokens=250).content or ""
+        if target == "lesson":
+            topic = st.active_topic or st.topic or st.subject or "тема"
+            from src.graph import _rag_chunks
+
+            chunks = _rag_chunks(session.deps.store, topic, st, k=3)
+            context = [c.chunk.text for c in chunks]
+            result = judge_lesson(
+                st.lesson_text or "",
+                context,
+                st.grade,
+                judge_call=judge_call,
+                eval_criteria=(st.lesson_eval or {}).get("criteria"),
+            )
+        else:
+            card = st.current_question
+            if card is None:
+                raise HTTPException(404, "Нет активного вопроса для оценки")
+            # question_id: конкретный вопрос (если карточка сменилась) или текущий
+            if body.question_id and card.question_id != body.question_id:
+                raise HTTPException(404, "Вопрос уже неактивен — обновите карточку")
+            result = judge_quiz_question(
+                card.question,
+                card.topic,
+                st.grade,
+                answer_type=card.answer_type,
+                options=card.options or [],
+                correct_answers=list(st.current_answers or []),
+                difficulty=card.difficulty,
+                judge_call=judge_call,
+            )
+        criteria = {k: round(float(v) / 10.0, 3) for k, v in result.criteria.items()}
+        return {
+            "target": target,
+            "question_id": body.question_id,
+            "criteria": criteria,
+            "avg_score": round(float(result.avg_score) / 10.0, 3),
+            "verdict": result.verdict,
+        }
+
+    try:
+        result = _run()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("judge %s: %s", target, exc)
+        raise HTTPException(502, f"Судья недоступен: {exc}")
+
+    # WS-событие (для ленты/других клиентов); HTTP-ответ — синхронный источник правды
+    try:
+        from api.schemas import WsEvent
+
+        session.queue.put(WsEvent(event="system", data={
+            "message": f"Оценка «{target}»: {result['avg_score'] * 10:.0f}/10",
+            "kind": "judge.result",
+            "judge": result,
+        }))
+    except Exception:
+        pass
+
+    # Сохраняем результат судьи урока в состояние (для повторного показа при resync)
+    if target == "lesson":
+        try:
+            st2 = session.state.model_copy(deep=True)
+            st2.lesson_judge = {k: result[k] for k in ("criteria", "avg_score", "verdict")}
+            session.state = st2
+            if session.store and getattr(session.store, "_sqlite", None):
+                session.store._save_state(session.id, st2)
+        except Exception:
+            pass
+
+    return result

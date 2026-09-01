@@ -624,8 +624,9 @@ async def run_step(session: SessionData, answer: Optional[str] = None) -> TutorS
         except Exception:
             logger.exception("run_step: прогрессивная история %s", session.id)
 
-    # Фоновый LLM-судья урока: fire-and-forget, НЕ блокирует ответ шага
-    _maybe_schedule_lesson_judge(session)
+    # Судья урока теперь ТОЛЬКО по запросу (кнопка «Оценить урок» → POST /judge).
+    # Авто-запуск убран: фоновый LLM-судья не дёргается на каждом шаге (наблюдаемость
+    # показала: при недоступном провайдере это добавляло секунды к шагу).
 
     return session.state
 

@@ -447,6 +447,13 @@ export default function App() {
           // Агент-сообщения и lesson.ready — как чат репетитора (не системное)
           if (['agent.message', 'lesson.ready'].includes(d.kind)) {
             push('agent', d.message)
+          } else if (d.kind === 'judge.result') {
+            // Судья по запросу: детали критериев (0..1 → 0..10)
+            const j = d.judge || {}
+            const crits = Object.entries(j.criteria || {})
+              .map(([k, v]) => `${k}: ${Math.round((v || 0) * 10)}/10`)
+              .join(' · ')
+            push('system', `${d.message}${crits ? ` — ${crits}` : ''}`)
           } else if (d.kind !== 'mastery.gate') {
             push('system', d.message)
           }
@@ -843,6 +850,33 @@ export default function App() {
     }
   }
 
+  // Судья-оценщик по запросу (кнопка в UI): урок или вопрос квиза
+  async function handleJudgeLesson() {
+    if (!sessionId) return
+    setChatBusy(true)
+    try {
+      const r = await api.judge(sessionId, 'lesson')
+      push('system', `Оценка урока: ${Math.round((r.avg_score || 0) * 10)}/10`)
+    } catch (e) {
+      push('error', String(e.message || e))
+    } finally {
+      setChatBusy(false)
+    }
+  }
+
+  async function handleJudgeQuestion() {
+    if (!sessionId || !current?.questionId) return
+    setChatBusy(true)
+    try {
+      const r = await api.judge(sessionId, 'question', current.questionId)
+      push('system', `Оценка вопроса: ${Math.round((r.avg_score || 0) * 10)}/10`)
+    } catch (e) {
+      push('error', String(e.message || e))
+    } finally {
+      setChatBusy(false)
+    }
+  }
+
   async function handleSelectTopic(node) {
     if (!sessionId) return
     if (isPreparingTopic.current) {
@@ -1055,7 +1089,7 @@ export default function App() {
       </aside>
       <div className="sidebar-resizer" ref={sidebarDragRef} title="Изменить ширину панели" />
       <main className="chat">
-        <ChatStream feed={feed} busy={chatBusy || uploadBusy} progressPhase={progressPhase} />
+        <ChatStream feed={feed} busy={chatBusy || uploadBusy} progressPhase={progressPhase} onJudgeLesson={handleJudgeLesson} />
         {current &&
           (current.kind === 'quiz' ? (
             <QuizCard
@@ -1067,6 +1101,7 @@ export default function App() {
               quickAnswer={quickAnswer}
               correctCount={score.correct}
               onHint={() => sendMessage('подсказка')}
+              onJudge={handleJudgeQuestion}
             />
           ) : current.kind === 'intake_card' ? (
             <IntakeCard

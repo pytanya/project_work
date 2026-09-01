@@ -13,8 +13,9 @@ from api.app import create_app
 from api.engine import SessionStore
 from api.schemas import WsEvent
 from src.config import BASE_DIR, Settings
-from src.graph import GraphDeps
+from src.graph import GraphDeps, build_graph
 from src.knowledge import DocChunk, NumpyVectorStore
+from src.states import TutorState
 
 
 def _persona(n: int) -> str:
@@ -818,3 +819,70 @@ class TestSourcePolicy:
         st = client.get(f"/api/sessions/{sid}").json()
         assert st["allow_any_sources"] is False
         assert st["source_whitelist"] == ["wikibooks.org"]
+
+
+class TestJudgeEndpoint:
+    """Судья по запросу (кнопка в UI): POST /api/sessions/{id}/judge (lesson|question)."""
+
+    def _prepare_state(self, client, sid, mode, judge_json):
+        """Доводим сессию до активного вопроса/урока напрямую (минуя intake-агента)."""
+        import dataclasses
+
+        store = client.app.state.store
+        session = store.get(sid)
+        session.deps = dataclasses.replace(session.deps, judge_llm=lambda m: judge_json)
+        g = build_graph(session.deps)
+        st = session.state
+        # имитируем пройденный intake: источник ready, вопрос/урок — через граф напрямую
+        st = TutorState.model_validate(g.invoke(st.model_dump()))
+        st = TutorState.model_validate(g.invoke(st.model_dump()))
+        st = TutorState.model_validate(g.invoke(st.model_dump()))
+        session.state = st
+        return session
+
+    def test_judge_rejects_bad_target(self, client):
+        sid = _new_session(client, student_id="stu_j", subject="география", topic="Атмосфера",
+                           mode="quiz", num_questions=1, source_status="ready", has_textbook=False,
+                           intake_progress=100)
+        r = client.post(f"/api/sessions/{sid}/judge", json={"target": "bogus"})
+        assert r.status_code == 422
+
+    def test_judge_question_uses_current_card(self, client):
+        _JUDGE_Q = '{"criteria": {"answerable": 9, "unambiguous": 8, "difficulty_fit": 7, "factual_ok": 9, "clarity": 8}}'
+        store = client.app.state.store
+        sid = _new_session(client, student_id="stu_j", learner_type="student",
+                           subject="география", topic="Атмосфера", mode="quiz",
+                           num_questions=1, source_status="ready", has_textbook=False,
+                           intake_progress=100, missing_fields=[])
+        session = self._prepare_state(client, sid, "quiz", _JUDGE_Q)
+        assert session.state.current_question is not None, "вопрос должен быть сгенерирован"
+
+        r = client.post(f"/api/sessions/{sid}/judge", json={"target": "question"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["target"] == "question"
+        assert body["verdict"] in ("pass", "fail")
+        assert "answerable" in body["criteria"]
+        assert "avg_score" in body
+
+    def test_judge_lesson_returns_evaluation(self, client):
+        _JUDGE_L = '{"criteria": {"groundedness": 9, "coherence": 8, "grade_fit": 7, "no_contradiction": 9}}'
+        store = client.app.state.store
+        sid = _new_session(client, student_id="stu_jl", learner_type="student",
+                           subject="география", topic="Атмосфера", mode="lesson",
+                           num_questions=1, source_status="ready", has_textbook=False,
+                           intake_progress=100, missing_fields=[])
+        session = self._prepare_state(client, sid, "lesson", _JUDGE_L)
+
+        if not (session.state.lesson_text or "").strip():
+            st = session.state
+            st = st.model_copy(update={"lesson_text": "Атмосфера — воздушная оболочка Земли.",
+                                       "lesson_eval": {"criteria": {"citations": 0.0}}})
+            session.state = st
+
+        r = client.post(f"/api/sessions/{sid}/judge", json={"target": "lesson"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["target"] == "lesson"
+        assert "groundedness" in body["criteria"]
+        assert "avg_score" in body
