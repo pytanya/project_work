@@ -314,6 +314,49 @@ class TestLessonCacheFlow:
         assert res.force_source_refresh is True
         assert res.lesson_text is None  # кэшированный урок сброшен
 
+    def test_content_node_dopolnit_preserves_lesson_and_rebuilds(self, deps):
+        """«Дополнить материал» в content_node: старый урок сохраняется, но помечается
+        lesson_rebuild — после обновления источников контент пересобирается (не как «с нуля»)."""
+        graph = build_graph(deps)
+        state = TutorState(num_questions=2, learner_type="schoolchild", grade="6",
+                           subject="география", topic="Атмосфера", mode="lesson",
+                           has_textbook=False, source_status="ready")
+        # урок уже показан (lesson_text заполнен) — ждём ответа
+        state = state.model_copy(update={
+            "lesson_text": "Атмосфера — газовая оболочка Земли.",
+            "lesson_done": True,
+            "sources": [{"type": "existing", "note": "ранее разобранные материалы"}],
+            "collection_id": "existing",
+            "source_status": "ready",
+        })
+        res = _invoke(graph, {**state.model_dump(), "pending_answer": "Дополнить материал"})
+        # старый урок НЕ сбрасывается сразу, помечается пересборка, граф уходит в поиск
+        assert res.lesson_rebuild is True
+        assert res.force_source_refresh is True
+        assert res.sources == []  # очищены → find_textbook_node выполнит свежий поиск
+        assert res.collection_id is None
+        # find_textbook упадёт в тестах (нет сети) → source_status=failed; но ключевое —
+        # команда разведена, а не молча перегенерировала старый урок.
+
+    def test_content_node_na_chnula_clears_lesson(self, deps):
+        """«Начать с нуля» в content_node: урок сбрасывается сразу, поиск свежих материалов."""
+        graph = build_graph(deps)
+        state = TutorState(num_questions=2, learner_type="schoolchild", grade="6",
+                           subject="география", topic="Атмосфера", mode="lesson",
+                           has_textbook=False, source_status="ready")
+        state = state.model_copy(update={
+            "lesson_text": "Атмосфера — газовая оболочка Земли.",
+            "lesson_done": True,
+            "sources": [{"type": "existing", "note": "ранее разобранные материалы"}],
+            "collection_id": "existing",
+            "source_status": "ready",
+        })
+        res = _invoke(graph, {**state.model_dump(), "pending_answer": "Начать с нуля"})
+        assert res.lesson_text is None  # старый урок сброшен сразу
+        assert res.force_source_refresh is True
+        assert res.sources == []
+        assert res.lesson_rebuild is False  # «с нуля» не требует пересборки — урок уже сброшен
+
     def test_content_node_uses_cached_lesson_without_llm(self, deps, tmp_path):
         from src.lesson_cache import save_lesson
 

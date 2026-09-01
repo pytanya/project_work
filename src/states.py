@@ -86,6 +86,9 @@ class TutorState(IntakeState):
     lesson_text: Optional[str] = None
     lesson_done: bool = False      # урок по теме показан
     lesson_confirmed: bool = False # ученик подтвердил переход к квизу
+    # «Дополнить материал»: найденные новые источники требуют перегенерации урока
+    # (после поиска свежих материалов узел content_node пересобирает контент).
+    lesson_rebuild: bool = False
     # Структурированный урок (LessonSchema): рендерится карточками вместо стены текста.
     # lesson_text — полный текст (render_text) для dedupe/resync/обратной совместимости.
     lesson_title: Optional[str] = None

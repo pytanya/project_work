@@ -1288,13 +1288,34 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
             st.agent_question = None
             _emit(deps, "system", message="Отлично! Начинаем квиз.", kind="lesson.done")
             return st.model_dump()
-        # «Дополнить материал» / «Начать с нуля» (7.3): сбрасываем урок и ищем свежие источники
-        if "дополнить" in low or "с нуля" in low or "заново" in low:
+        # «Дополнить материал» / «Начать с нуля» (7.3): разводим команды.
+        # Обе просят свежие источники, но:
+        #   «Начать с нуля» — полностью забываем старый урок;
+        #   «Дополнить материал» — старый урок остаётся, но после поиска
+        #   новых источников контент пересобирается (lesson_rebuild).
+        # Дальше граф уходит в find_textbook_node (force_source_refresh=True,
+        # sources очищены → route_after_content → NODE_FIND_TEXTBOOK).
+        if "с нуля" in low or "заново" in low:
             st.clear_lesson()
             st.force_source_refresh = True
+            st.sources = []
+            st.collection_id = None
+            st.source_status = None
             st.agent_question = None
-            _emit(deps, "system", message="Ищу свежие материалы по теме.", kind="lesson.repeat")
-        elif _is_not_ready(raw):
+            _emit(deps, "system", message="Начинаю с нуля — ищу свежие материалы по теме.",
+                  kind="lesson.repeat")
+            return st.model_dump()
+        if "дополнить" in low or "искать" in low or "найти" in low:
+            st.lesson_rebuild = True
+            st.force_source_refresh = True
+            st.sources = []
+            st.collection_id = None
+            st.source_status = None
+            st.agent_question = None
+            _emit(deps, "system", message="Ищу дополнительные материалы по теме.",
+                  kind="lesson.repeat")
+            return st.model_dump()
+        if _is_not_ready(raw):
             # Явный отказ («нет», «не готов», «пока нет») → сбрасываем и перегенерируем
             st.clear_lesson()
             st.agent_question = None
@@ -1306,6 +1327,13 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
             st.agent_question = None
             _emit(deps, "system", message=st.agent_message, kind="agent.message")
             return st.model_dump()
+
+    # «Дополнить материал»: после поиска новых источников (sources обновлены) —
+    # старый урок пересобирается заново из расширенного контекста, а не показывается как есть.
+    if st.lesson_rebuild and (st.sources or st.collection_id or st.source_status == "ready"):
+        logger.info("content_node: «дополнить» — пересборка урока после обновления источников")
+        st.lesson_rebuild = False
+        st.clear_lesson()
 
     if st.lesson_text:
         # материал уже показан — ждём подтверждения
@@ -1419,9 +1447,13 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
 
 
 def route_after_content(state: TutorState) -> str:
-    """После материала (урок/объяснение/разбор): подтверждён переход к квизу → квиз; иначе END."""
+    """После материала (урок/объяснение/разбор): подтверждён переход к квизу → квиз;
+    «Дополнить»/«Начать с нуля» (force_source_refresh + очищены sources) → поиск свежих
+    источников (find_textbook_node); иначе END."""
     if state.lesson_confirmed:
         return NODE_TUTOR_NEXT
+    if state.force_source_refresh and not state.sources and not state.collection_id:
+        return NODE_FIND_TEXTBOOK
     return END
 
 
@@ -2230,7 +2262,7 @@ def build_graph(deps: Optional[GraphDeps] = None, checkpointer: Any = None) -> A
     g.add_conditional_edges(
         NODE_CONTENT,
         route_after_content,
-        {END: END, NODE_TUTOR_NEXT: NODE_TUTOR_NEXT},
+        {END: END, NODE_TUTOR_NEXT: NODE_TUTOR_NEXT, NODE_FIND_TEXTBOOK: NODE_FIND_TEXTBOOK},
     )
     g.add_edge(NODE_WAIT_FOR_UPLOAD, END)
     g.add_conditional_edges(
