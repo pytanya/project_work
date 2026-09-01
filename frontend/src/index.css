@@ -1761,12 +1761,6 @@ body.resizing * { cursor: col-resize !important; }
   display: block;
 }
 
-.quiz-judge-btn {
-  width: auto; margin: 8px auto 0; padding: 6px 12px; font-size: 12px;
-  display: block;
-  background: var(--paper); border: 1px solid var(--line);
-}
-
 .lesson-card__actions {
   display: flex; justify-content: flex-end; padding: 8px 16px 12px;
 }

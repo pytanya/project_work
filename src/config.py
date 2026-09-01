@@ -164,7 +164,7 @@ class Settings(BaseSettings):
     # Агент в квизе (спека 7.3.1): true — тьюторинг ведёт agent_loop (модель выбирает
     # следующее действие через tools); false — детерминированный цикл квиза (быстрее,
     # по умолчанию: агентный ход квиза добавляет ~30-60с на ответ из-за 2-3 LLM-вызовов).
-    USE_AGENT_TUTOR: bool = Field(default=False)
+    USE_AGENT_TUTOR: bool = Field(default=True)
     # Антидубликат вопросов (спека 7.3.2): cosine-порог семантической близости
     # нового вопроса к уже заданным; при превышении — регенерация (≤ RETRIES раз).
     QUESTION_DEDUPE_THRESHOLD: float = Field(default=0.85, ge=0.0, le=1.0)

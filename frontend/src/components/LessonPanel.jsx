@@ -675,8 +675,7 @@ export default function LessonPanel({ text, topic, lesson, onJudge = null }) {
         <SummarySection summary={data.summary} />
       </div>
 
-      {/* Footer — оценка */}
-      <EvalBadge evalData={data.eval} />
+      {/* Footer — кнопка оценки (LLM-судья по запросу) */}
       {onJudge && (
         <div className="lesson-card__actions">
           <button className="btn btn-small" onClick={onJudge} title="Запустить LLM-судью качества урока">

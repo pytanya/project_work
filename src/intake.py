@@ -302,6 +302,9 @@ def emergency_min_set_met(state: IntakeState) -> bool:
 _MODE_CARD_OPTIONS = [
     {"value": "lesson", "label": "Урок (изучим тему)"},
     {"value": "quiz", "label": "Квиз (проверим знания)"},
+]
+# Расширенные режимы: доступны через чат-сообщения после заполнения карточки
+_MODE_ADVANCED_OPTIONS = [
     {"value": "explain", "label": "Объяснение конкретного вопроса"},
     {"value": "deep_dive", "label": "Глубокий разбор"},
 ]

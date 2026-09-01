@@ -251,10 +251,24 @@ hint/review-пузыри в чате. Агентный режим: инстру�
 ## Тесты и eval
 
 ```bash
-python -m pytest tests/ -v              # 550 тестов (юнит + интеграционные RouterAI)
+python -m pytest tests/ -v              # 754 теста (юнит + интеграционные RouterAI)
 python evals/edututor_eval.py --runs 3  # EduTutorEval: intake/find_textbook/judge + intent accuracy
 python evals/edututor_eval.py --mock    # офлайн-режим
 ```
+
+## Ответы на «Семь вопросов» памятки
+
+| # | Вопрос | Ответ в коде |
+|---|--------|-------------|
+| 1 | Какую полезную задачу решает агент? | Адаптивный тьюторинг: генерация персонализированного урока → квиз с RAG-контекстом → оценка ответа → объяснение ошибок при неправильном ответе → накопление знаний в Wiki |
+| 2 | Где агент сам выбирает следующее действие? | `src/graph.py:2345` — `USE_AGENT_TUTOR=True`: узел `NODE_AGENT_TUTOR` вызывает `run_tutor_agent()` (ReAct loop), модель выбирает tools (`rag_search`, `evaluate_answer`, `finish_session`) и решает, продолжать или завершать |
+| 3 | Когда и почему каждая модель? | `tutor_llm` (qwen3.7-flash) → вопросы/уроки; `expert_llm` (deepseek-v4-flash) → deep-dive объяснения; `judge_llm` (gemini-3.5-flash-lite) → оценка качества; `agent_llm` (qwen3.7-flash) → ReAct loop с function calling |
+| 4 | Какой инструмент через function calling? | `rag_search` (семантический поиск по индексу учебника), `evaluate_answer` (оценка ответа ученика), `finish_session` (завершение сессии), `set_intake` (интейк поля) — см. `src/agent_tools.py:350-367` |
+| 5 | Когда агент обращается к памяти? | `rag_search` вызывается в `content_node` когда контекста недостаточно для ответа, и в `agent_loop` когда модель решит что нужен внешний контекст. Если пусто → сообщает об отсутствии материала |
+| 6 | Ветвление/повтор/условие остановки? | Conditional edges: `route_learner`→`route_grade`→`route_source`; retry: `QUESTION_DEDUPE_RETRIES=2` при дубликатах; stop: `quiz_complete=true`, `MAX_LLM_CALLS_PER_SESSION`, circuit breaker |
+| 7 | Как доказать корректность? | 754 unit/integration тестов; eval suite (`evals/edututor_eval.py`); metrics collector (стоимость/токены/латентность); JSONL tracing с уникальным `req_{sid}`; budget guard + circuit breaker |
+
+## Известные ограничения (Known Issues)
 
 ## Ключевые решения и компромиссы
 
@@ -270,7 +284,46 @@ python evals/edututor_eval.py --mock    # офлайн-режим
 | Дешёвые роли (В-2) | `CHEAP_MODEL=google/gemma-3-4b-it` на RouterAI; при отказе — fallback TUTOR_MODEL |
 | **Quick answer toggle** (Фаза 1) | Popup settings ⚙ → quickAnswer: true = автоотправка мгновенно; false = полоса подтверждения «Вы выбрали X» |
 | **Разделение busy** (Фаза 1) | uploadBusy (индексация) / chatBusy (квиз); Banner индексации не мешает квизу |
-| **SQLite персистентность** (Фаза 2 🟡) | `SessionSQLiteStore` сохраняет состояние после каждого шага в `data/session_persist.db` |
+| SQLite персистентность (Фаза 2) | `SessionSQLiteStore` сохраняет состояние после каждого шага в `data/session_persist.db`. Восстановление сессий между перезапусками сервера (`restore_or_create`) — TODO: вызывается только из тестов, не из production-потока `create_session`. |
+
+## Известные ограничения (Known Issues)
+
+1. **Авто-поиск учебника нестабилен в РФ** — lesson.edu.ru → 401, Stepik → DNS-block, РЭШ → 503 anti-bot, ФИПИ → 403. Работает только DuckDuckGo Search (ddgs), но он медленный и не гарантирует образовательный контент. Основной путь — загрузка локального PDF.
+2. **`restore_or_create` — мёртвый код** — метод существует в `SessionStore`, но не вызывается при создании сессии (production использует `store.create()`). Сессии не восстанавливаются между перезапусками сервера.
+3. **SESSION_IDLE_TTL_SEC** — конфиг в `config.py:181` используется через `SESSION_STORE` и актуален, но в roadmap §9 упоминается как «мёртвый» — это ошибка документации.
+4. **Индексация PDF может занимать 1-2 минуты** — парсинг + чанкинг + эмбеддинги выполняются синхронно на первом шаге. Фронт показывает прогресс-баннер, но без детализации.
+
+## Пример запроса и результата
+
+Сценарий: ученик 6 класса, география, тема «Оборот воды в природе».
+
+```bash
+# Создание сессии + авто-интейк (через карточку знакомства)
+curl -X POST http://127.0.0.1:8000/api/sessions \
+  -H 'Content-Type: application/json' \
+  -d '{"student_id": "stu_demo_ivan", "initial": {"learner_type":"schoolchild","grade":"6","subject":"география","topic":"оборот воды"}}'
+
+# Ответ: {"session_id": "a3f9k2", "student_id": "stu_demo_ivan", "student_name": ""}
+
+# Отправка ответа на вопрос квиза
+curl -X POST http://127.0.0.1:8000/api/sessions/a3f9k2/message \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "Вода испаряется, поднимается вверх и конденсируется"}'
+
+# Результат будет возвращён через WebSocket (event: tutor.explanation или quiz.card для следующего вопроса)
+```
+
+Лог сессии (`logs/session_a3f9k2.jsonl`) содержит трассировку каждого шага:
+```jsonl
+{"ts": "2026-09-01T14:30:01", "request_id": "req_a3f9k2", "step": "source_find", "action": "find_textbook", "status": "completed", "model": "qwen/qwen3.7-flash", "duration_ms": 12500}
+{"ts": "2026-09-01T14:30:15", "request_id": "req_a3f9k2", "step": "quiz_card", "action": "generate_question", "status": "completed", "model": "qwen/qwen3.7-flash", "tokens": 342, "cost_usd": 0.001}
+{"ts": "2026-09-01T14:30:28", "request_id": "req_a3f9k2", "step": "evaluate_answer", "action": "check_answer", "status": "correct", "model": "google/gemma-3-4b-it", "judge_criteria": {"relevance": 0.9, "completeness": 0.7}}
+```
+
+Полный пример работает через:
+- **Frontend UI**: откройте `http://localhost:5173` → заполните карточку → чат → квиз
+- **CLI demo**: `python main.py --scenario schoolchild_grade6_geography --auto`
+- **Swagger API**: `http://localhost:8000/docs` (автогенерированный интерфейс FastAPI)
 
 ## Структура
 
@@ -279,7 +332,7 @@ src/           config, llm_client, guardrails, nlp, intake, curriculum (ФГОС
                knowledge (RAG), qdrant_store (Qdrant backend), adaptive (LinUCB),
                source_finder (crawl4ai), tutor, judge, graph, metrics
 api/           Pydantic-схемы (IntakeStatusResponse, QuizCard, MessageResponse, WsEvent)
-tests/         550+ тест
+tests/         754+ тест
 evals/         golden_set.json, intent_dataset.json, edututor_eval.py
 main.py        CLI-демо
 docker-compose.yml  Qdrant + backend + frontend (roadmap #1)

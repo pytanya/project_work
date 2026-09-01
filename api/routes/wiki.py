@@ -18,6 +18,12 @@ from ..engine import SessionStore
 router = APIRouter(prefix="/api/wiki", tags=["wiki"])
 
 
+def _wiki_check(student_id: str, store: SessionStore = Depends(get_store)) -> None:
+    """Базовая проверка доступа к wiki данных."""
+    if student_id and not store.check_student_access(student_id):
+        raise HTTPException(status_code=403, detail="Доступ запрещён: нет активной сессии для этого ученика")
+
+
 def _wiki(student_id: str = "") -> KnowledgeWiki:
     return KnowledgeWiki(default_settings.KNOWLEDGE_WIKI_DIR, student_id=student_id)
 
@@ -70,15 +76,17 @@ def wiki_enrich(body: WikiEnrichBody, store: SessionStore = Depends(get_store)):
 
 @router.get("")
 def wiki_summary(student_id: str = Query(default="", description="персональный namespace ученика"),
-                 _store: SessionStore = Depends(get_store)):
+                  _store: SessionStore = Depends(get_store)):
     """Сводка базы знаний ученика: предмет → темы с мастерством/попытками."""
+    _wiki_check(student_id, _store)
     return {"subjects": _wiki(student_id).to_summary_dict()}
 
 
 @router.get("/{subject}")
 def wiki_subject(subject: str, student_id: str = Query(default=""),
-                 _store: SessionStore = Depends(get_store)):
+                  _store: SessionStore = Depends(get_store)):
     """Статьи по предмету (персонально для ученика)."""
+    _wiki_check(student_id, _store)
     wiki = _wiki(student_id)
     articles = [a.to_dict() for a in wiki.list_articles(subject)]
     if not articles:
@@ -88,8 +96,9 @@ def wiki_subject(subject: str, student_id: str = Query(default=""),
 
 @router.get("/{subject}/{topic}")
 def wiki_article(subject: str, topic: str, student_id: str = Query(default=""),
-                 _store: SessionStore = Depends(get_store)):
+                  _store: SessionStore = Depends(get_store)):
     """Одна wiki-статья темы (персонально для ученика)."""
+    _wiki_check(student_id, _store)
     art = _wiki(student_id).get(subject, topic)
     if art is None:
         raise HTTPException(status_code=404, detail="Тема не найдена в базе знаний")

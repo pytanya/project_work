@@ -5,13 +5,19 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from ..deps import get_store
 from ..engine import SessionStore
 
 router = APIRouter(prefix="/api/students", tags=["students"])
+
+
+def _check_access(store: SessionStore, student_id: str) -> None:
+    """Базовая проверка доступа: student_id должен иметь хотя бы одну сессию."""
+    if not store.check_student_access(student_id):
+        raise HTTPException(status_code=403, detail="Доступ запрещён: нет активной сессии для этого ученика")
 
 
 @router.get("/{student_id}/sessions")
@@ -23,6 +29,7 @@ def student_sessions(
     store: SessionStore = Depends(get_store),
 ):
     """Последние занятия ученика (дата, предмет/тема, режим, счёт квиза)."""
+    _check_access(store, student_id)
     return {
         "sessions": store.student_store.list_sessions(
             student_id, limit=limit, subject=subject, mode=mode,
@@ -118,6 +125,7 @@ def get_knowledge_graph(
 
     Если subject указан — фильтруем по предмету.
     """
+    _check_access(store, student_id)
     kg = store.student_store.get_knowledge_graph(student_id)
     if kg is None:
         return {"student_id": student_id, "subject": subject or "", "topics": {}}
@@ -193,6 +201,7 @@ def get_recommendations(
     store: SessionStore = Depends(get_store),
 ):
     """Рекомендации по темам: слабые места + неосвоенные пререквизиты."""
+    _check_access(store, student_id)
     kg = store.student_store.get_knowledge_graph(student_id)
     if kg is None:
         return {"recommendations": []}
@@ -215,6 +224,7 @@ def get_recommendations(
 @router.get("/{student_id}/review")
 def student_review(student_id: str, store: SessionStore = Depends(get_store)):
     """SM-2 Question Bank: статистика + должные карточки."""
+    _check_access(store, student_id)
     from src.review import ReviewBank
     from src.config import settings as default_settings
 

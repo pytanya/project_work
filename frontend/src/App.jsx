@@ -21,9 +21,9 @@ const SIDEBAR_MAX = 560
 
 function loadSettings() {
   try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {}
+    return JSON.parse(localStorage.getItem(STORAGE_KEY)) || { show_file_upload: false }
   } catch {
-    return {}
+    return { show_file_upload: false }
   }
 }
 
@@ -73,6 +73,7 @@ export default function App() {
   const [confirmedOption, setConfirmedOption] = useState(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [quickAnswer, setQuickAnswer] = useState(() => loadSettings().quickAnswer !== false)
+  const [showFileUpload, setShowFileUpload] = useState(() => loadSettings().show_file_upload !== false)
   // Ширина боковой панели (ресайз перетаскиванием, сохраняется в localStorage)
   const [sidebarWidth, setSidebarWidth] = useState(() => loadSidebarWidth())
   const sidebarDragRef = useRef(null)
@@ -129,8 +130,8 @@ export default function App() {
 
   // Сохранение настроек
   useEffect(() => {
-    saveSettings({ quickAnswer })
-  }, [quickAnswer])
+    saveSettings({ show_file_upload: showFileUpload, quickAnswer })
+  }, [showFileUpload, quickAnswer])
 
   // Focus после завершения операций на чате + закрыть по клику вне settings
   useEffect(() => {
@@ -858,21 +859,7 @@ export default function App() {
     if (!sessionId) return
     setChatBusy(true)
     try {
-      const r = await api.judge(sessionId, 'lesson')
-      push('system', `Оценка урока: ${Math.round((r.avg_score || 0) * 10)}/10`)
-    } catch (e) {
-      push('error', String(e.message || e))
-    } finally {
-      setChatBusy(false)
-    }
-  }
-
-  async function handleJudgeQuestion() {
-    if (!sessionId || !current?.questionId) return
-    setChatBusy(true)
-    try {
-      const r = await api.judge(sessionId, 'question', current.questionId)
-      push('system', `Оценка вопроса: ${Math.round((r.avg_score || 0) * 10)}/10`)
+      await api.judge(sessionId, 'lesson')
     } catch (e) {
       push('error', String(e.message || e))
     } finally {
@@ -953,6 +940,10 @@ export default function App() {
 
   function toggleQuickAnswer() {
     setQuickAnswer((v) => !v)
+  }
+
+  function toggleFileUpload() {
+    setShowFileUpload((v) => !v)
   }
 
   // «Включить любые источники» из предложения: сохраняем политику и повторяем поиск
@@ -1036,6 +1027,14 @@ export default function App() {
                       <small>{quickAnswer ? 'Автоотправка вариантов' : 'Подтверждение выбора'}</small>
                     </span>
                   </label>
+                  <label className="settings-toggle">
+                    <input type="checkbox" checked={showFileUpload} onChange={toggleFileUpload} />
+                    <span className="toggle-track"><span className="toggle-thumb" /></span>
+                    <span className="toggle-label">
+                      Загрузка учебника
+                      <small>{showFileUpload ? 'Включена' : 'Отключена'}</small>
+                    </span>
+                  </label>
                 </div>
               )}
             </div>
@@ -1055,7 +1054,7 @@ export default function App() {
           onFind={handleFind}
           busy={uploadBusy}
         />
-        {source.status !== 'ready' && source.status !== 'done' && (
+        {showFileUpload && source.status !== 'ready' && source.status !== 'done' && (
           <FileUpload onUpload={handleUpload} busy={uploadBusy} />
         )}
 
@@ -1104,7 +1103,6 @@ export default function App() {
               quickAnswer={quickAnswer}
               correctCount={score.correct}
               onHint={() => sendMessage('подсказка')}
-              onJudge={handleJudgeQuestion}
             />
           ) : current.kind === 'intake_card' ? (
             <IntakeCard

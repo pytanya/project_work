@@ -218,6 +218,22 @@ def _ontology_llm_call(deps: GraphDeps) -> Callable[[List[Dict[str, str]]], str]
     return _call
 
 
+def _cheap_llm_call(deps: GraphDeps) -> Optional[Callable[[List[Dict[str, str]]], str]]:
+    """LLM-вызов для cheap-задач (фильтрация тем, суммаризация).
+
+    Использует cheap-модель (gemma-3-4b-it) для быстрого анализа.
+    """
+    if callable(getattr(deps, "cheap_llm", None)):
+        return deps.cheap_llm
+
+    def _call(messages: List[Dict[str, str]]) -> str:
+        from .llm_client import LLMClient
+
+        return LLMClient(role="cheap").chat(messages, temperature=0.3, max_tokens=500).content or ""
+
+    return _call
+
+
 def _schedule_wiki_extraction(st: TutorState, deps: GraphDeps, limit: int = 5) -> None:
     """Roadmap #2 (Wiki-LLM): индекс-время извлечение фактов в wiki-статьи.
 
@@ -311,6 +327,7 @@ class GraphDeps:
     embedder: Embedder
     store: VectorStore
     tutor_llm: Optional[Callable[[List[Dict[str, str]]], str]] = None
+    cheap_llm: Optional[Callable[[List[Dict[str, str]]], str]] = None  # cheap-модель для фильтрации
     eval_llm: Optional[Callable[[List[Dict[str, str]]], str]] = None
     expert_llm: Optional[Callable[[List[Dict[str, str]]], str]] = None
     judge_llm: Optional[Callable[[List[Dict[str, str]]], str]] = None
@@ -337,7 +354,17 @@ def make_graph_deps(settings: Any = None) -> GraphDeps:
         store = HybridVectorStore(store)
     from .student import StudentStore
 
+    # Cheap-модель для фильтрации тем (gemma-3-4b-it)
+    cheap_llm: Optional[Callable[[List[Dict[str, str]]], str]] = None
+    try:
+        from .llm_client import LLMClient
+
+        cheap_llm = lambda msgs: LLMClient(role="cheap").chat(msgs, temperature=0.3, max_tokens=500).content or ""
+    except Exception:
+        logger.warning("cheap_llm не инициализирован")
+
     return GraphDeps(embedder=embedder, store=store, settings=s, collection_name=collection,
+                     cheap_llm=cheap_llm,
                      student_store=StudentStore(root_dir=s.STUDENTS_DIR))
 
 
@@ -1789,6 +1816,37 @@ def find_textbook_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
                     # пусто — хотя бы один узел, чтобы панель тем не была пустой
                     kg.add_topic(f"topic:{root_source}", f"Тема «{root_source}»", node_type="topic")
                     kg.add_edge(root_id, f"topic:{root_source}", PART_OF)
+                # LLM-фильтрация тем: отсекаем мусор, задания, класс-специфичные темы
+                try:
+                    from .knowledge_graph import filter_topics_with_llm
+
+                    # Получаем список тем из графа
+                    topic_titles = [
+                        d.get("title", "")
+                        for n, d in kg.graph.nodes(data=True)
+                        if d.get("type") not in ("book", "page") and d.get("title")
+                    ]
+                    if topic_titles:
+                        # Используем cheap-модель для фильтрации
+                        cheap_llm = _cheap_llm_call(deps)
+                        if cheap_llm:
+                            filtered_titles = filter_topics_with_llm(topic_titles, cheap_llm)
+                            # Обновляем граф: удаляем отфильтрованные темы
+                            topics_to_remove = [
+                                n for n, d in kg.graph.nodes(data=True)
+                                if d.get("type") not in ("book", "page")
+                                and d.get("title")
+                                and d.get("title") not in filtered_titles
+                            ]
+                            for nid in topics_to_remove:
+                                if nid in kg.graph:
+                                    kg.graph.remove_node(nid)
+                            logger.info(
+                                "LLM-фильтрация: %d тем → %d валидных",
+                                len(topic_titles), len(filtered_titles),
+                            )
+                except Exception as exc:
+                    logger.warning("LLM-фильтрация тем не удалась: %s", exc)
                 st.knowledge_graph = kg.to_dict()
             # Уровень 1: материалы собраны по теме → гейт пропускается, сразу к уроку/квизу
             _finalize_source(st, web_sources=True)

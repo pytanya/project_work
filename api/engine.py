@@ -381,6 +381,19 @@ class SessionStore:
         with self._lock:
             return list(self._sessions.keys())
 
+    def check_student_access(self, student_id: str) -> bool:
+        """Проверить, есть ли активная или недавняя сессия для данного student_id.
+
+        Используется как базовая защита от подмены student_id в публичных API.
+        Если студент не имеет ни одной сессии — доступ запрещён (возвращает пустые данные).
+        """
+        with self._lock:
+            for sid, s in self._sessions.items():
+                st = getattr(s, "state", None)
+                if st and getattr(st, "student_id", None) == student_id:
+                    return True
+        return False
+
     def restore_or_create(self, initial: Optional[Dict[str, Any]] = None) -> Optional[SessionData]:
         """Восстановить сессию из SQLite если есть, иначе создать новую."""
         import uuid

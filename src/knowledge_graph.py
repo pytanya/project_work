@@ -84,8 +84,50 @@ _WEB_H1_RE = re.compile(r"^#{1,3}\s+(.+)$")
 _WEB_NUM_RE = re.compile(r"^\s*\d{1,2}[.)]\s+(.{2,90})$")
 
 
+def _try_fix_mojibake(text: str) -> str:
+    """Попытка восстановить текст из CP1251 mojibake (diamond symbols, garbage chars).
+
+    CP1251-шрифты без ToUnicode генерируют суррогаты (U+D800-U+DFFF) при чтении
+    PDF с кириллицей. Также могут быть "кракозябры" типа "ÃâÃç" (UTF-8 прочитан
+    как CP1251). Возвращаем очищенный текст.
+
+    ВАЖНО: если текст уже в UTF-8 (нет кракозябр) — не трогаем его.
+    """
+    if not text:
+        return text
+
+    # Проверяем наличие "кракозябр" (UTF-8 прочитан как CP1251)
+    # Кракозябры: символы вне ASCII и вне кириллицы, но с ord > 127
+    has_mojibake = any(ord(c) > 127 and c not in "А-Яа-яЁё" for c in text)
+
+    if not has_mojibake:
+        return text  # текст уже в UTF-8, не трогаем
+
+    # Удаляем суррогаты (CP1251 → UTF-8 mojibake)
+    text = re.sub(r"[\ud800-\udfff]", "", text)
+    # Удаляем diamond symbols (U+25C6) и другие garbage chars от CP1251
+    text = re.sub(r"[\u25c6\u25c7\u25a0\u25a1\u25cb\u25cf\u25b2\u25bc\u25e6\u25e7]", " ", text)
+    # Удаляем одиночные control chars и garbage
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", text)
+
+    # Пробуем декодировать как CP1251 → UTF-8 (обратная операция mojibake)
+    try:
+        # Проверяем наличие "кракозябр" (UTF-8 прочитан как CP1251)
+        if any(ord(c) > 127 and c not in "А-Яа-яЁё" for c in text):
+            # Пробуем decode as CP1251, encode as UTF-8
+            fixed = text.encode("cp1251", errors="ignore").decode("utf-8", errors="ignore")
+            # Если результат читаемый (больше 50% кириллицы) — используем
+            cyrillic_ratio = sum(1 for c in fixed if "\u0400" <= c <= "\u04ff") / max(len(fixed), 1)
+            if cyrillic_ratio > 0.5 and len(fixed) > len(text) * 0.5:
+                text = fixed
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        pass
+
+    return text
+
+
 def clean_title(text: str) -> str:
-    """Очистка заголовка узла: HTML-entities → символы, суррогаты → удалить.
+    """Очистка заголовка узла: HTML-entities → символы, суррогаты → удалить, mojibake → исправить.
 
     Веб-страницы приходят с entity-кодами (&#8470;) и mojibake-суррогатами
     (CP1251-шрифты без ToUnicode) — они ломают отображение и матчинг с wiki.
@@ -93,6 +135,9 @@ def clean_title(text: str) -> str:
     if not text:
         return ""
     text = html.unescape(text)
+    # Попытка исправить CP1251 mojibake
+    text = _try_fix_mojibake(text)
+    # Удаляем оставшиеся суррогаты
     text = re.sub(r"[\ud800-\udfff]", "", text)
     text = re.sub(r"[ \t\u00a0]+", " ", text).strip(" *#-–—")
     return text
@@ -106,12 +151,14 @@ def _is_valid_topic_title(title: str) -> bool:
     - titles которые являются instruction (вернуться, продолжить, см. также)
     - titles которые похожи на навигацию (оглавление, примечания, источники)
     - интерактивные элементы (задания, оценки, комментарии)
+    - задания-инструкции (глаголы: выполните, прочитайте, напишите)
+    - класс-специфичные ссылки (5-Б класс, 7-А класс)
     """
     if not title:
         return False
     title_lower = title.lower().strip()
-    # Слишком короткое — не тема
-    if len(title_lower.split()) < 3:
+    # Слишком короткое — не тема (минимум 2 слова для тем, 3 для секций)
+    if len(title_lower.split()) < 2:
         return False
     # Instruction/навигация
     _INSTRUCTIONS = {
@@ -119,6 +166,7 @@ def _is_valid_topic_title(title: str) -> bool:
         "см. также", "смотри также", "читать также", "подробнее",
         "оглавление", "примечания", "источники", "литература",
         "библиотека", "содержание",
+        "похожие запросы", "улучшить свой запрос",
     }
     if title_lower in _INSTRUCTIONS:
         return False
@@ -131,6 +179,21 @@ def _is_valid_topic_title(title: str) -> bool:
         return False
     # Паттерн "Задание №N"
     if re.match(r"^задание\s*№?\s*\d+", title_lower):
+        return False
+    # Задания-инструкции: глаголы повелительного наклонения (Выполните, Прочитайте, Напишите, Сделайте, Подготовьте)
+    _TASK_VERBS = (
+        "выполните", "прочитайте", "напишите", "сделайте", "подготовьте",
+        "изучите", "разберите", "определите", "найдите", "сравните",
+        "объясните", "докажите", "докажите", "расскажите", "перескажите",
+        "запишите", "составьте", "сделайте", "проведите", "проанализируйте",
+    )
+    if any(title_lower.startswith(v) for v in _TASK_VERBS):
+        return False
+    # Класс-специфичные темы: "5-Б класс", "7-А класс", "урок 5-Б", "г. урок 7-А" — не добавляем в общий граф
+    # Паттерн: "7-А класс", "7А класс", "класс 7-А", "класс 7А"
+    if re.search(r"\b\d+[\-]?[а-я]\s*класс|класс\s*\d+[\-]?[а-я]\b", title_lower, re.IGNORECASE):
+        return False
+    if re.search(r"(?:г\.?\s*)?урок\s*\d+\s*[а-я]", title_lower, re.IGNORECASE):
         return False
     return True
 
@@ -152,6 +215,8 @@ _WEB_NOISE = {
     "задания", "задание", "задать вопрос", "ответить", "проверить",
     "оценить", "оценить урок", "отменить", "отменить ответ", "хотите",
     "хотите оставить комментарий", "написать комментарий", "оставить комментарий",
+    # Мусор поисковой выдачи
+    "похожие запросы", "улучшить свой запрос",
 }
 
 
@@ -270,6 +335,12 @@ def _web_headings(kg: "KnowledgeGraph", root_id: str, text: str, source: str) ->
         # Мусор поисковой выдачи/навигации («Улучшить свой запрос», «Картинки»)
         if is_junk_topic(title_clean):
             continue
+        # Валидация темы: не instruction, не задание, не класс-специфичная
+        if not _is_valid_topic_title(title_clean):
+            continue
+        # Фильтрация mojibake: если больше 30% символов — garbage, пропускаем
+        if _is_mojibake_heavy(title_clean):
+            continue
         key = title_clean.lower()
         if key in seen:
             continue
@@ -281,6 +352,27 @@ def _web_headings(kg: "KnowledgeGraph", root_id: str, text: str, source: str) ->
         if len(ids) >= 30:  # лимит узлов — не даём «лепнине» завалить граф
             break
     return ids
+
+
+def _is_mojibake_heavy(text: str) -> bool:
+    """Проверяет, является ли текст сильно повреждённым mojibake.
+
+    Если больше 30% символов — non-Cyrillic non-ASCII (кроме стандартных знаков),
+    то это скорее всего mojibake или garbage.
+    """
+    if not text:
+        return True
+    total = len(text)
+    if total == 0:
+        return True
+    # Считаем "нормальные" символы: кириллица, латиница, цифры, пробелы, стандартные знаки
+    # Включаем: буквы (A-Z, a-z, А-Я, а-я), цифры, пробелы, пунктуацию, кавычки, тире
+    normal_pattern = re.compile(r"[\w\s.,;:!?\-()«»«»—–\u00a0\u2014\u2013\d]")
+    normal_count = len(normal_pattern.findall(text))
+    # Если нормальных символов меньше 70% — скорее всего mojibake
+    if normal_count / total < 0.7:
+        return True
+    return False
 
 
 class KnowledgeGraph:
@@ -676,3 +768,74 @@ def build_textbook_graph(
             pass
 
     return kg
+
+
+def filter_topics_with_llm(
+    topics: List[str],
+    llm_call: Optional[Callable[[List[Dict[str, str]]], str]],
+    max_tokens: int = 500,
+) -> List[str]:
+    """LLM-фильтрация тем: отсекает мусор, задания, инструкции, класс-специфичные темы.
+
+    Использует cheap-модель (gemma-3-4b-it) для быстрого анализа.
+    Возвращает список валидных тем (без мусора).
+
+    Args:
+        topics: список тем для фильтрации
+        llm_call: функция LLM-вызова (cheap-модель)
+        max_tokens: макс. токенов в ответе
+
+    Returns:
+        список валидных тем
+    """
+    if not topics or llm_call is None:
+        return topics
+
+    if len(topics) == 0:
+        return topics
+
+    # Формируем промпт для LLM
+    topics_text = "\n".join([f"- {t}" for t in topics[:50]])  # ограничим 50 темами
+    prompt = [
+        {
+            "role": "system",
+            "content": (
+                "Ты — фильтр тем для образовательного графа знаний. "
+                "Проверь каждую тему и верни только те, которые являются реальными "
+                "образовательными темами (понятия, концепции, разделы учебника). "
+                "Отсекай: задания-инструкции (глаголы: выполните, прочитайте, напишите), "
+                "класс-специфичные темы (5-Б класс, 7-А класс), навигацию, "
+                "мусор поисковой выдачи, mojibake (кракозябры). "
+                "Верни ТОЛЬКО JSON: список валидных тем (без мусора)."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"Темы для фильтрации:\n{topics_text}\n\nВерни JSON-список валидных тем.",
+        },
+    ]
+
+    try:
+        raw = llm_call(prompt) or ""
+        if not raw.strip():
+            return topics  # LLM не ответила — вернём как есть
+
+        # Парсим JSON ответ
+        from .tutor import parse_llm_json
+
+        data = parse_llm_json(raw)
+        if isinstance(data, list):
+            # LLM вернула список тем
+            return [str(t).strip() for t in data if str(t).strip()]
+        elif isinstance(data, dict):
+            # LLM вернула dict с полем "topics" или "valid_topics"
+            for key in ("topics", "valid_topics", "filtered"):
+                if key in data and isinstance(data[key], list):
+                    return [str(t).strip() for t in data[key] if str(t).strip()]
+            # Если не нашли Known key — вернём оригинал
+            return topics
+        else:
+            return topics
+    except Exception as exc:
+        logger.warning("LLM-фильтрация тем не удалась: %s", exc)
+        return topics  # при ошибке — вернём как есть
