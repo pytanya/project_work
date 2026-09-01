@@ -169,6 +169,60 @@ class TestReuseMaterials:
         res = _invoke(graph, self._state(student_id="stu_other").model_dump())
         assert res.reuse_pending is False  # чужие/бесхозные чанки не предлагаем
 
+    def test_other_topic_chunks_not_offered_for_reuse(self, make_settings, tmp_path):
+        """Чанки ДРУГОЙ темы того же предмета/класса НЕ считаются материалами по теме.
+
+        Баг: _rag_chunks при пустом результате по topic-фильтру снимал его и находил
+        чанки «Взаимодействие тел», а для темы «Сила тяжести» предлагался reuse
+        (→ после «да» урок строился из чужих чанков). Теперь reuse только если тема
+        реально пройдена ранее (Student KG) ИЛИ есть строгие чанки с topic==теме.
+        """
+        from src.knowledge import NumpyVectorStore
+
+        s = make_settings(MAX_INTAKE_ITERATIONS=8)
+        store = NumpyVectorStore("physics", FakeEmbedder())
+        store.add([
+            DocChunk(id="c_other",
+                     text=("Параграф 5: Взаимодействие тел. Сила — это векторная физическая величина, "
+                           "являющаяся причиной изменения скорости тела. Сила характеризуется модулем, "
+                           "направлением и точкой приложения. Взаимодействие тел изучает механика."),
+                     section_number="5", section_title="Взаимодействие тел", source="book",
+                     subject="физика", grade="7", topic="Взаимодействие тел")
+        ])
+        deps2 = GraphDeps(embedder=FakeEmbedder(), store=store, settings=s,
+                          tutor_llm=lambda m: _GEN)
+        graph = build_graph(deps2)
+        res = _invoke(graph, self._state(subject="физика", topic="Сила тяжести",
+                                         grade="7").model_dump())
+        assert res.reuse_pending is False  # чужие чанки не предлагаем как «материалы по теме»
+
+    def test_reuse_offered_when_topic_studied_before(self, make_settings, tmp_path):
+        """Тема пройдена ранее (Student KG in_progress/mastered) → reuse предлагается,
+        даже если чанков именно с topic==теме в сторе нет (кэш/профиль — источник правды)."""
+        from src.knowledge import NumpyVectorStore
+        from src.student import StudentStore
+        from src.student_kg import StudentKnowledgeGraph
+
+        s = make_settings(MAX_INTAKE_ITERATIONS=8)
+        store = NumpyVectorStore("physics", FakeEmbedder())
+        store.add([
+            DocChunk(id="c_other", text="Параграф 5: Взаимодействие тел. Сила — причина изменения скорости тела.",
+                     section_number="5", section_title="Взаимодействие тел", source="book",
+                     subject="физика", grade="7", topic="Взаимодействие тел")
+        ])
+        student_store = StudentStore(root_dir=tmp_path / "students")
+        student_store.get_or_create("stu_reuse")  # профиль должен существовать для KG
+        kg = StudentKnowledgeGraph(student_id="stu_reuse", subject="физика")
+        kg.mark_in_progress("Сила тяжести", title="Сила тяжести", subject="физика")
+        student_store.save_knowledge_graph("stu_reuse", kg)
+        deps2 = GraphDeps(embedder=FakeEmbedder(), store=store, settings=s,
+                          student_store=student_store,
+                          tutor_llm=lambda m: _GEN)
+        graph = build_graph(deps2)
+        res = _invoke(graph, self._state(subject="физика", topic="Сила тяжести", grade="7",
+                                         student_id="stu_reuse").model_dump())
+        assert res.reuse_pending is True  # тема изучена ранее → материалы считаем существующими
+
 
 class TestLessonCacheFlow:
     """Повторное прохождение темы (3.1/3.2/7.2): кэшированный урок показывается сразу."""

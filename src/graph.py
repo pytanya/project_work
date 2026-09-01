@@ -431,6 +431,16 @@ def _rag_chunks(store: VectorStore, query: str, state: TutorState, k: int = 3) -
             if results:
                 logger.info("RAG-поиск succeed после снятия фильтра %s: найдено %d", drop, len(results))
                 break
+    # Ослабление фильтров (снятие topic для старых чанков, grade/section) НЕ должно
+    # подставлять чанки ДРУГИХ тем предмета — иначе урок/квиз строится по чужому
+    # материалу. Если у темы есть точные чанки (topic==тема) — они уже в результатах.
+    expected_topic = (getattr(state, "topic", None) or "").strip()
+    if results and expected_topic:
+        before = len(results)
+        results = [r for r in results if _chunk_topic_matches(r.chunk, expected_topic)]
+        if len(results) < before:
+            logger.info("RAG-поиск: отсеяно чанков других тем %d из %d (тема=%r)",
+                        before - len(results), before, expected_topic)
     meaningful = [r for r in results if _chunk_has_meaningful_content(r.chunk.text)]
     if len(meaningful) < len(results):
         logger.info("RAG-поиск: отсеяно шумных чанков %d из %d", len(results) - len(meaningful), len(results))
@@ -972,6 +982,49 @@ def _student_has_chunks(st: TutorState, deps: GraphDeps) -> bool:
         return False
 
 
+def _chunk_topic_matches(chunk: Any, expected_topic: str) -> bool:
+    """Чанк относится к теме: topic отсутствует (старый чанк) или совпадает с ожидаемым."""
+    if not expected_topic:
+        return True
+    t = getattr(chunk, "topic", None)
+    if not t:
+        try:
+            t = chunk.metadata().get("topic")
+        except Exception:
+            t = None
+    if not t:
+        return True  # старые чанки без topic — обратная совместимость
+    return str(t).strip().lower() == expected_topic.strip().lower()
+
+
+def _topic_studied_before(st: TutorState, deps: GraphDeps, topic: str) -> bool:
+    """Тема пройдена ранее: есть в Student KG со статусом in_progress/mastered.
+
+    По запросу «если тема пройдена ранее, считаем что материалы есть» — Student KG
+    становится источником правды для reuse-гейта (а не только RAG-чанки по предмету).
+    """
+    if not topic or not getattr(st, "student_id", None):
+        return False
+    try:
+        store = _student_kg(deps)
+        if store is None:
+            return False
+        kg = store.get_knowledge_graph(st.student_id)
+        if kg is None:
+            return False
+        low = topic.strip().lower()
+        for ts in kg.topics.values():
+            if ts.status not in ("in_progress", "mastered"):
+                continue
+            title = (ts.title or "").strip().lower()
+            tid = (ts.topic_id or "").strip().lower()
+            if low == title or low == tid or low in title or low in tid:
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def reuse_materials_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     """Гейт переиспользования: если по теме уже есть разобранные материалы ученика —
     спрашиваем, использовать ли их (поиск других — только по явному решению).
@@ -1061,22 +1114,27 @@ def reuse_materials_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
             logger.info("reuse_gate: использован кэш материалов %s", cache_key)
             return st.model_dump()
     
-    # B) Проверяем RAG-хранилище на наличие чанков по теме. При активном белом
-    # списке старые материалы не предлагаем — они собраны под другую политику
-    # источников; идём в свежий поиск по whitelist.
+    # B) Проверяем, что по теме есть реально разобранные материалы. По запросу:
+    #    «если тема пройдена ранее, считаем что материалы есть» — источник правды —
+    #    Student KG (статус in_progress/mastered) + строгие чанки с topic==теме.
+    #    Ослабленный RAG-поиск (снятие topic-фильтра) здесь НЕ используется: чанки
+    #    других тем предмета не являются материалами по запрошенной теме.
     if st.reuse_pending:
         return st.model_dump()  # вопрос задан, ждём ответ (route_reuse → END)
     if not st.allow_any_sources:
         return st.model_dump()
     query = st.topic or st.subject or ""
     if query:
+        topic = st.topic or st.subject or "этой теме"
+        # Материалы по теме: строгие чанки (topic==тема или старые без topic, но НЕ
+        # чанки других тем — _rag_chunks отсекает их) ИЛИ тема пройдена ранее (Student KG).
         try:
             existing = _rag_chunks(deps.store, query, st, k=3)
         except Exception:
             existing = []
-        if existing:
+        studied = _topic_studied_before(st, deps, st.topic or "")
+        if existing or studied:
             st.reuse_pending = True
-            topic = st.topic or st.subject or "этой теме"
             # 3.2: при повторном прохождении темы в режиме «урок» — сразу показываем
             # кэшированный урок из прошлого раза, а не спрашиваем «использовать да/нет».
             cached_lesson = _load_cached_lesson(st, deps, topic)
