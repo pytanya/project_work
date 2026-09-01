@@ -7,6 +7,10 @@ EduTutor — FastAPI application (раздел 8).
 
 from __future__ import annotations
 
+import datetime
+import logging
+import uuid
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI
@@ -15,9 +19,42 @@ from fastapi.responses import PlainTextResponse
 from .engine import SessionStore
 from .routes import documents, graph, intake, messages, sessions, source, students, wiki
 
+_LOGGING_INITIALIZED = False
+
+
+def _setup_prod_logging() -> None:
+    """Файловый лог в проде (FastAPI): данные/uvicorn.log + корневой logger.
+
+    main.py (CLI) вызывает setup_logging отдельно; для веб-режима root handler
+    не настроен — добавляем FileHandler к корню, не удаляя существующие
+    (uvicorn пишет в консоль, мы дублируем в файл для диагностики зависаний).
+    """
+    global _LOGGING_INITIALIZED
+    if _LOGGING_INITIALIZED:
+        return
+    _LOGGING_INITIALIZED = True
+    try:
+        from src.config import settings as cfg
+
+        log_path = Path(cfg.LOGS_DIR) / f"uvicorn_{datetime.datetime.now():%Y%m%d}.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(log_path, encoding="utf-8")
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s | %(levelname)-7s | %(name)s | %(message)s")
+        )
+        root = logging.getLogger()
+        root.addHandler(handler)
+        root.setLevel(logging.INFO)
+        logging.getLogger("ddgs").setLevel(logging.WARNING)
+        logging.getLogger("primp").setLevel(logging.WARNING)
+        root.info("EduTutor logging: %s", log_path)
+    except Exception as exc:  # pragma: no cover — логирование не должно ронять приложение
+        logging.getLogger("edututor.api").warning("Файловый лог недоступен: %s", exc)
+
 
 def create_app(store: Optional[SessionStore] = None) -> FastAPI:
     app = FastAPI(title="EduTutor API", version="0.1.0", description="Образовательный агент-тьютор (раздел 8)")
+    _setup_prod_logging()
     app.state.store = store or SessionStore()
 
     app.include_router(sessions.router)
