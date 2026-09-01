@@ -406,9 +406,11 @@ def _rag_chunks(store: VectorStore, query: str, state: TutorState, k: int = 3) -
     """
     from .knowledge import SearchResult
 
+    _t0 = time.monotonic()
     filters = _rag_filters(state)
     logger.debug("RAG-поиск: query=%r, k=%d, filters=%s", query, k, filters)
     results: List[SearchResult] = store.search(query, k=k, filters=filters or None)
+    attempts = 1
     if not results:
         logger.info("RAG-поиск без результатов: query=%r, filters=%s", query, filters)
         # Обратная совместимость: старые чанки не имеют поля topic в метаданных.
@@ -422,26 +424,24 @@ def _rag_chunks(store: VectorStore, query: str, state: TutorState, k: int = 3) -
             else:
                 results = store.search(query, k=k, filters=None)
                 active_filters = {}
+            attempts += 1
             if results:
                 logger.info("RAG-поиск succeed после снятия topic-фильтра (обратная совместимость): найдено %d", len(results))
     if not results:
         for drop in ("grade", "section_number"):
             relaxed = {kk: vv for kk, vv in active_filters.items() if kk != drop}
             results = store.search(query, k=k, filters=relaxed or None)
+            attempts += 1
             if results:
                 logger.info("RAG-поиск succeed после снятия фильтра %s: найдено %d", drop, len(results))
                 break
-    # Ослабление фильтров (снятие topic для старых чанков, grade/section) НЕ должно
-    # подставлять чанки ДРУГИХ тем предмета — иначе урок/квиз строится по чужому
-    # материалу. Если у темы есть точные чанки (topic==тема) — они уже в результатах.
-    expected_topic = (getattr(state, "topic", None) or "").strip()
-    if results and expected_topic:
-        before = len(results)
-        results = [r for r in results if _chunk_topic_matches(r.chunk, expected_topic)]
-        if len(results) < before:
-            logger.info("RAG-поиск: отсеяно чанков других тем %d из %d (тема=%r)",
-                        before - len(results), before, expected_topic)
+    _t_search = time.monotonic() - _t0
     meaningful = [r for r in results if _chunk_has_meaningful_content(r.chunk.text)]
+    _t_total = time.monotonic() - _t0
+    logger.info(
+        "RAG-поиск: query=%r topic=%r attempts=%d raw=%d meaningful=%d search=%.3fs total=%.3fs",
+        query, getattr(state, "topic", None), attempts, len(results), len(meaningful), _t_search, _t_total,
+    )
     if len(meaningful) < len(results):
         logger.info("RAG-поиск: отсеяно шумных чанков %d из %d", len(results) - len(meaningful), len(results))
     if meaningful:
@@ -982,21 +982,6 @@ def _student_has_chunks(st: TutorState, deps: GraphDeps) -> bool:
         return False
 
 
-def _chunk_topic_matches(chunk: Any, expected_topic: str) -> bool:
-    """Чанк относится к теме: topic отсутствует (старый чанк) или совпадает с ожидаемым."""
-    if not expected_topic:
-        return True
-    t = getattr(chunk, "topic", None)
-    if not t:
-        try:
-            t = chunk.metadata().get("topic")
-        except Exception:
-            t = None
-    if not t:
-        return True  # старые чанки без topic — обратная совместимость
-    return str(t).strip().lower() == expected_topic.strip().lower()
-
-
 def _topic_studied_before(st: TutorState, deps: GraphDeps, topic: str) -> bool:
     """Тема пройдена ранее: есть в Student KG со статусом in_progress/mastered.
 
@@ -1379,6 +1364,7 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     _emit(deps, "source.progress", stage="content", url="", status="generating",
           message=f"Генерирую {_MODE_LABELS.get(mode, 'материал')} по теме «{topic}» ({len(context)} фрагментов)…")
     on_token = deps.on_token  # реальный стриминг токенов в браузер (stream=True)
+    _ct_t0 = time.monotonic()
     if mode == "deep_dive":
         st.set_plain_lesson(tutor_mod.generate_deep_dive(topic, context, st, llm_call=deps.expert_llm, on_token=on_token))
         st.agent_message = "Глубокий разбор по теме готов. Можно задать вопрос или перейти к квизу."
@@ -1396,6 +1382,7 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         st.agent_message = "Урок по теме готов. Можно задать вопрос или перейти к квизу."
         # Кэш урока (3.1/7.2): сохраняем для повторного прохождения темы.
         _save_lesson_to_cache(st, deps, lesson, topic)
+    logger.info("content_node: mode=%s topic=%r ctx=%d llm=%.3fs", mode, topic, len(context), time.monotonic() - _ct_t0)
     st.lesson_done = True
     # Ключевые понятия урока → wiki-статья темы (roadmap #3: drill-down в графе)
     try:
@@ -1928,7 +1915,9 @@ def generate_question_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]
         _maybe_emit_mastery_gate(st, deps, topic)
     _emit(deps, "source.progress", stage="quiz", url="", status="generating",
           message=f"Генерирую вопрос по теме «{topic}»…")
+    _gq_t0 = time.monotonic()
     chunks = _rag_chunks(deps.store, topic, st, k=3)
+    _gq_t_rag = time.monotonic() - _gq_t0
     context = [_clean_text_lines(c.chunk.text) for c in chunks]
     if not context:
         context = ["Нет контекста по теме."]
@@ -1938,15 +1927,34 @@ def generate_question_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]
     retries = getattr(deps.settings, "QUESTION_DEDUPE_RETRIES", 2)
     threshold = getattr(deps.settings, "QUESTION_DEDUPE_THRESHOLD", 0.85)
     card = None
+    _gq_llm_t = 0.0
+    _gq_dup_t = 0.0
     for attempt in range(retries + 1):
+        _t_llm = time.monotonic()
         card = tutor_mod.generate_question(
             topic, context, st.difficulty, st, llm_call=deps.tutor_llm
         )
-        if not prev_asked or not tutor_mod.is_duplicate_question(
+        _gq_llm_t += time.monotonic() - _t_llm
+        _t_dup = time.monotonic()
+        is_dup = bool(prev_asked) and tutor_mod.is_duplicate_question(
             deps.embedder, card.question, prev_asked, threshold
-        ):
+        )
+        _gq_dup_t += time.monotonic() - _t_dup
+        if not is_dup:
             break
         st.asked_questions.pop()  # откатываем дубль перед регенерацией
+    _gq_total = time.monotonic() - _gq_t0
+    logger.info(
+        "generate_question: topic=%r context=%d rag=%.3fs llm=%.3fs dedupe=%.3fs total=%.3fs",
+        topic, len(context), _gq_t_rag, _gq_llm_t, _gq_dup_t, _gq_total,
+    )
+    from .observability import log_graph_node
+
+    log_graph_node(
+        deps, "generate_question.step",
+        note=f"topic={topic} ctx={len(context)} rag={_gq_t_rag:.3f}s llm={_gq_llm_t:.3f}s dedupe={_gq_dup_t:.3f}s",
+        duration=_gq_total,
+    )
     st.current_question = card
     st.current_section = chunks[0].chunk.section_number if chunks else None
     st.agent_question = card.question

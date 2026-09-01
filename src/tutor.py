@@ -440,10 +440,14 @@ def is_duplicate_question(
     """
     if not prev_questions or not (new_question or "").strip():
         return False
+    import time as _time
+
+    _t0 = _time.monotonic()
     try:
         new_vec = embedder.encode_query(new_question)
         prev_vecs = embedder.encode(list(prev_questions))
     except Exception:
+        logger.info("is_duplicate_question: embedder недоступен (%.3fs)", _time.monotonic() - _t0)
         return False
 
     def _cos(a: List[float], b: List[float]) -> float:
@@ -454,7 +458,9 @@ def is_duplicate_question(
         nb = math.sqrt(sum(y * y for y in b)) or 1.0
         return dot / (na * nb)
 
-    return any(_cos(new_vec, pv) >= threshold for pv in prev_vecs)
+    result = any(_cos(new_vec, pv) >= threshold for pv in prev_vecs)
+    logger.info("is_duplicate_question: dup=%s prev=%d embed=%.3fs", result, len(prev_questions), _time.monotonic() - _t0)
+    return result
 
 
 # ----------------------------------------------------------------------

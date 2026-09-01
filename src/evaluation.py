@@ -160,9 +160,12 @@ def evaluate_and_record(
     if not context:
         context = ["Нет контекста по теме."]
 
+    import time as _time
+    _t_eval = _time.monotonic()
     graded = tutor_mod.evaluate_answer(
         card.question, answer, context, st, llm_call=getattr(deps, "eval_llm", None)
     )
+    _t_eval = _time.monotonic() - _t_eval
 
     enable_scaffolding = bool(getattr(getattr(deps, "settings", None), "ENABLE_SCAFFOLDING", True))
     max_hints = int(getattr(getattr(deps, "settings", None), "MAX_HINTS_PER_QUESTION", 2))
@@ -170,6 +173,7 @@ def evaluate_and_record(
     def _finalize(correct_final: bool) -> Tuple[TutorState, str, Optional[Any], Optional[Dict[str, Any]]]:
         """Финализация вопроса: учёт в knowledge_map/bandit/счётчиках, wiki, KG, quiz_complete."""
         nonlocal st
+        _t_final_start = _time.monotonic()
         final_score = graded.score
         tutor_mod.update_knowledge_map(st, topic, final_score)
         if st.bandit is not None:
@@ -187,13 +191,16 @@ def evaluate_and_record(
         # Судья: контракт «оценка ответа ученика» (К-4). Для детерминированной сверки
         # с эталоном (закрытый вопрос, model_used="reference") судить нечего.
         deterministic = graded.model_used == "reference"
+        _t_judge = 0.0
         if not deterministic:
+            _t0j = _time.monotonic()
             judge_result = judge_evaluation(
                 card.question,
                 answer,
                 {"score": graded.score, "correct": graded.correct, "feedback": graded.feedback},
                 judge_call=getattr(deps, "judge_llm", None),
             )
+            _t_judge = _time.monotonic() - _t0j
             st.last_judge_score = judge_result.avg_score
         else:
             judge_result = None
@@ -202,13 +209,21 @@ def evaluate_and_record(
         if graded.feedback:
             message += f" {graded.feedback}"
         explanation: Optional[Dict[str, Any]] = None
+        _t_explain = 0.0
         if not graded.correct and not deterministic:
+            _t0e = _time.monotonic()
             explanation = tutor_mod.explain_error(
                 card.question, answer, context, st, llm_call=getattr(deps, "expert_llm", None), on_token=deps.on_token
             )
+            _t_explain = _time.monotonic() - _t0e
             message += f"\nОбъяснение: {explanation['text']}"
             if explanation["citation"]["paragraph"]:
                 message += f"\nЦитата: {explanation['citation']['paragraph']}"
+        _t_final_total = _time.monotonic() - _t_final_start
+        logger.info(
+            "evaluate_and_record: qid=%s deterministic=%s eval=%.3fs judge=%.3fs explain=%.3fs finalize=%.3fs",
+            getattr(card, "question_id", "?"), deterministic, _t_eval, _t_judge, _t_explain, _t_final_total,
+        )
         st.agent_message = message
         st.current_question = None
         st.pending_answer = None
