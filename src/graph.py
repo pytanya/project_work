@@ -131,6 +131,41 @@ def _load_cached_lesson(st: TutorState, deps: GraphDeps, topic: str):
         return None
 
 
+def _build_web_knowledge_graph(sources: List[Dict[str, Any]], topic: str) -> Dict[str, Any]:
+    """Построение минимального графа знаний из web-источников.
+
+    Для web-поиска (без загруженного PDF) knowledge_graph не заполняется
+    автоматически — эта функция создаёт структуру из URL/заголовков источников,
+    чтобы при повторном прохождении темы фронтенд мог отрисовать панель.
+    """
+    nodes: List[Dict[str, Any]] = []
+    edges: List[Dict[str, Any]] = []
+    if topic:
+        nodes.append({
+            "id": f"topic_{topic}",
+            "label": topic,
+            "type": "topic",
+        })
+    for i, s in enumerate(sources):
+        url = (s.get("url") or "").strip()
+        title = (s.get("title") or s.get("domain") or url)[:100]
+        domain = s.get("domain") or ""
+        node_id = f"web_{i}"
+        nodes.append({
+            "id": node_id,
+            "label": title,
+            "type": "web_source",
+            "metadata": {"url": url, "domain": domain},
+        })
+        if topic:
+            edges.append({
+                "source": f"topic_{topic}",
+                "target": node_id,
+                "label": "использован",
+            })
+    return {"nodes": nodes, "edges": edges}
+
+
 def _save_lesson_to_cache(st: TutorState, deps: GraphDeps, lesson, topic: str) -> None:
     """Сохраняет сгенерированный урок в кэш для повторного прохождения."""
     if not topic or lesson is None:
@@ -145,13 +180,16 @@ def _save_lesson_to_cache(st: TutorState, deps: GraphDeps, lesson, topic: str) -
     except Exception as exc:
         logger.warning("save_lesson: %s", exc)
     # Сохраняем граф знаний вместе с уроком — при reuse из кэша фронтенд получит nodes.
-    kg_data = (st.knowledge_graph or {}).get("nodes")
-    if kg_data:
+    # Для web-источников knowledge_graph может быть пустым — строим из sources.
+    kg_data = st.knowledge_graph or {}
+    if not kg_data.get("nodes") and st.sources:
+        kg_data = _build_web_knowledge_graph(st.sources, topic)
+    if kg_data.get("nodes"):
         try:
             _save_kg(
                 deps.settings.SOURCES_CACHE_DIR,
                 st.student_id or "", st.subject or "", topic, st.grade or "",
-                {"nodes": kg_data, "edges": (st.knowledge_graph or {}).get("edges", [])},
+                {"nodes": kg_data["nodes"], "edges": kg_data.get("edges", [])},
             )
         except Exception as exc:
             logger.warning("save_knowledge_graph: %s", exc)
@@ -1460,6 +1498,7 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         # sources очищены → route_after_content → NODE_FIND_TEXTBOOK).
         if "с нуля" in low or "заново" in low:
             st.clear_lesson()
+            st.lesson_rebuild = True
             st.force_source_refresh = True
             st.sources = []
             st.collection_id = None
@@ -1517,8 +1556,9 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
 
     # Кэш урока (3.1/7.2): повторное прохождение темы — показываем урок из прошлого раза,
     # не генерируя заново (пользователь сам решит, дополнять ли материал).
-    # При пересборке ("дополнить материал") кэш не подставляем — нужен свежий контент.
-    if not st.lesson_rebuild:
+    # При пересборке ("дополнить материал") или явном запросе свежих источников ("с нуля")
+    # кэш не подставляем — нужен свежий контент.
+    if not st.lesson_rebuild and not getattr(st, "force_source_refresh", False):
         cached_lesson = _load_cached_lesson(st, deps, topic)
         if cached_lesson is not None:
             logger.info("content_node: кэшированный урок по теме «%s» — без генерации", topic)
@@ -1833,8 +1873,9 @@ def find_textbook_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     _emit(deps, "system", message=_intent_message(st), kind="intent")
     _emit(deps, "source.progress", stage="catalog", url="", status="searching",
           message=f"Поиск материалов по теме «{st.topic or st.subject or ''}»…")
-    # topic="all" («весь учебник») не передаём в поиск — ищем по предмету
-    search_topic = "" if (st.topic or "") == "all" else (st.topic or "")
+    # Ищем по теме. Если topic="all" («весь учебник») — ищем по предмету,
+    # но передаём st.topic как контекст для LLM (не blank-им).
+    search_topic = st.topic or st.subject or ""
     col = (deps.source_collector or source_finder.collect_source_materials)(
         subject=st.subject or "",
         topic=search_topic,
