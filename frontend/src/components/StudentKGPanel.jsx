@@ -19,12 +19,20 @@ export default function StudentKGPanel({ studentId = '', subject = '', onStartRe
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [dueCount, setDueCount] = useState(0)
+  const [collapsed, setCollapsed] = useState(false)
 
   useEffect(() => {
     if (!studentId) return
+    console.log('StudentKGPanel: fetching review for studentId:', studentId)
     api.getReview(studentId)
-      .then((d) => setDueCount(d.stats?.due || 0))
-      .catch(() => setDueCount(0))
+      .then((d) => {
+        console.log('StudentKGPanel: review response:', d)
+        setDueCount(d.stats?.due || 0)
+      })
+      .catch((e) => {
+        console.error('StudentKGPanel: review error:', e)
+        setDueCount(0)
+      })
   }, [studentId, reloadKey])
 
   useEffect(() => {
@@ -68,76 +76,90 @@ export default function StudentKGPanel({ studentId = '', subject = '', onStartRe
   if (!studentId) return null
 
   return (
-    <div className="card student-kg-panel">
+    <div className={`card student-kg-panel ${collapsed ? 'student-kg-panel--collapsed' : ''}`}>
       <div className="student-kg-panel__header">
         <h3>Мои знания</h3>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
         {subject && <span className="muted">· {subject}</span>}
         {onStartReview && dueCount > 0 && (
-          <button className="btn btn-small student-kg-review-btn"
-                  onClick={onStartReview} disabled={busy}>
-            Повторить ({dueCount})
-          </button>
+          <>
+            <button className="btn btn-small student-kg-review-btn"
+                    onClick={onStartReview} disabled={busy}>
+              Повторить ({dueCount})
+            </button>
+            {busy && <span className="muted" style={{ fontSize: '11px', marginLeft: '8px' }}>⏳ Загрузка...</span>}
+          </>
         )}
+          <button className="student-kg-panel__toggle"
+                  onClick={() => setCollapsed((v) => !v)}
+                  title={collapsed ? 'Развернуть' : 'Свернуть'}>
+            {collapsed ? '▸' : '▾'}
+          </button>
+        </div>
       </div>
 
-      {loading && <div className="muted" style={{ padding: '8px 12px' }}>Загрузка…</div>}
-      {error && <div className="muted" style={{ color: 'var(--err)', padding: '8px 12px' }}>{error}</div>}
-
-      {!loading && !error && (
+      {!collapsed && (
         <>
-          {/* Статистика */}
-          <div className="student-kg-panel__stats">
-            <div className="student-kg-stat">
-              <span className="student-kg-stat-value">{stats.total}</span>
-              <span className="student-kg-stat-label">всего</span>
-            </div>
-            <div className="student-kg-stat">
-              <span className="student-kg-stat-value" style={{ color: STATUS_COLORS.mastered }}>{stats.mastered}</span>
-              <span className="student-kg-stat-label">освоено</span>
-            </div>
-            <div className="student-kg-stat">
-              <span className="student-kg-stat-value" style={{ color: STATUS_COLORS.in_progress }}>{stats.in_progress}</span>
-              <span className="student-kg-stat-label">в процессе</span>
-            </div>
-            <div className="student-kg-stat">
-              <span className="student-kg-stat-value" style={{ color: STATUS_COLORS.not_studied }}>{stats.not_studied}</span>
-              <span className="student-kg-stat-label">не изучено</span>
-            </div>
-          </div>
+          {loading && <div className="muted" style={{ padding: '8px 12px' }}>Загрузка…</div>}
+          {error && <div className="muted" style={{ color: 'var(--err)', padding: '8px 12px' }}>{error}</div>}
 
-          {/* Список тем */}
-          <div className="student-kg-panel__list">
-            {topics.length === 0 && (
-              <div className="muted" style={{ padding: '8px 12px', fontSize: '12px' }}>
-                Тем пока нет. Пройдите квиз по теме — знания накопятся.
-              </div>
-            )}
-            {topics.map((topic) => (
-              <div key={topic.topic_id} className="student-kg-item">
-                <div className="student-kg-item__status" style={{ background: STATUS_COLORS[topic.status] }} />
-                <div className="student-kg-item__content">
-                  <div className="student-kg-item__title">{topic.title}</div>
-                  <div className="student-kg-item__meta">
-                    {topic.attempts > 0 && (
-                      <span>
-                        {topic.correct}/{topic.attempts} · {Math.round((topic.accuracy || 0) * 100)}%
-                      </span>
-                    )}
-                    {topic.weak_areas && topic.weak_areas.length > 0 && (
-                      <span className="muted"> · слабые: {topic.weak_areas.slice(0, 2).join(', ')}{topic.weak_areas.length > 2 ? '…' : ''}</span>
-                    )}
-                  </div>
+          {!loading && !error && (
+            <>
+              {/* Статистика */}
+              <div className="student-kg-panel__stats">
+                <div className="student-kg-stat">
+                  <span className="student-kg-stat-value">{stats.total}</span>
+                  <span className="student-kg-stat-label">всего</span>
+                </div>
+                <div className="student-kg-stat">
+                  <span className="student-kg-stat-value" style={{ color: STATUS_COLORS.mastered }}>{stats.mastered}</span>
+                  <span className="student-kg-stat-label">освоено</span>
+                </div>
+                <div className="student-kg-stat">
+                  <span className="student-kg-stat-value" style={{ color: STATUS_COLORS.in_progress }}>{stats.in_progress}</span>
+                  <span className="student-kg-stat-label">в процессе</span>
+                </div>
+                <div className="student-kg-stat">
+                  <span className="student-kg-stat-value" style={{ color: STATUS_COLORS.not_studied }}>{stats.not_studied}</span>
+                  <span className="student-kg-stat-label">не изучено</span>
                 </div>
               </div>
-            ))}
-          </div>
 
-          {/* Легенда */}
-          <div className="student-kg-panel__legend">
-            <span><i style={{ background: STATUS_COLORS.mastered }} />освоено</span>
-            <span><i style={{ background: STATUS_COLORS.in_progress }} />в процессе</span>
-            <span><i style={{ background: STATUS_COLORS.not_studied }} />не изучено</span>
-          </div>
+              {/* Список тем */}
+              <div className="student-kg-panel__list">
+                {topics.length === 0 && (
+                  <div className="muted" style={{ padding: '8px 12px', fontSize: '12px' }}>
+                    Тем пока нет. Пройдите квиз по теме — знания накопятся.
+                  </div>
+                )}
+                {topics.map((topic) => (
+                  <div key={topic.topic_id} className="student-kg-item">
+                    <div className="student-kg-item__status" style={{ background: STATUS_COLORS[topic.status] }} />
+                    <div className="student-kg-item__content">
+                      <div className="student-kg-item__title">{topic.title}</div>
+                      <div className="student-kg-item__meta">
+                        {topic.attempts > 0 && (
+                          <span>
+                            {topic.correct}/{topic.attempts} · {Math.round((topic.accuracy || 0) * 100)}%
+                          </span>
+                        )}
+                        {topic.weak_areas && topic.weak_areas.length > 0 && (
+                          <span className="muted"> · слабые: {topic.weak_areas.slice(0, 2).join(', ')}{topic.weak_areas.length > 2 ? '…' : ''}</span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Легенда */}
+              <div className="student-kg-panel__legend">
+                <span><i style={{ background: STATUS_COLORS.mastered }} />освоено</span>
+                <span><i style={{ background: STATUS_COLORS.in_progress }} />в процессе</span>
+                <span><i style={{ background: STATUS_COLORS.not_studied }} />не изучено</span>
+              </div>
+            </>
+          )}
         </>
       )}
     </div>

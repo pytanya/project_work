@@ -98,6 +98,9 @@ class TutorState(IntakeState):
     lesson_diagram: Optional[Dict[str, Any]] = None   # LessonDiagram (dual-coding)
     lesson_sections: List[Dict[str, Any]] = Field(default_factory=list)
     lesson_summary: Optional[str] = None
+    # Источники, использованные для генерации урока (URL, title, domain) —
+    # атрибуция: ученик и проверяющий видят, из каких материалов собран урок.
+    lesson_sources: List[Dict[str, str]] = Field(default_factory=list)
     # LessonEval: детерминированный судья-lite (0 LLM, не блокирует) + результат
     # фонового LLM-судьи groundedness (заполняется асинхронно, без задержки выдачи).
     lesson_eval: Optional[Dict[str, Any]] = None
@@ -185,6 +188,7 @@ class TutorState(IntakeState):
         self.lesson_diagram = None
         self.lesson_sections = []
         self.lesson_summary = None
+        self.lesson_sources = []
         self.lesson_eval = None
         self.lesson_judge = None
 
@@ -197,6 +201,7 @@ class TutorState(IntakeState):
         self.lesson_diagram = None
         self.lesson_sections = []
         self.lesson_summary = None
+        self.lesson_sources = []
         self.lesson_eval = None
         self.lesson_judge = None
 
@@ -205,6 +210,7 @@ class TutorState(IntakeState):
         return {
             "text": self.lesson_text or "",
             "topic": topic or self.lesson_title or self.topic or "",
+            "sources": self.lesson_sources,
             "lesson": {
                 "title": self.lesson_title,
                 "hook": self.lesson_hook,

@@ -394,6 +394,9 @@ class SessionStore:
                     return True
         return False
 
+    # TODO[P0.3]: restore_or_create is dead code — not integrated into production routes
+    # (create_session in api/routes/sessions.py uses store.create() instead).
+    # Options: either wire this into an API endpoint for session resume, or remove it.
     def restore_or_create(self, initial: Optional[Dict[str, Any]] = None) -> Optional[SessionData]:
         """Восстановить сессию из SQLite если есть, иначе создать новую."""
         import uuid
@@ -444,6 +447,7 @@ class SessionStore:
         with self._lock:
             self._sessions[sid] = session
         return session
+    # [end TODO[P0.3] — dead code block]
 
 
 async def run_step(session: SessionData, answer: Optional[str] = None) -> TutorState:

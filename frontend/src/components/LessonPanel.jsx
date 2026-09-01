@@ -345,7 +345,7 @@ function PlainLesson({ text, topic }) {
    MarkdownLesson — рендеринг из raw_text (markdown)
    ═══════════════════════════════════════════ */
 
-function MarkdownLesson({ rawText, topic, lesson }) {
+function MarkdownLesson({ rawText, topic, lesson, sources = [] }) {
   const sections = useMemo(() => parseMarkdownSections(rawText), [rawText])
   const definition = useMemo(() => extractDefinition(rawText), [rawText])
   const terms = useMemo(() => extractTerms(rawText), [rawText])
@@ -391,6 +391,7 @@ function MarkdownLesson({ rawText, topic, lesson }) {
           </div>
         )}
         <SummarySection summary={summary || lesson?.summary || ''} />
+        <SourcesSection sources={sources} />
       </div>
     </div>
   )
@@ -582,10 +583,49 @@ function SummarySection({ summary }) {
 }
 
 /* ═══════════════════════════════════════════
-   Главный компонент LessonPanel
-   ═══════════════════════════════════════════ */
+    Секция: Источники
+    ═══════════════════════════════════════════ */
 
-export default function LessonPanel({ text, topic, lesson, onJudge = null }) {
+function hostOf(url) {
+  try {
+    return new URL(url).hostname
+  } catch {
+    return url
+  }
+}
+
+function SourcesSection({ sources }) {
+  if (!sources || sources.length === 0) return null
+  return (
+    <div className="lesson-section lesson-section--sources">
+      <div className="lesson-section__header">
+        <span className="lesson-section__icon">🔗</span>
+        <h3 className="lesson-section__title">Источники</h3>
+      </div>
+      <div className="lesson-sources-list">
+        {sources.map((s, i) => (
+          <a
+            key={`${s.url}-${i}`}
+            href={s.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="lesson-source-item"
+            title={s.url}
+          >
+            <span className="lesson-source-item__title">{s.title || hostOf(s.url)}</span>
+            <span className="source-domain-badge">{s.domain || hostOf(s.url)}</span>
+          </a>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════
+    Главный компонент LessonPanel
+    ═══════════════════════════════════════════ */
+
+export default function LessonPanel({ text, topic, lesson, sources = [], onJudge = null }) {
   /* ═ Hooks вызываем всегда в одинаковом порядке, ДО любых return = */
   
   /* ── Санитизация структурированного урока (всегда вызывается) ── */
@@ -673,6 +713,7 @@ export default function LessonPanel({ text, topic, lesson, onJudge = null }) {
         <DiagramSection diagram={data.diagram} />
         <ContentSections sections={data.sections} />
         <SummarySection summary={data.summary} />
+        <SourcesSection sources={sources} />
       </div>
 
       {/* Footer — кнопка оценки (LLM-судья по запросу) */}

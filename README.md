@@ -329,11 +329,60 @@ curl -X POST http://127.0.0.1:8000/api/sessions/a3f9k2/message \
 
 ```
 src/           config, llm_client, guardrails, nlp, intake, curriculum (ФГОС),
-               knowledge (RAG), qdrant_store (Qdrant backend), adaptive (LinUCB),
-               source_finder (crawl4ai), tutor, judge, graph, metrics
+                knowledge (RAG), qdrant_store (Qdrant backend), adaptive (LinUCB),
+                source_finder (crawl4ai), tutor, judge, graph, metrics
 api/           Pydantic-схемы (IntakeStatusResponse, QuizCard, MessageResponse, WsEvent)
 tests/         754+ тест
 evals/         golden_set.json, intent_dataset.json, edututor_eval.py
 main.py        CLI-демо
 docker-compose.yml  Qdrant + backend + frontend (roadmap #1)
 ```
+
+## Каскад поисковиков
+
+### Порядок обхода
+
+Поиск учебного материала выполняется каскадом — движки проверяются по приоритету до первого успешного результата:
+
+```
+PRIMARY → [доступные с ключами] → stepik → lesson_edu(opt-in) → fipi(opt-in) → ddgs
+```
+
+1. **Primary-поисковик** (`SEARCH_PRIMARY`) — первый в очереди, выбирается из `.env`: `yandex` (по умолчанию) или `tavily`. Всегда ставится первым независимо от наличия ключей для других движков.
+2. **API-движки с ключами** — `yandex` (требует `YANDEX_API_KEY` + `YANDEX_FOLDER_ID`), `tavily` (требует `TAVILY_API_KEY`). Добавляются в каскад только если соответствующий ключ настроен.
+3. **Встроенные движки без ключей**:
+   - `stepik` — всегда доступен (публичный REST API на api.stepik.org/courses)
+   - `lesson_edu` — opt-in через `ENABLE_LESSON_EDU=true` (каталог Минпросвещения РФ)
+   - `fipi` — opt-in через `ENABLE_FIPI=true` (ФИПИ: демоверсии ОГЭ/ЕГЭ)
+4. **`ddgs` (DuckDuckGo)** — всегда последний, универсальный fallback. Не требует ключей, но медленнее и не гарантирует образовательный контент.
+
+Если primary-движок возвращает ошибку или пустой результат, автоматически пробуются следующие по списку. Пустая выдача на всех этапах → `status="failed"`, `failed_reason="empty_result"`.
+
+### .env настройки поиска
+
+| Переменная | Обязательна | Описание |
+|------------|-------------|----------|
+| `SEARCH_PRIMARY` | Нет (по умолч. `yandex`) | Основной поисковик: `yandex` или `tavily`. Определяет первый двигатель в каскаде. |
+| `YANDEX_API_KEY` | Для `yandex` | API-ключ Яндекс Поиска (отдельный от YANDEX_GPT_API_KEY). Только для ПОИСКА. |
+| `YANDEX_FOLDER_ID` | Для `yandex` | ID папки в Яндекс облаке для Search API. |
+| `TAVILY_API_KEY` | Для `tavily` | API-ключ Tavily Search. Заблокирован в РФ — нужен VPN. |
+| `ENABLE_LESSON_EDU` | Опционально | Включает движок lesson.edu.ru (Минпросвещения). Значение: `true`/`false`. |
+| `ENABLE_FIPI` | Опционально | Включает движок ФИПИ (демоверсии ОГЭ/ЕГЭ). Значение: `true`/`false`. |
+
+### Логика выбора по регионам
+
+Проект ориентирован на русскоязычных пользователей в РФ. Рекомендации по конфигурации:
+
+- **Россия**: `SEARCH_PRIMARY=yandex` (по умолчанию) + настроить `YANDEX_API_KEY`/`YANDEX_FOLDER_ID`. В связке с `ddgs` как fallback — наиболее стабильная комбинация. Stepik может быть недоступен из-за DNS-блоков.
+- **Другие регионы**: `SEARCH_PRIMARY=tavily` + `TAVILY_API_KEY`. Tavily хорошо работает за пределами РФ. Без VPN Tavily будет недоступен в России.
+
+> **Важно:** автодетектация региона в коде НЕ реализована — пользователь должен сам установить правильное значение `SEARCH_PRIMARY` в `.env`. При неверном выборе первичный движок вернёт ошибку и каскад перейдёт к следующему доступному.
+
+### Защита результатов
+
+К каждому результату поиска применяются две обязательные проверки:
+
+1. **SSRF-защита** (`is_url_blocked`) — блокирует запросы к внутренним адресам (localhost, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, link-local, reserved, metadata-сервисы AWS/GCP). Реализована в 3 уровня: prefix-matching, парсинг числовых форматов IP (десятичные, шестнадцатеричные, восьмеричные), резолвинг hostname → IPs.
+2. **Фильтрация лицензий** (`license_check`) — прямое скачивание файлов разрешено только с `ALLOWED_DOWNLOAD_HOSTS` (wikibooks.org, wikipedia.org, openbooks, openedu.ru, school-collection.edu.ru). Каталоги-«склады» (reshak.ru, gdz, obuchalka и др.) используются только как источник ссылок, не для прямого скачивания. Blacklist (infourok.ru, dzen.ru, studfile.net, yaklass.ru и др.) исключается полностью — ненадёжный/мусорный контент.
+
+Список предпочтительных образовательных доменов (_PREFERRED_DOMAINS) ранжируется выше в результатах (ранг 0), мусорные промо-домены _AVOIDED_DOMAINS — ниже (ранг 4+). При наличии 2+ preferred-источников все avoided-результаты исключаются жёстко.

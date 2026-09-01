@@ -11,6 +11,7 @@ checkpointer (AsyncSqliteSaver) — опционально (расширение
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import re
 import time
@@ -66,6 +67,41 @@ NODE_SUBTASK = "subtask"
 NODE_SUMMARY = "summary"
 
 
+def _extract_lesson_sources(
+    rag_sources: List[Optional[Dict[str, Any]]],
+    state_sources: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, str]]:
+    """Извлекает уникальные источники для атрибуции урока.
+
+    Собирает URL из метаданных RAG-чанков (поле ``source``) и из ``state.sources``
+    (поле ``url``/``title``). Дедупликация по URL.
+    Возвращает список ``[{url, title, domain}]`` для фронтенда.
+    """
+    seen: set = set()
+    result: List[Dict[str, str]] = []
+    for meta in rag_sources:
+        if meta is None:
+            continue
+        url = (meta.get("source") or "").strip()
+        if not url or url in seen or not url.startswith("http"):
+            continue
+        seen.add(url)
+        m = re.search(r"https?://([^/\s]+)", url)
+        domain = m.group(1) if m else ""
+        title = meta.get("section_title") or meta.get("title") or domain
+        result.append({"url": url, "title": title, "domain": domain})
+    # Дополняем из state.sources (веб-поиск), если URL не дублируются
+    for s in (state_sources or []):
+        url = (s.get("url") or "").strip()
+        if not url or url in seen or not url.startswith("http"):
+            continue
+        seen.add(url)
+        m = re.search(r"https?://([^/\s]+)", url)
+        domain = m.group(1) if m else ""
+        title = s.get("title") or domain
+        result.append({"url": url, "title": title, "domain": domain})
+    return result
+
 
 def _topic_count(nodes):
     """Count only non-book topics (matches frontend KnowledgeGraphPanel filtering)."""
@@ -99,7 +135,7 @@ def _save_lesson_to_cache(st: TutorState, deps: GraphDeps, lesson, topic: str) -
     """Сохраняет сгенерированный урок в кэш для повторного прохождения."""
     if not topic or lesson is None:
         return
-    from .lesson_cache import save_lesson
+    from .lesson_cache import save_knowledge_graph as _save_kg, save_lesson
 
     try:
         save_lesson(
@@ -108,12 +144,35 @@ def _save_lesson_to_cache(st: TutorState, deps: GraphDeps, lesson, topic: str) -
         )
     except Exception as exc:
         logger.warning("save_lesson: %s", exc)
+    # Сохраняем граф знаний вместе с уроком — при reuse из кэша фронтенд получит nodes.
+    kg_data = (st.knowledge_graph or {}).get("nodes")
+    if kg_data:
+        try:
+            _save_kg(
+                deps.settings.SOURCES_CACHE_DIR,
+                st.student_id or "", st.subject or "", topic, st.grade or "",
+                {"nodes": kg_data, "edges": (st.knowledge_graph or {}).get("edges", [])},
+            )
+        except Exception as exc:
+            logger.warning("save_knowledge_graph: %s", exc)
 
 
 def _apply_cached_lesson(st: TutorState, deps: GraphDeps, cached, topic: str) -> Dict[str, Any]:
     """Показывает кэшированный урок: запись в состояние + события + вопрос «перейти к квизу?»."""
+    from .lesson_cache import load_knowledge_graph as _load_kg
+
     st.set_lesson(cached)
     st.lesson_done = True
+    # Восстанавливаем граф знаний из кэша — чтобы KnowledgeGraphPanel на фронтенде заполнился.
+    kg_data = _load_kg(
+        deps.settings.SOURCES_CACHE_DIR,
+        st.student_id or "", st.subject or "", topic, st.grade or "",
+    )
+    if kg_data:
+        st.knowledge_graph = kg_data
+        logger.info("restore_kg from cache: %d nodes", len(kg_data.get("nodes", [])))
+    else:
+        logger.warning("restore_kg: нет сохранённого графа для темы «%s»", topic)
     _emit(deps, "tutor.lesson", **st.lesson_payload(topic))
     _emit(deps, "system",
           message="Показываю урок из прошлого занятия. Хочешь дополнить материал?",
@@ -729,6 +788,17 @@ def agent_tutor_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
             logger.info("agent_tutor_node: кэшированный урок по теме «%s» — без генерации", topic)
             st.set_lesson(cached_lesson)
             st.lesson_done = True
+            # Восстанавливаем граф знаний из кэша для reuse_gate пути.
+            from .lesson_cache import load_knowledge_graph as _load_kg
+            kg_data = _load_kg(
+                deps.settings.SOURCES_CACHE_DIR,
+                st.student_id or "", st.subject or "", topic, st.grade or "",
+            )
+            if kg_data:
+                st.knowledge_graph = kg_data
+                logger.info("agent_tutor_node: восстановлен graph из cache %d nodes", len(kg_data.get("nodes", [])))
+            else:
+                logger.warning("agent_tutor_node: нет сохранённого графа для «%s»", topic)
             _emit(deps, "tutor.lesson", **st.lesson_payload(topic))
             _emit(deps, "system",
                   message="Показываю урок из прошлого занятия. Хочешь дополнить материал?",
@@ -761,17 +831,64 @@ def agent_tutor_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         _emit(deps, "source.progress", stage="content", url="", status="generating",
               message=f"Генерирую урок по теме «{topic}» ({len(context)} фрагментов)…")
         # Стриминг токенов урока: on_token → WS event "token" → фронтенд pushToken → пользователь видит прогресс
-        on_token_fn = deps.on_token  # реальный стриминг токенов в браузер (stream=True)
-        lesson = tutor_mod.generate_lesson(
-            topic, context, st, llm_call=deps.tutor_llm, on_token=on_token_fn, sources=sources
-        )
-        # Quality gate удалён: новый стриминговый pipeline генерирует чистый текст,
-        # fallback на контекст встроен в generate_lesson — мусор не проходит.
-        st.set_lesson(lesson)
-        st.lesson_done = True
-        _save_lesson_to_cache(st, deps, lesson, topic)
-        _emit(deps, "tutor.lesson", **st.lesson_payload(topic))
-        _emit(deps, "system", message="Урок готов.", kind="lesson.ready")
+        original_on_token = deps.on_token  # реальный стриминг токенов в браузер (stream=True)
+        # Встраиваем промежуточные события прогресса в on_token — каждые N токенов эмиссим milestone
+        token_count = [0]  # mutable counter shared across closures
+        def counting_on_token(token: str) -> None:
+            if original_on_token:
+                original_on_token(token)
+            token_count[0] += 1
+            count = token_count[0]
+            if count == 50:
+                _emit(deps, "source.progress", stage="content", url="", status="generating",
+                      message="Обрабатываю материалы…")
+            elif count == 150:
+                _emit(deps, "source.progress", stage="content", url="", status="generating",
+                      message="Формирую структуру урока…")
+            elif count == 300:
+                _emit(deps, "source.progress", stage="content", url="", status="generating",
+                      message="Сверяю с источниками…")
+        try:
+            # Таймаут генерации: защита от зависания LLM-вызова (P0.2)
+            from .config import settings as graph_settings
+            _timeout_sec = getattr(graph_settings, "LESSON_GENERATION_TIMEOUT_SEC", 120)
+
+            def _do_generate():
+                return tutor_mod.generate_lesson(
+                    topic, context, st, llm_call=deps.tutor_llm, on_token=counting_on_token, sources=sources
+                )
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
+                lesson = _pool.submit(_do_generate).result(timeout=_timeout_sec)
+
+            # Quality gate удалён: новый стриминговый pipeline генерирует чистый текст,
+            # fallback на контекст встроен в generate_lesson — мусор не проходит.
+            st.set_lesson(lesson)
+            st.lesson_sources = _extract_lesson_sources(sources, st.sources)
+            st.lesson_done = True
+            _save_lesson_to_cache(st, deps, lesson, topic)
+            _emit(deps, "tutor.lesson", **st.lesson_payload(topic))
+            _emit(deps, "source.progress", stage="content", url="", status="done",
+                  message="Урок готов.")
+
+        except concurrent.futures.TimeoutError:
+            logger.error("agent_tutor_node: таймаут генерации урока по «%s» (%ss)", topic, _timeout_sec)
+            _emit(deps, "source.progress", stage="content", url="", status="error",
+                  message="Не удалось сгенерировать урок: превышено время ожидания.")
+            st.agent_message = (
+                f"Урок по теме «{topic}» не успел сформироваться — попробуйте ещё раз или выберите другую тему."
+            )
+            st.agent_question = st.agent_message
+
+        except Exception as exc:
+            logger.exception("agent_tutor_node: ошибка генерации урока по «%s»: %s", topic, exc)
+            _emit(deps, "source.progress", stage="content", url="", status="error",
+                  message="Не удалось сгенерировать урок: ошибка сервера.")
+            st.agent_message = (
+                f"Произошла ошибка при подготовке урока по теме «{topic}». "
+                "Попробуйте перезагрузить страницу или выбрать другую тему."
+            )
+            st.agent_question = st.agent_message
 
     # Урок только что показан — ждём ответ ученика, не запускаем агент.
     # Иначе ReAct-цикл вернёт сырой текст или вызовет generate_quiz до
@@ -1003,6 +1120,10 @@ def _student_has_chunks(st: TutorState, deps: GraphDeps) -> bool:
         filters["subject"] = st.subject
     if getattr(st, "student_id", None):
         filters["student_id"] = st.student_id
+    # Фильтр по теме: чтобы чанки других тем (даже того же предмета) не считались подходящими.
+    topic = getattr(st, "topic", None)
+    if topic and topic != "all":
+        filters["topic"] = topic
     try:
         return bool(deps.store.search(query, k=1, filters=filters or None))
     except Exception:
@@ -1015,6 +1136,10 @@ def _topic_studied_before(st: TutorState, deps: GraphDeps, topic: str) -> bool:
     По запросу «если тема пройдена ранее, считаем что материалы есть» — Student KG
     становится источником правды для reuse-гейта (а не только RAG-чанки по предмету).
     """
+    # Если пользователь явно запросил поиск свежих источников — не считаем тему
+    # «пройденной», чтобы не блокировать обновление материалов кэшированным уроком.
+    if getattr(st, "force_source_refresh", False):
+        return False
     if not topic or not getattr(st, "student_id", None):
         return False
     try:
@@ -1157,6 +1282,17 @@ def reuse_materials_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
             if cached_lesson is not None:
                 st.set_lesson(cached_lesson)
                 st.lesson_done = True
+                # Восстанавливаем граф знаний из кэша для reuse_gate пути.
+                from .lesson_cache import load_knowledge_graph as _load_kg
+                kg_data = _load_kg(
+                    deps.settings.SOURCES_CACHE_DIR,
+                    st.student_id or "", st.subject or "", topic, st.grade or "",
+                )
+                if kg_data:
+                    st.knowledge_graph = kg_data
+                    logger.info("reuse_gate: восстановлен graph из cache %d nodes", len(kg_data.get("nodes", [])))
+                else:
+                    logger.warning("reuse_gate: нет сохранённого графа для «%s»", topic)
                 _emit(deps, "tutor.lesson", **st.lesson_payload(topic))
                 st.agent_question = (
                     "Вот урок из прошлого раза. Хочешь дополнить материал из новых источников?"
@@ -1361,6 +1497,7 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         logger.info("content_node: «дополнить» — пересборка урока после обновления источников")
         st.lesson_rebuild = False
         st.clear_lesson()
+        st.lesson_done = False  # сбрасываем флаг — иначе _load_cached_lesson может вернуть старое и блокировать перегенерацию
 
     if st.lesson_text:
         # материал уже показан — ждём подтверждения
@@ -1380,10 +1517,12 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
 
     # Кэш урока (3.1/7.2): повторное прохождение темы — показываем урок из прошлого раза,
     # не генерируя заново (пользователь сам решит, дополнять ли материал).
-    cached_lesson = _load_cached_lesson(st, deps, topic)
-    if cached_lesson is not None:
-        logger.info("content_node: кэшированный урок по теме «%s» — без генерации", topic)
-        return _apply_cached_lesson(st, deps, cached_lesson, topic)
+    # При пересборке ("дополнить материал") кэш не подставляем — нужен свежий контент.
+    if not st.lesson_rebuild:
+        cached_lesson = _load_cached_lesson(st, deps, topic)
+        if cached_lesson is not None:
+            logger.info("content_node: кэшированный урок по теме «%s» — без генерации", topic)
+            return _apply_cached_lesson(st, deps, cached_lesson, topic)
 
     # Генерируем материал по активной теме и режиму
     # deep_dive берёт больше контекста (несколько разделов, 7.3.4); lesson/explain — k=5

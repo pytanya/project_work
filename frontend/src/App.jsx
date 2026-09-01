@@ -356,7 +356,7 @@ export default function App() {
           }
           break
         case 'tutor.lesson':
-          finalizeStream('lesson', d.text, { topic: d.topic, lesson: d.lesson })
+          finalizeStream('lesson', d.text, { topic: d.topic, lesson: d.lesson, sources: d.sources || [] })
           // Удалить процессные статусы («Генерирую урок...», «Собираю урок...») при завершении урока
           removeProcessStatuses()
           // История занятий: урок показан — сводка сессии уже записана на бэкенде
@@ -662,6 +662,7 @@ export default function App() {
               summary: d.lesson_summary,
               eval: d.lesson_eval || null,
             },
+            sources: d.sources || [],
           })
         }
       }
@@ -1075,19 +1076,37 @@ export default function App() {
           <SessionHistoryPanel studentId={student.student_id} reloadKey={sessionHistoryReloadKey} />
         )}
 
-        {/* 5. Student Knowledge Graph (roadmap #4) */}
-        {intake.complete && student.student_id && (
+        {/* 5. Student Knowledge Graph — временно отключено */}
+        {/* {intake.complete && student.student_id && (
           <StudentKGPanel
             studentId={student.student_id}
             subject={intake.subject}
             onStartReview={() => {
               const sid = sessionId
-              if (sid) api.startReview(sid).catch(() => {})
+              console.log('=== REVIEW BUTTON CLICKED ===')
+              console.log('sessionId state:', sid)
+              console.log('sessionIdRef:', sessionIdRef.current)
+              console.log('chatBusy:', chatBusy)
+              console.log('uploadBusy:', uploadBusy)
+              if (!sid) {
+                console.error('❌ sessionId is null! Cannot start review.')
+                return
+              }
+              console.log('📡 Calling api.startReview(' + sid + ')...')
+              api.startReview(sid)
+                .then((r) => {
+                  console.log('✅ Review started:', r)
+                  console.log('📊 Review response:', JSON.stringify(r, null, 2))
+                })
+                .catch((e) => {
+                  console.error('❌ Review failed:', e)
+                  console.error('Stack:', e.stack)
+                })
             }}
             busy={chatBusy}
             reloadKey={reviewReloadKey}
           />
-        )}
+        )} */}
       </aside>
       <div className="sidebar-resizer" ref={sidebarDragRef} title="Изменить ширину панели" />
       <main className="chat">

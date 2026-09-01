@@ -181,6 +181,8 @@ class Settings(BaseSettings):
     SESSION_IDLE_TTL_SEC: float = Field(default=1800.0, gt=0)
     # Таймаут одного шага графа (сек) — зависшие операции не блокируют сессию
     RUN_STEP_TIMEOUT_SEC: float = Field(default=300.0, gt=0)
+    # Таймаут генерации урока (сек) — защита от зависания generate_lesson()
+    LESSON_GENERATION_TIMEOUT_SEC: float = Field(default=120.0, gt=0)
     # Docling (структурированный разбор) — опция: модели скачиваются из HF,
     # в некоторых средах недоступны/медленны; рабочий парсер — pdfplumber.
     DOCLING_ENABLED: bool = Field(default=False)
