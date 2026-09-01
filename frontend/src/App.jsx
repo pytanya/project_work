@@ -60,10 +60,13 @@ export default function App() {
   const [knowledge, setKnowledge] = useState({})
   const [wikiReloadKey, setWikiReloadKey] = useState(0)
   const [sessionHistoryReloadKey, setSessionHistoryReloadKey] = useState(0)
+  const [reviewReloadKey, setReviewReloadKey] = useState(0)
   // Политика источников: белый список + «любые источники» (пер-студентная)
   const [sourcePolicy, setSourcePolicy] = useState({ allow_any_sources: true, whitelist: [] })
   const [sourcePanelSignal, setSourcePanelSignal] = useState(0)
   const [sourceProposal, setSourceProposal] = useState(null)
+  // Баннер мягкого предупреждения мастерства (4.5): «стоит повторить Y»
+  const [masteryGate, setMasteryGate] = useState(null)
   const [score, setScore] = useState({ correct: 0, total: 0 })
   const [quizCount, setQuizCount] = useState(0)
   const [answer, setAnswer] = useState('')
@@ -251,7 +254,7 @@ export default function App() {
       // иначе событие `system` от select_topic сбросит индикатор раньше времени.
       if (isWaitingForAnswer.current && !isPreparingTopic.current) {
         const answerResolvedEvents = [
-          'quiz.card', 'tutor.lesson', 'tutor.explanation',
+          'quiz.card', 'quiz.hint', 'tutor.lesson', 'tutor.explanation',
           'tutor.summary', 'intake.question', 'intake.card', 'source.failed', 'session.error'
         ]
         if (answerResolvedEvents.includes(evt.event)) {
@@ -306,13 +309,18 @@ export default function App() {
         case 'quiz.card':
           finalizeStream('quiz', d.question)
           setCachedLessonBanner(false)
+          setMasteryGate(null)
           // Счётчик вопросов (6.2): авторитетный номер из бэкенда (answered+1)
+          if (d.review && typeof d.num_questions === 'number' && d.num_questions > 0) {
+            setQuizCount(d.num_questions)
+          } else {
+            setQuizCount((c) => c || (d.num_questions || 10))
+          }
           if (typeof d.question_num === 'number' && d.question_num > 0) {
             setQuestionNum(d.question_num)
           } else {
             setQuestionNum((n) => n + 1)
           }
-          setQuizCount((c) => c || (d.num_questions || 10))
           setCurrent({
             kind: 'quiz',
             question: d.question,
@@ -326,7 +334,8 @@ export default function App() {
           })
           break
         case 'quiz.hint':
-          setFeed((f) => [...f, { id: `hint-${Date.now()}`, kind: 'hint', text: d.hint, data: d }])
+          const hKind = d.subtask ? 'subtask' : 'hint'
+          setFeed((f) => [...f, { id: `hint-${Date.now()}`, kind: hKind, text: d.hint, data: d }])
           break
         case 'review.done':
           setFeed((f) => [...f, {
@@ -334,6 +343,7 @@ export default function App() {
             text: `Повторение завершено: верно ${d.correct} из ${d.reviewed}.`,
             data: d,
           }])
+          setReviewReloadKey((k) => k + 1)
           break
         case 'tutor.explanation':
           finalizeStream('explanation', d.message, d)
@@ -354,6 +364,7 @@ export default function App() {
           break
         case 'tutor.summary':
           finalizeStream('summary', `Квиз завершён: правильных ${d.correct}/${d.total}`)
+          setReviewReloadKey((k) => k + 1)
           setCurrent(null)
           setKnowledge(d.knowledge_map || {})
           setScore({ correct: d.correct || 0, total: d.total || 0 })
@@ -436,12 +447,16 @@ export default function App() {
           // Агент-сообщения и lesson.ready — как чат репетитора (не системное)
           if (['agent.message', 'lesson.ready'].includes(d.kind)) {
             push('agent', d.message)
-          } else {
+          } else if (d.kind !== 'mastery.gate') {
             push('system', d.message)
           }
           // Живой счётчик правильных (6.2): обновляем после каждого ответа
           if (typeof d.correct_count === 'number') {
             setScore({ correct: d.correct_count, total: d.answered_count || 0 })
+          }
+          // Мягкое предупреждение мастерства (4.5): «стоит повторить Y» — баннер с кнопками
+          if (d.kind === 'mastery.gate') {
+            setMasteryGate({ message: d.message, gaps: d.gaps || [] })
           }
           // Кэшированный урок из прошлого занятия (7.3): показываем баннер над уроком.
           if (d.kind === 'lesson.cached') {
@@ -604,6 +619,7 @@ export default function App() {
         setCurrent({
           kind: 'quiz', question: q.question, options: q.options, answerType: q.answer_type,
           topic: q.topic, difficulty: q.difficulty, questionId: q.question_id,
+          review: q.review,
         })
         // Обновляем счётчик вопросов из records
         if (d.records && d.records.length > 0) {
@@ -1033,6 +1049,7 @@ export default function App() {
               if (sid) api.startReview(sid).catch(() => {})
             }}
             busy={chatBusy}
+            reloadKey={reviewReloadKey}
           />
         )}
       </aside>
@@ -1049,6 +1066,7 @@ export default function App() {
               selectedOption={confirmedOption}
               quickAnswer={quickAnswer}
               correctCount={score.correct}
+              onHint={() => sendMessage('подсказка')}
             />
           ) : current.kind === 'intake_card' ? (
             <IntakeCard
@@ -1091,6 +1109,28 @@ export default function App() {
             <button className="btn small ghost" onClick={() => { setCachedLessonBanner(false); sendMessage('Начать с нуля') }}>
               Начать с нуля
             </button>
+          </div>
+        )}
+        {masteryGate && (
+          <div className="mastery-gate-banner">
+            <div className="mastery-gate-banner__icon">🎓</div>
+            <div className="mastery-gate-banner__text">{masteryGate.message}</div>
+            <div className="mastery-gate-banner__actions">
+              <button className="btn small" onClick={() => setMasteryGate(null)}>Всё равно продолжить</button>
+              {masteryGate.gaps.map((g) => {
+                const node = graph.nodes.find((n) => n.title === g)
+                return (
+                  <button key={g} className="btn small ghost"
+                          onClick={() => {
+                            setMasteryGate(null)
+                            if (node) handleSelectTopic(node)
+                          }}
+                          disabled={!node}>
+                    Перейти к «{g}»
+                  </button>
+                )
+              })}
+            </div>
           </div>
         )}
         {sourceProposal && (

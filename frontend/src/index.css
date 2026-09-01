@@ -960,6 +960,18 @@ body.resizing * { cursor: col-resize !important; }
 }
 .bubble.summary { background: var(--green-soft); border: 1px solid var(--ok); color: var(--ok); }
 .bubble.agent.hint { border-left: 3px solid var(--amber); background: var(--amber-soft); }
+.bubble.agent.subtask {
+  border-left: 3px solid var(--blue, #3b82f6);
+  background: var(--blue-soft, #e8f1ff);
+  border-color: var(--blue, #3b82f6);
+}
+.subtask-badge {
+  display: inline-block; margin-bottom: 6px; padding: 2px 9px;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  color: #fff; background: var(--blue-strong, #1e40af);
+  border-radius: 999px;
+}
 .bubble.review { background: var(--green-soft); border: 1px solid var(--green); color: var(--green-strong); }
 .bubble.system {
   background: var(--paper); border: 1px solid var(--line); color: var(--ink-soft); font-size: 13.5px;
@@ -1072,6 +1084,17 @@ body.resizing * { cursor: col-resize !important; }
 }
 .cached-lesson-banner__icon { font-size: 16px; }
 .cached-lesson-banner__text { flex: 1; min-width: 180px; }
+
+/* --- Баннер мягкого предупреждения мастерства (4.5) --- */
+.mastery-gate-banner {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  border: 1px solid rgba(245, 158, 11, 0.45); background: rgba(245, 158, 11, 0.08);
+  border-radius: 12px; padding: 10px 12px; margin: 10px 0;
+  font-size: 13px; color: var(--ink);
+}
+.mastery-gate-banner__icon { font-size: 16px; }
+.mastery-gate-banner__text { flex: 1; min-width: 180px; line-height: 1.45; }
+.mastery-gate-banner__actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .question-text { font-size: 17px; font-weight: 600; line-height: 1.45; margin-bottom: 12px; font-family: var(--font-display); }
 
 /* --- Карточка отрывка текста --- */
@@ -1731,6 +1754,11 @@ body.resizing * { cursor: col-resize !important; }
 .quiz-hint {
   margin-top: 8px; font-size: 12px; color: var(--muted);
   text-align: center; font-style: italic;
+}
+
+.quiz-hint-btn {
+  width: auto; margin: 12px auto 0; padding: 6px 12px; font-size: 12px;
+  display: block;
 }
 
 /* --- Question counter badge --- */

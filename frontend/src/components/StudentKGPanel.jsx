@@ -14,7 +14,7 @@ const STATUS_LABELS = {
   mastered: 'Освоено',
 }
 
-export default function StudentKGPanel({ studentId = '', subject = '', onStartReview = null, busy = false }) {
+export default function StudentKGPanel({ studentId = '', subject = '', onStartReview = null, busy = false, reloadKey = 0 }) {
   const [kg, setKg] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -25,7 +25,7 @@ export default function StudentKGPanel({ studentId = '', subject = '', onStartRe
     api.getReview(studentId)
       .then((d) => setDueCount(d.stats?.due || 0))
       .catch(() => setDueCount(0))
-  }, [studentId])
+  }, [studentId, reloadKey])
 
   useEffect(() => {
     if (!studentId) return

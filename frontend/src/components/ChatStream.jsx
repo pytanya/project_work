@@ -160,6 +160,14 @@ export default function ChatStream({ feed, busy = false, progressPhase = null })
           {m.kind === 'hint' && (
             <div className="bubble agent hint">💡 <LatexText text={m.text} /></div>
           )}
+          {m.kind === 'subtask' && (
+            <div className="bubble agent subtask">
+              <div className="subtask-badge">
+                Шаг {m.data?.subtask_index ?? '?'} из {m.data?.subtask_total ?? '?'}
+              </div>
+              <LatexText text={m.text} />
+            </div>
+          )}
           {m.kind === 'review' && <div className="bubble review">🔁 {m.text}</div>}
           {m.kind === 'error' && <div className="bubble error">⚠️ {m.text}</div>}
         </div>
