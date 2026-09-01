@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import queue as std_queue
+import time
 from pathlib import Path
 
 import pytest
@@ -144,6 +145,36 @@ class TestSessions:
 
     def test_404_unknown(self, client):
         assert client.get("/api/sessions/nope").status_code == 404
+
+    def test_ttl_from_settings(self, make_settings):
+        s = make_settings(SESSION_IDLE_TTL_SEC=42)
+        embedder = FakeEmbedder()
+        store = NumpyVectorStore("api", embedder)
+        deps = GraphDeps(embedder=embedder, store=store, settings=s)
+        session_store = SessionStore(deps)
+        assert session_store._ttl == 42
+
+    def test_sweep_keeps_active_step(self, make_settings):
+        s = make_settings(SESSION_IDLE_TTL_SEC=42)
+        embedder = FakeEmbedder()
+        store = NumpyVectorStore("api", embedder)
+        deps = GraphDeps(
+            embedder=embedder, store=store, settings=s,
+            tutor_llm=lambda m: _GEN,
+            eval_llm=lambda m: _EVAL,
+            expert_llm=lambda m: _EXPL,
+            judge_llm=lambda m: _JUDGE,
+        )
+        session_store = SessionStore(deps, ttl=0.01)
+        session = session_store.create()
+        session.step_active = True
+        session.last_activity = time.monotonic() - 9999
+        assert session_store._sweep() == 0
+        assert session_store.get(session.id) is not None
+        session.step_active = False
+        session.last_activity = time.monotonic() - 9999
+        assert session_store._sweep() == 1
+        assert session_store.get(session.id) is None
 
 
 class TestHealthMetrics:
@@ -592,41 +623,8 @@ class TestWebSocket:
             assert event["event"] == "session.error"
 
 
-class TestLessonJudgeScheduling:
-    """Фоновый LLM-судья урока: вызывается только для структурированных уроков, без задержки выдачи."""
-
-    def test_structured_lesson_needs_judge(self):
-        from api.engine import should_judge_lesson
-        from src.states import TutorState
-
-        st = TutorState(mode="lesson", lesson_text="урок", lesson_eval={"verdict": "pass", "criteria": {}})
-        assert should_judge_lesson(st) is True
-
-    def test_after_judge_no_duplicate_call(self):
-        from api.engine import should_judge_lesson
-        from src.states import TutorState
-
-        st = TutorState(mode="lesson", lesson_text="урок",
-                        lesson_eval={"verdict": "pass"}, lesson_judge={"verdict": "pass"})
-        assert should_judge_lesson(st) is False
-
-    def test_plain_lesson_no_judge(self):
-        # explain/deep_dive (lesson_eval=None) — судья не нужен
-        from api.engine import should_judge_lesson
-        from src.states import TutorState
-
-        st = TutorState(mode="explain", lesson_text="объяснение", lesson_eval=None)
-        assert should_judge_lesson(st) is False
-
-    def test_failed_session_no_judge(self):
-        # после провала поиска урок в состоянии протух: судить его нельзя,
-        # иначе в ленте «материалы не найдены» + «судья: урок соответствует источнику».
-        from api.engine import should_judge_lesson
-        from src.states import TutorState
-
-        st = TutorState(mode="lesson", lesson_text="урок",
-                        lesson_eval={"verdict": "pass"}, session_status="failed")
-        assert should_judge_lesson(st) is False
+class TestEngineHelpers:
+    """Хелперы api/engine: человекочитаемые сообщения об ошибках шага."""
 
     def test_friendly_step_error_maps_offline(self):
         """Офлайн-ошибка LLM → понятное сообщение, а не сырое «RuntimeError»."""
@@ -637,39 +635,6 @@ class TestLessonJudgeScheduling:
         assert "RuntimeError" not in msg
         msg2 = _friendly_step_error(ValueError("прочее"))
         assert "Ошибка выполнения шага" in msg2
-
-    def test_no_double_scheduling_race(self):
-        """judge_in_flight защищает от двойного запуска при быстрых ответах пользователя."""
-        import asyncio
-
-        import api.engine as eng
-        from api.engine import SessionData, _maybe_schedule_lesson_judge
-        from src.states import TutorState
-
-        calls = {"n": 0}
-
-        async def fake_worker(session):
-            calls["n"] += 1
-            try:
-                await asyncio.sleep(0.001)
-            finally:
-                session.judge_in_flight = False
-
-        eng._lesson_judge_worker = fake_worker
-        st = TutorState(mode="lesson", lesson_text="урок", lesson_eval={"verdict": "pass"})
-        session = SessionData(id="x", state=st, deps=None, graph=None)
-
-        async def run():
-            _maybe_schedule_lesson_judge(session)   # запуск (in-flight)
-            _maybe_schedule_lesson_judge(session)   # пока выполняется — пропуск
-            for _ in range(5):
-                await asyncio.sleep(0.02)           # первый worker завершился
-            _maybe_schedule_lesson_judge(session)   # снова можно
-            for _ in range(5):
-                await asyncio.sleep(0.02)           # дождаться завершения второго
-
-        asyncio.run(run())
-        assert calls["n"] == 2  # 3 вызова → 2 реальных запуска (один пропущен in-flight)
 
 
 class TestWiki:

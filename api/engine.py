@@ -36,12 +36,6 @@ logger = logging.getLogger("edututor.api")
 WS_IDLE_TIMEOUT_SEC = 300
 
 
-def _lesson_judge_message(criteria: Dict[str, float], avg: float, verdict: str) -> str:
-    parts = " · ".join(f"{c}: {int(v * 10)}/10" for c, v in criteria.items())
-    head = "урок соответствует источнику" if verdict == "pass" else "урок стоит доработать"
-    return f"🔍 Судья: {head} ({avg * 10:.0f}/10) — {parts}"
-
-
 _LLM_OFFLINE_HINTS = (
     "все провайдеры и модели недоступны",
     "apiconnectionerror",
@@ -87,80 +81,6 @@ def _close_logger(step_logger: Any) -> None:
             pass
 
 
-def should_judge_lesson(st: TutorState) -> bool:
-    """Фоновый LLM-судья урока: структурированный урок создан и актуален, а судья ещё не работал.
-
-    session_status=="failed" — урок в состоянии протух (поиск материалов упал): не судим его,
-    иначе в ленте появится «материалы не найдены» + «судья: урок соответствует источнику».
-    """
-    if st.session_status == "failed":
-        return False
-    return bool(st.lesson_eval) and st.lesson_judge is None
-
-
-async def _lesson_judge_worker(session: "SessionData") -> None:
-    """LLM-судья groundedness урока — фоновый, НЕ блокирует выдачу/переход к квизу."""
-    try:
-        st = session.state
-        topic = st.active_topic or st.topic or st.subject or "тема"
-        from src.graph import _rag_chunks
-        from src.judge import judge_lesson
-        from src.llm_client import LLMClient
-
-        chunks = _rag_chunks(session.deps.store, topic, st, k=3)
-        context = [c.chunk.text for c in chunks]
-
-        def _run():
-            client = LLMClient(role=ROLE_JUDGE)
-            return judge_lesson(
-                st.lesson_text or "",
-                context,
-                st.grade,
-                judge_call=lambda msgs: client.chat(msgs, temperature=0.0, max_tokens=200).content or "",
-                # детерминированные критерии eval_lesson → кап groundedness по цитатам
-                eval_criteria=(st.lesson_eval or {}).get("criteria"),
-            )
-
-        result = await asyncio.to_thread(_run)
-        criteria = {k: round(float(v) / 10.0, 3) for k, v in result.criteria.items()}
-        data = {
-            "criteria": criteria,
-            "avg_score": round(float(result.avg_score) / 10.0, 3),
-            "verdict": result.verdict,
-        }
-        # Записываем и эмитим суждение ТОЛЬКО если урок не сменился и сессия не упала
-        # за время работы судьи (иначе «не найдены» + «соответствует источнику» в одной ленте).
-        current = session.state
-        if current.lesson_text == st.lesson_text and current.session_status != "failed":
-            current.lesson_judge = data
-            if session.store and getattr(session.store, "_sqlite", None):
-                session.store._save_state(session.id, current)
-            session.queue.put(WsEvent(event="system", data={
-                "message": _lesson_judge_message(criteria, data["avg_score"], result.verdict),
-                "kind": "lesson.judge",
-            }))
-    except Exception:
-        logger.exception("Фоновый судья урока упал (не влияет на сессию)")
-    finally:
-        session.judge_in_flight = False
-
-
-def _maybe_schedule_lesson_judge(session: "SessionData") -> None:
-    """Планирует фонового LLM-судью урока (fire-and-forget, без задержки шага).
-
-    judge_in_flight — защита от двойного запуска при быстрых ответах пользователя.
-    """
-    if session.judge_in_flight:
-        return
-    if should_judge_lesson(session.state):
-        session.judge_in_flight = True
-        try:
-            asyncio.get_running_loop().create_task(_lesson_judge_worker(session))
-        except RuntimeError:
-            session.judge_in_flight = False
-            logger.warning("Нет event loop — фоновый судья урока пропущен")
-
-
 def _fallback_deps() -> GraphDeps:
     """Портативный fallback при недоступности стандартного хранилища.
 
@@ -190,7 +110,6 @@ class SessionData:
     step_active: bool = False  # выполняется ли сейчас шаг графа (WS не закрываем по idle во время шага)
     last_activity: float = field(default_factory=time.monotonic)
     store: Optional["SessionStore"] = None  # reference to parent store for persistence
-    judge_in_flight: bool = False  # фоновый LLM-судья урока уже запланирован/выполняется
     history_written: tuple = ()  # последняя записанная в историю сводка (прогрессивная запись)
     # Наблюдаемость и лимиты сессии (None — если llm-колбэки заданы извне/тесты)
     metrics: Optional[MetricsCollector] = None
@@ -208,7 +127,7 @@ class SessionStore:
     """
 
     def __init__(self, deps: Optional[GraphDeps] = None,
-                 sqlite_store: Any = None, ttl: float = 1800.0):
+                 sqlite_store: Any = None, ttl: Optional[float] = None):
         from src.session_store import SessionSQLiteStore
 
         if deps is None:
@@ -222,7 +141,8 @@ class SessionStore:
         self._base_deps = deps or _fallback_deps()
         self._sessions: Dict[str, SessionData] = {}
         self._lock = threading.Lock()
-        self._ttl = ttl
+        base_settings = getattr(self._base_deps, "settings", None)
+        self._ttl = ttl if ttl is not None else float(getattr(base_settings, "SESSION_IDLE_TTL_SEC", 1800.0))
         
         # SQLite persistence по умолчанию
         if sqlite_store is None:
@@ -344,7 +264,7 @@ class SessionStore:
         with self._lock:
             expired = [
                 sid for sid, s in self._sessions.items()
-                if now - s.last_activity > self._ttl
+                if now - s.last_activity > self._ttl and not s.step_active
             ]
             for sid in expired:
                 s = self._sessions.pop(sid, None)

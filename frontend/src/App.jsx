@@ -267,8 +267,7 @@ export default function App() {
         if (evt.event === 'system') {
           const finalSystemKinds = [
             'topic.all', 'topic.selected', 'lesson.done', 'lesson.repeat',
-            'lesson.ready', 'agent.message', 'doc.scanned', 'content.empty',
-            'lesson.judge'
+            'lesson.ready', 'agent.message', 'doc.scanned', 'content.empty'
           ]
           if (finalSystemKinds.includes(d.kind)) {
             setChatBusy(false)
@@ -441,7 +440,7 @@ export default function App() {
           endStream()
           // Информационные события (фоновый судья, RAG-гейт, агент-сообщения)
           // НЕ должны сносить активный UI (карточка квиза / чек-лист).
-          if (!['lesson.judge', 'content.empty', 'agent.message', 'lesson.ready'].includes(d.kind)) {
+          if (!['content.empty', 'agent.message', 'lesson.ready'].includes(d.kind)) {
             setCurrent(null)
           }
           // Агент-сообщения и lesson.ready — как чат репетитора (не системное)
@@ -535,10 +534,14 @@ export default function App() {
         reconnectAttempts = 0
       }
       // auto-reconnect: бэкенд мог перезапуститься (WS закрылся аномально) — переподключаемся.
-      // Код 1000 = штатное закрытие сервером (idle-таймаут сессии) — переподключение не нужно.
+      // Код 1000 = штатное закрытие сервером (idle-таймаут сессии): сессия жива, события шагов
+      // копятся в session.queue — переподключаемся, чтобы следующий шаг имел живого потребителя.
+      // Счётчик сбрасывается в onopen, поэтому при успешном переподключении backoff не растёт
+      // (цикл «закрыли по 1000 → реконнект через 3с → open → сброс»), бесконечной петли нет.
+      // Код 4004 = сессия не найдена (реально удалена) — реконнект бессмысленен.
       ws.onclose = (ev) => {
         if (cancelled || !sessionIdRef.current) return
-        if (ev.code === 1000) return
+        if (ev.code === 4004) return
         if (reconnectAttempts < 6) {
           reconnectAttempts += 1
           reconnectTimer = setTimeout(() => {
