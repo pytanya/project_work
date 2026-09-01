@@ -79,6 +79,7 @@ def deps(make_settings, tmp_path):
             id="c1",
             text="Параграф 12: Атмосфера. Атмосфера — воздушная оболочка Земли, состоит из азота (78%) и кислорода (21%).",
             section_number="12", section_title="Атмосфера", source="book", subject="география", grade="6",
+            topic="Атмосфера",
         )
     ])
     return GraphDeps(
@@ -195,6 +196,32 @@ class TestReuseMaterials:
         res = _invoke(graph, self._state(subject="физика", topic="Сила тяжести",
                                          grade="7").model_dump())
         assert res.reuse_pending is False  # чужие чанки не предлагаем как «материалы по теме»
+
+    def test_untagged_chunks_not_offered_for_reuse(self, make_settings, tmp_path):
+        """Старые чанки БЕЗ topic (не размечены по теме) не считаются материалами по теме.
+
+        Сценарий: ведём «Броуновское движение», в сторе есть чанки физики без topic
+        (произвольные, не той темы) → reuse НЕ предлагается (только поиск новых материалов).
+        """
+        from src.knowledge import NumpyVectorStore
+
+        s = make_settings(MAX_INTAKE_ITERATIONS=8)
+        store = NumpyVectorStore("physics", FakeEmbedder())
+        store.add([
+            DocChunk(id="c_untagged",
+                     text=("Молекулы вещества непрерывно и беспорядочно движутся. Температура "
+                           "характеризует среднюю кинетическую энергию частиц. Диффузия происходит "
+                           "в газах, жидкостях и твёрдых телах. Внутренняя энергия меняется при "
+                           "теплопередаче."),
+                     section_number="5", source="book",
+                     subject="физика", grade="7")  # topic не задан (старый формат)
+        ])
+        deps2 = GraphDeps(embedder=FakeEmbedder(), store=store, settings=s,
+                          tutor_llm=lambda m: _GEN)
+        graph = build_graph(deps2)
+        res = _invoke(graph, self._state(subject="физика", topic="Броуновское движение",
+                                         grade="7").model_dump())
+        assert res.reuse_pending is False  # чанки без topic не являются «материалами по теме»
 
     def test_reuse_offered_when_topic_studied_before(self, make_settings, tmp_path):
         """Тема пройдена ранее (Student KG in_progress/mastered) → reuse предлагается,

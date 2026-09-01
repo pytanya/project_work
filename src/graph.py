@@ -1126,10 +1126,14 @@ def reuse_materials_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     query = st.topic or st.subject or ""
     if query:
         topic = st.topic or st.subject or "этой теме"
-        # Материалы по теме: строгие чанки (topic==тема или старые без topic, но НЕ
-        # чанки других тем — _rag_chunks отсекает их) ИЛИ тема пройдена ранее (Student KG).
+        # Материалы по теме (строгий критерий, без ослабления фильтров):
+        #   - чанки с topic == теме (точечная разметка источников по теме), ИЛИ
+        #   - тема пройдена ранее (Student KG: in_progress/mastered).
+        # Ослабленный RAG-поиск (снятие topic-фильтра) НЕ используется: чанки других
+        # тем или старые чанки без topic не являются доказательством «материалы есть».
         try:
-            existing = _rag_chunks(deps.store, query, st, k=3)
+            filters = _rag_filters(st)
+            existing = deps.store.search(query, k=3, filters=filters or None) if "topic" in filters else []
         except Exception:
             existing = []
         studied = _topic_studied_before(st, deps, st.topic or "")
