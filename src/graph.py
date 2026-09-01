@@ -1224,6 +1224,9 @@ def reuse_materials_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
             # «Начать с нуля»: урок из кэша убираем, ищем свежие материалы
             st.clear_lesson()
             st.force_source_refresh = True
+            st.sources = []
+            st.collection_id = None
+            st.source_status = None
             st.source_note = "Начинаем с нуля — ищу новые материалы по теме."
             st.agent_message = st.source_note
         elif "дополнить" in low or "искать" in low or "найти" in low:
@@ -1312,7 +1315,8 @@ def reuse_materials_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         except Exception:
             existing = []
         studied = _topic_studied_before(st, deps, st.topic or "")
-        if existing or studied:
+        # Если пользователь явно запросил свежие источники — не показываем reuse-гейт
+        if (existing or studied) and not st.force_source_refresh:
             st.reuse_pending = True
             # 3.2: при повторном прохождении темы в режиме «урок» — сразу показываем
             # кэшированный урок из прошлого раза, а не спрашиваем «использовать да/нет».
@@ -1358,10 +1362,9 @@ def route_reuse(state: TutorState) -> str:
         return END
     if state.source_status == "ready" or state.sources or state.collection_id:
         return NODE_TOPIC_GATE
-    # «Начать с нуля» / «Дополнить»: force_source_refresh=True — останавливаем invoke,
-    # чтобы пользователь увидел подтверждение. Следующий invoke запустит поиск с флагом.
+    # «Начать с нуля» / «Дополнить»: force_source_refresh=True → ищем свежие источники
     if state.force_source_refresh:
-        return END
+        return NODE_FIND_TEXTBOOK
     return NODE_FIND_TEXTBOOK
 
 
@@ -1498,7 +1501,6 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         # sources очищены → route_after_content → NODE_FIND_TEXTBOOK).
         if "с нуля" in low or "заново" in low:
             st.clear_lesson()
-            st.lesson_rebuild = True
             st.force_source_refresh = True
             st.sources = []
             st.collection_id = None

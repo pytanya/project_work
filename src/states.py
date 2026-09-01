@@ -204,6 +204,7 @@ class TutorState(IntakeState):
         self.lesson_sources = []
         self.lesson_eval = None
         self.lesson_judge = None
+        self.lesson_done = False
 
     def lesson_payload(self, topic: str = "") -> Dict[str, Any]:
         """Полезная нагрузка события tutor.lesson / MessageResponse для фронтенда."""
