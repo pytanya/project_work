@@ -1625,3 +1625,40 @@ def test_route_source_skips_source_gates_on_active_question():
     # активный вопрос, но нет сообщения — обычный роутинг не ломаем
     st5 = TutorState(mode="quiz", current_question=active.current_question)
     assert route_source(st5) == NODE_REUSE_GATE
+
+
+def test_lesson_topic_kg_builds_concepts_from_lesson():
+    """Панель «Граф знаний» заполняется понятиями урока (режим «урок» без учебника)."""
+    from src.graph import _lesson_topic_kg
+
+    st = TutorState(
+        mode="lesson", topic="Атмосфера",
+        lesson_key_terms=[
+            {"term": "Атмосфера", "definition": "воздушная оболочка Земли"},
+            {"term": "Молекула", "definition": "мельчайшая частица вещества"},
+        ],
+    )
+    kg = _lesson_topic_kg(st, "Атмосфера")
+    titles = [n.get("title") for n in kg["nodes"]]
+    assert "Атмосфера" in titles
+    assert "Молекула" in titles
+    assert any(e.get("type") == "part_of" for e in kg["edges"])
+    # без понятий граф не строим (не «фейковая» онтология)
+    empty = TutorState(mode="lesson", topic="Атмосфера", lesson_key_terms=[])
+    assert _lesson_topic_kg(empty, "Атмосфера")["nodes"] == []
+
+
+def test_free_question_routes_to_deterministic_answer_not_agent_command():
+    """«Что такое молекула?» — свободный вопрос (отвечаем RAG-текстом),
+    а не команда агента (deep dive / показать урок) и не подтверждение квиза."""
+    from src.agent_loop import _is_ready_to_quiz, _looks_like_agent_command, _looks_like_free_question
+
+    q = "что такое молекула?"
+    assert _looks_like_free_question(q) is True
+    assert _looks_like_agent_command(q) is False
+    assert _is_ready_to_quiz(q) is False
+    # «да»/готовность — не вопрос
+    assert _looks_like_free_question("да") is False
+    assert _is_ready_to_quiz("да") is True
+    # явная команда уходит в агента
+    assert _looks_like_agent_command("сделай глубокий разбор темы") is True

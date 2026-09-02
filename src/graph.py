@@ -184,6 +184,79 @@ def _build_web_knowledge_graph(sources: List[Dict[str, Any]], topic: str) -> Dic
     return {"nodes": nodes, "edges": edges}
 
 
+def _lesson_topic_kg(st: TutorState, topic: str) -> Dict[str, Any]:
+    """Минимальный граф темы из урока (ключевые понятия).
+
+    Режим «урок» по RAG/web-источникам (без полнотекстового учебника) не заполняет
+    knowledge_graph — панель «Граф знаний» остаётся пустой. Строим узлы «тема →
+    ключевые понятия урока» (part_of), значения берём из Lesson.key_terms.
+    """
+    nodes: List[Dict[str, Any]] = []
+    edges: List[Dict[str, Any]] = []
+    topic_title = (topic or st.topic or st.subject or "тема").strip()
+    topic_id = f"topic_{topic_title}"
+    nodes.append({"id": topic_id, "title": topic_title, "label": topic_title, "type": "topic"})
+    seen: set = set()
+    for t in (st.lesson_key_terms or []):
+        if isinstance(t, dict):
+            term = (t.get("term") or "").strip()
+            definition = (t.get("definition") or "").strip()
+        else:
+            term = str(t or "").strip()
+            definition = ""
+        if not term:
+            continue
+        key = term.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        node: Dict[str, Any] = {"id": f"term_{len(nodes)}", "title": term,
+                                "label": term, "type": "concept"}
+        if definition:
+            node["definition"] = definition
+        nodes.append(node)
+        edges.append({"source": topic_id, "target": node["id"],
+                      "label": "входит в тему", "type": "part_of"})
+    if len(nodes) == 1:
+        return {"nodes": [], "edges": []}
+    return {"nodes": nodes, "edges": edges}
+
+
+def _emit_graph_ready(deps: GraphDeps, st: TutorState) -> None:
+    """WS-событие graph.ready, если в состоянии есть граф (обновляет панель на фронте)."""
+    kg = st.knowledge_graph or {}
+    nodes = kg.get("nodes")
+    if not nodes:
+        return
+    try:
+        _emit(deps, "graph.ready", nodes=len(nodes), edges=len(kg.get("edges", [])))
+    except Exception as exc:
+        logger.warning("_emit_graph_ready: %s", exc)
+
+
+def _ensure_lesson_knowledge_graph(st: TutorState, deps: GraphDeps, topic: str) -> None:
+    """Граф знаний для показанного урока, если «настоящего» ещё нет.
+
+    Приоритет: уже построенный граф (учебник/веб) → ключевые понятия урока →
+    источники (topic+web_source). Заполняет st.knowledge_graph и эмитит graph.ready,
+    чтобы фронтенд-панель обновилась; граф сохраняется в кэш урока (см. save_knowledge_graph).
+    """
+    kg = st.knowledge_graph or {}
+    if kg.get("nodes"):
+        return  # настоящий граф уже есть — не трогаем
+    data: Optional[Dict[str, Any]] = None
+    # Ключевые понятия урока дают осмысленную панель «тема → понятия»;
+    # если их нет — падаем к web-источникам (topic + web_source).
+    data = _lesson_topic_kg(st, topic)
+    if not data or not data.get("nodes"):
+        if st.sources:
+            data = _build_web_knowledge_graph(st.sources, topic)
+    if not data or not data.get("nodes"):
+        return
+    st.knowledge_graph = data
+    _emit_graph_ready(deps, st)
+
+
 def _save_lesson_to_cache(st: TutorState, deps: GraphDeps, lesson, topic: str) -> None:
     """Сохраняет сгенерированный урок в кэш для повторного прохождения."""
     if not topic or lesson is None:
@@ -227,10 +300,16 @@ def _apply_cached_lesson(st: TutorState, deps: GraphDeps, cached, topic: str) ->
     if kg_data:
         st.knowledge_graph = kg_data
         logger.info("restore_kg from cache: %d nodes", len(kg_data.get("nodes", [])))
+        # Фронтенд-панель «Граф знаний» обновляется по событию graph.ready —
+        # при ресторе из кэша событие не приходило, панель оставалась пустой.
+        _emit_graph_ready(deps, st)
     else:
         # Графа в кэше нет — НЕ строим «фейковую» онтологию из 1-2 источников.
         # Онтология тем/понятий строится моделью по собранному материалу отдельным шагом.
         logger.info("restore_kg: кэш-граф для темы «%s» отсутствует — граф остаётся прежним", topic)
+        # …но хотя бы минимальный граф темы из ключевых понятий урока строим:
+        # иначе панель «Граф знаний» пуста после изученного урока.
+        _ensure_lesson_knowledge_graph(st, deps, topic)
     _emit(deps, "tutor.lesson", **st.lesson_payload(topic))
     # Действия после кэш-урока предлагает баннер на фронте («Перейти к квизу» /
     # «Дополнить материал» / «Начать с нуля»), поэтому дублирующий вопрос в чат
@@ -883,6 +962,8 @@ def agent_tutor_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
                 logger.info("agent_tutor_node: восстановлен graph из cache %d nodes", len(kg_data.get("nodes", [])))
             else:
                 logger.warning("agent_tutor_node: нет сохранённого графа для «%s»", topic)
+                # Минимальный граф темы из ключевых понятий урока — панель не пустая.
+                _ensure_lesson_knowledge_graph(st, deps, topic)
             _emit(deps, "tutor.lesson", **st.lesson_payload(topic))
             _emit(deps, "system",
                   message="Показываю урок из прошлого занятия. Хочешь дополнить материал?",
@@ -1038,8 +1119,21 @@ def agent_tutor_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
             return st.model_dump()
 
         if not _is_ready_to_quiz(user_text):
-            # Вопрос по теме / «подробнее» / «объясни» / иная просьба — решает агент
-            # (rag_search / deep_dive / generate_lesson / текстовый ответ).
+            from .agent_loop import (_answer_free_question, _looks_like_agent_command,
+                                     _looks_like_free_question)
+            # Свободный ВОПРОС по теме («что такое…?», «почему…») отвечаем ДЕТЕРМИНИРОВАННО
+            # (RAG-контекст → короткий текст), НЕ через ReAct-агента: слабая модель на
+            # вопрос после урока «завершает занятие» («Урок пройден! …тест?») вместо ответа.
+            if _looks_like_free_question(user_text) and not _looks_like_agent_command(user_text):
+                _emit(deps, "source.progress", stage="tutor", url="", status="generating",
+                      message=f"Отвечаю на вопрос: «{user_text}»…")
+                answer = _answer_free_question(st, deps, user_text)
+                st.agent_message = answer
+                st.agent_question = None
+                _emit(deps, "system", message=answer, kind="agent.message")
+                return st.model_dump()
+            # Команды («глубокий разбор», «покажи урок», «расскажи подробнее» и т.п.) — агент
+            # (deep_dive / generate_lesson / rag_search / текстовый ответ).
             _emit(deps, "source.progress", stage="tutor", url="", status="generating",
                   message=f"Обрабатываю запрос: «{user_text}»…")
             st, final_text = run_tutor_agent(st, deps)
@@ -1694,9 +1788,19 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
                   kind="agent.message")
             return st.model_dump()
         else:
-            # Свободный запрос (вопрос по теме, «подробнее», «объясни», иная просьба) —
-            # интерпретирует АГЕНТ (модель), а не regex. Офлайн-фолбэк — RAG-ответ.
-            from .agent_loop import agent_available, run_tutor_agent
+            # Свободный запрос (вопрос по теме, «подробнее», «объясни», иная просьба).
+            from .agent_loop import (agent_available, run_tutor_agent,
+                                     _answer_free_question, _looks_like_agent_command,
+                                     _looks_like_free_question)
+            # ВОПРОС по теме отвечаем детерминированно (RAG+текст), минуя ReAct-агента:
+            # модель на вопрос после урока склонна «завершить занятие» и предложить тест.
+            if _looks_like_free_question(raw) and not _looks_like_agent_command(raw):
+                _emit(deps, "source.progress", stage="tutor", url="", status="generating",
+                      message=f"Отвечаю на вопрос: «{raw}»…")
+                st.agent_message = _answer_free_question(st, deps, raw)
+                st.agent_question = None
+                _emit(deps, "system", message=st.agent_message, kind="agent.message")
+                return st.model_dump()
             if agent_available(deps):
                 _emit(deps, "source.progress", stage="tutor", url="", status="generating",
                       message=f"Обрабатываю запрос: «{raw}»…")
@@ -1826,6 +1930,9 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
             return st.model_dump()
         logger.info("content_node: урок по «%s» прошёл гейт качества (reason=%s)", topic, quality)
         st.set_lesson(lesson)
+        # Граф знаний темы из понятий урока (если «настоящего» графа ещё нет) —
+        # до сохранения в кэш, чтобы при reuse панель графа была непустой.
+        _ensure_lesson_knowledge_graph(st, deps, topic)
         st.agent_message = "Урок по теме готов. Можно задать вопрос или перейти к квизу."
         # Кэш урока (3.1/7.2): сохраняем для повторного прохождения темы.
         _save_lesson_to_cache(st, deps, lesson, topic)
