@@ -43,7 +43,6 @@ def _log_agent_decision(decision: str, step: int, step_logger: Any = None) -> No
         try:
             step_logger.log_step(
                 agent_action="agent.decision", status="completed",
-                duration=step,
                 extra={"decision": decision, "step": step},
             )
         except Exception:
