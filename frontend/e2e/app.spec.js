@@ -1,24 +1,33 @@
 import { test, expect } from '@playwright/test'
 
 // E2E: реальный стек React (Vite) → proxy → FastAPI → граф.
-// Проходим intake-фазу (без сети/LLM — только чек-лист), чтобы тест был быстрым и
-// детерминированным; вопросы квиза требуют живых LLM/поиска — отдельный сценарий.
+// Проходим intake-фазу через карточку знакомства (детерминированно, без LLM),
+// чтобы тест был быстрым; вопросы квиза требуют живых LLM/поиска — отдельный сценарий.
 
-test('сессия создаётся и приходит первый вопрос чек-листа', async ({ page }) => {
+async function fillIntakeCard(page) {
+  // Карточка знакомства: поля формируются детерминированно (build_intake_card)
+  await expect(page.getByText('Заполни карточку').first()).toBeVisible({ timeout: 30_000 })
+  await page.getByLabel(/Как тебя зовут/).fill('Тест Ученик')
+  await page.getByLabel(/Ты школьник или студент/).selectOption('student')
+  await page.getByLabel(/Предмет/).fill('география')
+  await page.getByLabel(/Тема/).fill('Атмосфера')
+  await page.getByLabel(/Есть учебник по теме/).selectOption('false')
+  await page.getByLabel(/Что делаем/).selectOption('quiz')
+  await page.getByRole('button', { name: 'Начать занятие' }).click()
+}
+
+test('сессия создаётся и приходит карточка знакомства', async ({ page }) => {
   await page.goto('/')
 
-  // вопрос «Кто ты?» показывается в ленте и в карточке IntakeWizard — берём первый
-  const question = page.getByText('Кто ты?').first()
-  await expect(question).toBeVisible({ timeout: 30_000 })
-  expect(await page.getByPlaceholder('Ваш ответ…').isEnabled()).toBe(true)
+  // карточка знакомства показывается (форма вместо пошаговых вопросов)
+  await expect(page.getByText('Заполни карточку').first()).toBeVisible({ timeout: 30_000 })
+  await expect(page.getByText('Как тебя зовут').first()).toBeVisible()
 })
 
-test('ответ в чек-лист переводит к следующему вопросу', async ({ page }) => {
+test('заполнение карточки переводит к плану занятия', async ({ page }) => {
   await page.goto('/')
-  await expect(page.getByText('Кто ты?').first()).toBeVisible({ timeout: 30_000 })
+  await fillIntakeCard(page)
 
-  await page.getByPlaceholder('Ваш ответ…').fill('студент')
-  await page.getByRole('button', { name: 'Отправить' }).click()
-
-  await expect(page.getByText('Какой предмет изучаем?').first()).toBeVisible({ timeout: 30_000 })
+  // после отправки карточки интэйк завершён — план/режим принят в чате
+  await expect(page.getByText('Карточка знакомства заполнена').first()).toBeVisible({ timeout: 30_000 })
 })

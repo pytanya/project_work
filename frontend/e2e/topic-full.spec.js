@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test'
+import { fillIntakeCard } from './intake-helpers'
 
 const OPK_PDF = 'C:\\otus\\project_work\\data\\uploads\\fcde261d.pdf'
 
@@ -16,42 +17,37 @@ test.describe('Full Flow - Topic Selection (500 error fix)', () => {
 
     await page.goto('/')
 
-    // 1) Первый вопрос чек-листа
-    await expect(page.getByText('Кто ты?').first()).toBeVisible({ timeout: 30000 })
+    // 1) Карточка знакомства
+    await fillIntakeCard(page, {
+      name: 'Ученик Четыре', learnerType: 'schoolchild', grade: '4',
+      subject: 'основы православной культуры', topic: 'Культура и религия', hasTextbook: 'true', mode: 'quiz',
+    })
 
-    // 2) Intake
-    const answers = ['ученик 4 класса', '4', 'основы православной культуры', 'Культура и религия', 'да', 'квиз']
-    for (const a of answers) {
-      await page.getByPlaceholder('Ваш ответ…').fill(a)
-      await page.getByRole('button', { name: 'Отправить' }).click()
-      await expect(page.locator('.bubble.user', { hasText: a }).last()).toBeVisible({ timeout: 15000 })
-    }
+    // 2) Агент просит загрузить файл
+    await expect(page.getByText(/Загрузите, пожалуйста, файл учебника|Загрузите файл/).first()).toBeVisible({ timeout: 30_000 })
 
-    // 3) Агент просит загрузить файл
-    await expect(page.getByText(/Загрузите, пожалуйста, файл учебника/).first()).toBeVisible({ timeout: 30000 })
-
-    // 4) Загружаем учебник
+    // 3) Загружаем учебник
     await page.setInputFiles('input[type="file"]', OPK_PDF)
 
-    // 5) Ждём индексацию
+    // 4) Ждём индексацию
     await expect(page.getByText(/проиндексирован/).first()).toBeVisible({ timeout: 600_000 })
 
-    // 6) Ждём выбор темы (гейт)
-    await expect(page.getByText(/Какую тему изучаем/).first()).toBeVisible({ timeout: 60000 })
+    // 5) Конкретная тема в intake → авто-выбор, квиз стартует сразу.
+    //    Если гейт «Какую тему изучаем» всё же появился — выбираем первый чип.
+    const gate = page.getByText(/Какую тему изучаем/).first()
+    const quiz = page.locator('.card.quiz').first()
+    try {
+      await gate.waitFor({ state: 'visible', timeout: 30_000 })
+      await page.locator('.topic-chip').first().click()
+      await expect(page.getByRole('button', { name: /Изучить тему/ })).toBeVisible({ timeout: 15_000 })
+      await page.getByRole('button', { name: /Изучить тему/ }).click()
+    } catch { /* гейта нет — тема выбрана автоматически */ }
 
-    // 7) Кликаем первую тему
-    await expect(page.locator('.topic-chip').first()).toBeVisible({ timeout: 30000 })
-    const topicTitle = await page.locator('.topic-chip').first().textContent()
-    console.log('Clicking topic:', topicTitle)
-    await page.locator('.topic-chip').first().click()
-
-    // 8) Ждём quiz card (или сообщение "Готовимся по теме")
-    await page.waitForTimeout(3000)
-    const quizCard = page.locator('.card.quiz')
-    await expect(quizCard.first()).toBeVisible({ timeout: 90000 })
+    // 6) Ждём quiz card
+    await expect(quiz).toBeVisible({ timeout: 90_000 })
     console.log('Quiz card appeared!')
 
-    // 9) Нет 500 ошибок
+    // 7) Нет 500 ошибок
     expect(networkErrors).toEqual([])
   })
 })

@@ -423,7 +423,10 @@ class TestGraphAgentTutor:
                 question_id="q1", question="Что такое атмосфера?", options=None,
                 answer_type="open", difficulty="medium", topic="Атмосфера",
             ),
-            pending_answer="газ", answered_count=1, correct_count=0,
+            # ответ длинный — проходит пре-чек длины (короткое «газ» отклоняется
+            # rule-based и уходит в подсказку, а не финализируется)
+            pending_answer="Атмосфера — это воздушная газовая оболочка Земли",
+            answered_count=1, correct_count=0,
             asked_questions=["Что такое атмосфера?"],
         )
         res = agent_tutor_node(state, deps)

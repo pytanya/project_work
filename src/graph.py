@@ -115,20 +115,38 @@ def _load_cached_lesson(st: TutorState, deps: GraphDeps, topic: str):
     """Кэшированный урок из прошлого занятия по (student_id, subject, topic, grade).
 
     Возвращает Lesson или None. Кэш активен только в режиме «урок» и пока урок
-    текущей сессии ещё не показан.
+    текущей сессии ещё не показан. Кэшированный урок проходит гейт качества —
+    мусор из прошлых генераций не показывается (и удаляется из кэша).
     """
     if st.mode != "lesson" or st.lesson_done or not topic:
         return None
     from .lesson_cache import load_lesson
+    from .tutor import lesson_quality_ok
 
     try:
-        return load_lesson(
+        lesson = load_lesson(
             deps.settings.SOURCES_CACHE_DIR,
             st.student_id or "", st.subject or "", topic, st.grade or "",
         )
     except Exception as exc:
         logger.warning("load_lesson: %s", exc)
         return None
+    if lesson is None:
+        return None
+    ok, reason = lesson_quality_ok(lesson)
+    if not ok:
+        logger.warning("Кэшированный урок по «%s» отклонён гейтом качества (%s) — удаляю из кэша", topic, reason)
+        from .lesson_cache import _cache_key, _lessons_dir
+
+        try:
+            key = _cache_key(st.student_id or "", st.subject or "", topic, st.grade or "")
+            path = _lessons_dir(deps.settings.SOURCES_CACHE_DIR) / f"lesson_{key}.json"
+            if path.exists():
+                path.unlink()
+        except Exception as exc:
+            logger.warning("Не удалось удалить мусорный кэш урока «%s»: %s", topic, exc)
+        return None
+    return lesson
 
 
 def _build_web_knowledge_graph(sources: List[Dict[str, Any]], topic: str) -> Dict[str, Any]:
@@ -210,13 +228,18 @@ def _apply_cached_lesson(st: TutorState, deps: GraphDeps, cached, topic: str) ->
         st.knowledge_graph = kg_data
         logger.info("restore_kg from cache: %d nodes", len(kg_data.get("nodes", [])))
     else:
-        logger.warning("restore_kg: нет сохранённого графа для темы «%s»", topic)
+        # Графа в кэше нет — НЕ строим «фейковую» онтологию из 1-2 источников.
+        # Онтология тем/понятий строится моделью по собранному материалу отдельным шагом.
+        logger.info("restore_kg: кэш-граф для темы «%s» отсутствует — граф остаётся прежним", topic)
     _emit(deps, "tutor.lesson", **st.lesson_payload(topic))
+    # Действия после кэш-урока предлагает баннер на фронте («Перейти к квизу» /
+    # «Дополнить материал» / «Начать с нуля»), поэтому дублирующий вопрос в чат
+    # не задаём — он конфликтовал с баннером и сбивал пользователя.
+    st.agent_question = None
     _emit(deps, "system",
-          message="Показываю урок из прошлого занятия. Хочешь дополнить материал?",
+          message="Показываю урок из прошлого занятия. Напишите «да», чтобы перейти к квизу; задайте вопрос по теме; "
+                  "«дополнить материал» — найти и добавить новые материалы; «начать с нуля» — собрать всё заново.",
           kind="lesson.cached")
-    st.agent_question = "Готов(а) перейти к квизу? (да / нет)"
-    _emit(deps, "intake.question", question=st.agent_question, missing_fields=["lesson_confirm"])
     return st.model_dump()
 
 
@@ -779,13 +802,33 @@ def deterministic_tutor_step(state: TutorState, deps: GraphDeps) -> Dict[str, An
     """Детерминированный цикл квиза (фолбэк agent_tutor_node при недоступности агента).
 
     Воспроизводит поведение route_tutor: первый вопрос / оценка+следующий. Сводка —
-    отдельным узлом NODE_SUMMARY через route_after_agent_tutor.
+    отдельным узлом NODE_SUMMARY через route_after_agent_tutor. Учитывает
+    subtask_queue (декомпозиция): активный пошаговый разбор ведём через subtask_node,
+    иначе исходный вопрос теряется в оценке (test_decomposition_walks_subtasks_then_reasks).
     """
     st = state.model_copy(deep=True)
     if st.quiz_complete or st.session_status in ("completed", "failed"):
         return st.model_dump()
+    if st.subtask_queue is not None:
+        return subtask_node(st, deps)
     if st.current_question is None:
         return generate_question_node(st, deps)
+    # Запрос подсказки (оффлайн-фолбэк, как в agent_tutor_node)
+    if st.current_question and st.pending_answer and _is_hint_request(st.pending_answer):
+        from .scaffold import hint_for as _hint_for
+
+        _hcard = st.current_question
+        st.pending_answer = None
+        _level = min((st.hint_level or 0) + 1, 2)
+        _chunks = _rag_chunks(deps.store, _hcard.question, st, k=3)
+        _ctx = [_clean_text_lines(c.chunk.text) for c in _chunks]
+        _hint = _hint_for(_hcard.question, ", ".join(st.current_answers or []),
+                          _ctx or ["Нет контекста по теме."], _level)
+        st.hint_level = _level
+        st.retry_question_id = _hcard.question_id
+        _emit(deps, "quiz.hint", hint=_hint, level=_level, attempts_left=0,
+              question_id=_hcard.question_id)
+        return st.model_dump()
     if st.pending_answer is not None:
         st = TutorState.model_validate(evaluate_answer_node(st, deps))
         if st.quiz_complete or st.session_status == "completed":
@@ -801,6 +844,9 @@ def agent_tutor_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     
     Авто-урок: если mode="lesson" и урок ещё не показан, генерируем его автоматически
     перед запуском агента (аналогично content_node, но без стриминга on_token).
+    
+    Граф знаний: если mode="quiz" и граф ещё не сформирован — формируем его здесь,
+    чтобы он был доступен для вопросов и оценки.
     """
     from .agent_loop import agent_available, run_tutor_agent
 
@@ -892,15 +938,25 @@ def agent_tutor_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
             _timeout_sec = getattr(graph_settings, "LESSON_GENERATION_TIMEOUT_SEC", 120)
 
             def _do_generate():
-                return tutor_mod.generate_lesson(
+                return tutor_mod.build_quality_lesson(
                     topic, context, st, llm_call=deps.tutor_llm, on_token=counting_on_token, sources=sources
                 )
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
-                lesson = _pool.submit(_do_generate).result(timeout=_timeout_sec)
+                lesson, _quality = _pool.submit(_do_generate).result(timeout=_timeout_sec)
 
-            # Quality gate удалён: новый стриминговый pipeline генерирует чистый текст,
-            # fallback на контекст встроен в generate_lesson — мусор не проходит.
+            # Quality gate: мусорный урок (мета-комментарий вместо темы) не показываем
+            # и не кэшируем — сообщаем о недостатке материала.
+            if lesson is None:
+                st.agent_message = (
+                    f"По теме «{topic}» не удалось собрать содержательный урок из найденных "
+                    "материалов. Загрузите учебник (PDF/DOCX) или нажмите «Найти учебник»."
+                )
+                st.agent_question = st.agent_message
+                _emit(deps, "source.progress", stage="content", url="", status="empty",
+                      message=st.agent_message)
+                _emit(deps, "system", message=st.agent_message, kind="content.empty")
+                return st.model_dump()
             st.set_lesson(lesson)
             st.lesson_sources = _extract_lesson_sources(sources, st.sources)
             st.lesson_done = True
@@ -942,53 +998,15 @@ def agent_tutor_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
 
     # Свободный вопрос ПОСЛЕ урока (квиз ещё не начат): отвечаем по RAG, квиз не запускаем.
     # Слабая модель на вопрос ученика иначе «пересказывает урок» или сразу зовёт generate_quiz.
-    from .agent_loop import _answer_free_question, _is_not_ready, _is_ready_to_quiz, _looks_like_agent_command
+    from .agent_loop import _is_not_ready, _is_ready_to_quiz
 
     prev_qid = st.current_question.question_id if st.current_question else None
     prev_lesson = st.lesson_text
+    user_text = st.pending_answer if st.pending_answer else None
 
-    if st.lesson_done and st.current_question is None and st.answered_count == 0 \
-            and st.pending_answer:
-        user_text = st.pending_answer
-        st.pending_answer = None
-
-        # Команда агента (глубокий разбор, показать урок, объяснить тему) → ReAct-цикл
-        if _looks_like_agent_command(user_text):
-            _emit(deps, "source.progress", stage="tutor", url="", status="generating",
-                  message=f"Обрабатываю запрос: «{user_text}»…")
-            st, final_text = run_tutor_agent(st, deps)
-            # Обработка результатов: урок/разбор сгенерирован → обновляем lesson_text
-            if st.lesson_text and st.lesson_text != prev_lesson:
-                _emit(deps, "tutor.lesson", **st.lesson_payload(st.topic or st.subject or "тема"))
-                _emit(deps, "system", message="Готово. Можно задать вопрос или перейти к квизу.",
-                      kind="lesson.ready")
-            # Если агент сгенерировал вопрос → показываем квиз
-            if st.current_question and st.current_question.question_id != prev_qid:
-                card = st.current_question
-                _emit(deps, "quiz.card", question_id=card.question_id, question=card.question,
-                      options=card.options, answer_type=card.answer_type, difficulty=card.difficulty,
-                      topic=card.topic, num_questions=st.num_questions,
-                      question_num=st.answered_count + 1)
-            return st.model_dump()
-
-        if not _is_ready_to_quiz(user_text):
-            if _is_not_ready(user_text):
-                st.agent_message = (
-                    "Хорошо. Изучите урок ещё раз — если что-то непонятно, спросите, "
-                    "и я объясню. Когда будете готовы — напишите «да»."
-                )
-            else:
-                st.agent_message = _answer_free_question(st, deps, user_text)
-            _emit(deps, "system", message=st.agent_message, kind="agent.message")
-            return st.model_dump()
-
-    # Готов к квизу: запускаем генерацию первого вопроса напрямую (без агента).
-    # Агент не знает как обработать "да/готов/начинаем" — он ждёт ответ на активный вопрос.
-    if st.lesson_done and st.current_question is None and st.answered_count == 0 \
-            and st.pending_answer and _is_ready_to_quiz(st.pending_answer):
-        st.pending_answer = None
-        st.lesson_confirmed = True
-        _emit(deps, "system", message="Отлично! Начинаем квиз.", kind="lesson.done")
+    # Если mode="quiz" и квиз ещё не начат — запускаем генерацию первого вопроса напрямую
+    # (только если нет pending_answer="да", иначе обрабатываем его ниже)
+    if st.mode == "quiz" and st.current_question is None and st.answered_count == 0 and not user_text:
         _emit(deps, "source.progress", stage="quiz", url="", status="generating",
               message=f"Генерирую первый вопрос по теме «{st.topic or st.subject or 'тема'}»…")
         st = TutorState.model_validate(generate_question_node(st, deps))
@@ -998,6 +1016,111 @@ def agent_tutor_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
                   options=card.options, answer_type=card.answer_type, difficulty=card.difficulty,
                   topic=card.topic, num_questions=st.num_questions,
                   question_num=st.answered_count + 1)
+        return st.model_dump()
+
+    # После урока (квиз ещё не начат): свободные сообщения интерпретирует МОДЕЛЬ/АГЕНТ,
+    # а не цепочка regex-правил. Исключения:
+    #   - явный отказ («нет», «не готов») → короткий ответ без запуска генераций;
+    #   - подтверждение готовности к квизу («да», «квиз», «тест») → обрабатывается ниже
+    #     быстрым детерминированным стартом первого вопроса.
+    if st.lesson_done and st.current_question is None and st.answered_count == 0 \
+            and st.pending_answer:
+        user_text = st.pending_answer
+        st.pending_answer = None
+
+        if _is_not_ready(user_text) and not _is_ready_to_quiz(user_text):
+            st.agent_message = (
+                "Хорошо. Изучите урок ещё раз — если что-то непонятно, спросите, "
+                "и я объясню. Когда будете готовы — напишите «да»."
+            )
+            st.agent_question = None
+            _emit(deps, "system", message=st.agent_message, kind="agent.message")
+            return st.model_dump()
+
+        if not _is_ready_to_quiz(user_text):
+            # Вопрос по теме / «подробнее» / «объясни» / иная просьба — решает агент
+            # (rag_search / deep_dive / generate_lesson / текстовый ответ).
+            _emit(deps, "source.progress", stage="tutor", url="", status="generating",
+                  message=f"Обрабатываю запрос: «{user_text}»…")
+            st, final_text = run_tutor_agent(st, deps)
+            # Урок/разбор сгенерирован агентом → показываем
+            if st.lesson_text and st.lesson_text != prev_lesson:
+                _emit(deps, "tutor.lesson", **st.lesson_payload(st.topic or st.subject or "тема"))
+                _emit(deps, "system", message="Готово. Можно задать вопрос или перейти к квизу.",
+                      kind="lesson.ready")
+            # Вопрос создан агентом (он сам решил начать квиз) → карточка
+            if st.current_question and st.current_question.question_id != prev_qid:
+                card = st.current_question
+                st.lesson_confirmed = True
+                st.mode = "quiz"
+                _emit(deps, "system", message="Отлично! Начинаем квиз.", kind="lesson.done")
+                _emit(deps, "quiz.card", question_id=card.question_id, question=card.question,
+                      options=card.options, answer_type=card.answer_type, difficulty=card.difficulty,
+                      topic=card.topic, num_questions=st.num_questions,
+                      question_num=st.answered_count + 1)
+            st.agent_question = None
+            if final_text and not st.current_question and not st.quiz_complete:
+                _emit(deps, "system", message=final_text, kind="agent.message")
+            return st.model_dump()
+
+    # Готов к квизу: запускаем генерацию первого вопроса напрямую (без агента).
+    # Агент не знает как обработать "да/готов/начинаем" — он ждёт ответ на активный вопрос.
+    if st.lesson_done and st.current_question is None and st.answered_count == 0 \
+            and user_text and _is_ready_to_quiz(user_text):
+        st.lesson_confirmed = True
+        st.mode = "quiz"  # урок пройден — режим сессии становится «квиз»
+        st.agent_question = None  # Сбрасываем вопрос "Готов(а) перейти к квизу?"
+        # Сбрасываем флаги повторного построения урока
+        st.lesson_rebuild = False
+        st.force_source_refresh = False
+        st.sources = []
+        st.collection_id = None
+        st.source_status = None
+        _emit(deps, "system", message="Отлично! Начинаем квиз.", kind="lesson.done")
+        
+        # Если граф знаний ещё не построен — восстанавливаем из кэша урока (если есть).
+        if not st.knowledge_graph or (st.knowledge_graph and len(st.knowledge_graph.get("nodes", [])) < 5):
+            topic = st.topic or st.subject or "общая тема"
+            from .lesson_cache import load_knowledge_graph as _load_kg
+            kg_data = _load_kg(
+                deps.settings.SOURCES_CACHE_DIR,
+                st.student_id or "", st.subject or "", topic, st.grade or "",
+            )
+            if kg_data and kg_data.get("nodes"):
+                st.knowledge_graph = kg_data
+                logger.info("quiz: использован граф из кэша урока (%d узлов)", len(kg_data.get("nodes", [])))
+
+        _emit(deps, "source.progress", stage="quiz", url="", status="generating",
+              message=f"Генерирую первый вопрос по теме «{st.topic or st.subject or 'тема'}»…")
+        st = TutorState.model_validate(generate_question_node(st, deps))
+        if st.current_question:
+            card = st.current_question
+            _emit(deps, "quiz.card", question_id=card.question_id, question=card.question,
+                  options=card.options, answer_type=card.answer_type, difficulty=card.difficulty,
+                  topic=card.topic, num_questions=st.num_questions,
+                  question_num=st.answered_count + 1)
+        return st.model_dump()
+
+    # Запрос подсказки (кнопка «💡 Подсказка» / сообщение «подсказка»): даём подсказку
+    # по ТЕКУЩЕМУ вопросу — НЕ оцениваем как ответ и НЕ генерируем новый вопрос.
+    if st.current_question and st.pending_answer and _is_hint_request(st.pending_answer):
+        from .scaffold import hint_for as _hint_for
+
+        hcard = st.current_question
+        st.pending_answer = None
+        level = min((st.hint_level or 0) + 1, 2)
+        h_chunks = _rag_chunks(deps.store, hcard.question, st, k=3)
+        h_context = [_clean_text_lines(c.chunk.text) for c in h_chunks]
+        hint = _hint_for(
+            hcard.question,
+            ", ".join(st.current_answers or []),
+            h_context or ["Нет контекста по теме."],
+            level,
+        )
+        st.hint_level = level
+        st.retry_question_id = hcard.question_id
+        _emit(deps, "quiz.hint", hint=hint, level=level, attempts_left=0,
+              question_id=hcard.question_id)
         return st.model_dump()
 
     # Быстрая оценка ответа (если есть активный вопрос и ответ ученика):
@@ -1015,11 +1138,8 @@ def agent_tutor_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         _emit(deps, "source.progress", stage="tutor", url="", status="evaluating",
               message="Оцениваю ответ…")
         st, message, _j, _e = evaluate_and_record(st, deps, card, answer, emit=_local_emit)
-        # Эмитим фидбек сразу (не ждём генерации следующего вопроса)
-        _emit(deps, "tutor.explanation" if not getattr(st, "quiz_complete", False) else "system",
-              message=message,
-              correct_count=st.correct_count,
-              answered_count=st.answered_count)
+        # evaluate_and_record уже эмитит tutor.explanation/system с message+citation —
+        # второй emit здесь не нужен (иначе фидбек дублируется в ленте).
         # Генерируем следующий вопрос (если квиз не завершён)
         if not st.quiz_complete and st.answered_count < (st.num_questions or 10):
             _emit(deps, "source.progress", stage="quiz", url="", status="generating",
@@ -1033,13 +1153,17 @@ def agent_tutor_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
                       question_num=st.answered_count + 1)
         return st.model_dump()
 
+    _had_pending = bool(st.pending_answer)  # был ли ответ ученика в этом ходе (для страховки ниже)
     _emit(deps, "source.progress", stage="tutor", url="", status="generating",
           message=f"Готовлю задание по теме «{st.topic or st.subject or 'тема'}»…")
     st, final_text = run_tutor_agent(st, deps)
 
     # СТРАХОВКА (баг #3): ответ оценён, но модель не вызвала generate_quiz —
     # новый вопрос не появился → генерируем детерминированно, чтобы квиз не завис.
-    if (st.current_question is None or st.current_question.question_id == prev_qid) \
+    # Срабатывает ТОЛЬКО если в ходе был ответ ученика (подсказка/свободный вопрос
+    # не должны заменять текущий вопрос новым).
+    if _had_pending \
+            and (st.current_question is None or st.current_question.question_id == prev_qid) \
             and not st.quiz_complete and st.answered_count < (st.num_questions or 10):
         logger.warning("agent_tutor_node: модель не сгенерировала следующий вопрос — детерминированный fallback")
         st = TutorState.model_validate(generate_question_node(st, deps))
@@ -1081,7 +1205,27 @@ def source_entry(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     return {}
 
 
+_HINT_WORDS = ("подсказк", "подскажи", "намек", "намекни", "hint")
+
+
+def _is_hint_request(answer: Optional[str]) -> bool:
+    """Запрос подсказки по текущему вопросу (кнопка «💡 Подсказка» / сообщение)."""
+    low = (answer or "").strip().lower()
+    return any(w in low for w in _HINT_WORDS)
+
+
 def route_source(state: TutorState) -> str:
+    # Ожидающий reuse-вопрос (reuse_pending) ведём в reuse_gate: там принимается
+    # решение «использовать материалы (да) / найти другие (нет)».
+    if state.reuse_pending:
+        return NODE_REUSE_GATE
+    # Активный вопрос квиза + любой ответ/подсказка ученика → сразу на тьютора,
+    # НЕ в источники/гейты. Повторный вход в reuse_gate/topic_gate заново эмитит
+    # system/source.progress (source.cached и т.п.) и в UI «сносит» карточку вопроса
+    # вместе с вариантами, а обычный ответ перехватывается reuse-вопросом вместо
+    # оценки (в логах: ответ → reuse_gate → find_textbook вместо evaluate_answer).
+    if state.current_question is not None and state.pending_answer is not None:
+        return NODE_TUTOR_NEXT
     if state.source_status == "failed":
         return NODE_SOURCE_FAILED
     if state.sources or state.collection_id or state.source_status == "ready":
@@ -1477,6 +1621,9 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
     """
     st = state.model_copy(deep=True)
     mode = st.mode or "lesson"
+    # В этом проходе урок пересобирается после «Дополнить/Начать с нуля» —
+    # кэш прошлого урока НЕ подставляем, нужен свежий контент.
+    _skip_cache_this_pass = False
     if st.lesson_confirmed:
         return st.model_dump()
 
@@ -1488,8 +1635,15 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         st.pending_answer = None
         if _is_ready_to_quiz(raw):
             st.lesson_confirmed = True
+            st.mode = "quiz"  # урок пройден — дальше идёт квиз
             st.lesson_done = True
             st.agent_question = None
+            # Сбрасываем флаги повторного построения урока
+            st.lesson_rebuild = False
+            st.force_source_refresh = False
+            st.sources = []
+            st.collection_id = None
+            st.source_status = None
             _emit(deps, "system", message="Отлично! Начинаем квиз.", kind="lesson.done")
             return st.model_dump()
         # «Дополнить материал» / «Начать с нуля» (7.3): разводим команды.
@@ -1501,6 +1655,17 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         # sources очищены → route_after_content → NODE_FIND_TEXTBOOK).
         if "с нуля" in low or "заново" in low:
             st.clear_lesson()
+            # Забываем прошлый урок на диске, чтобы после сбора свежих источников
+            # кэш-урок не подставился снова и урок реально пересобрался заново.
+            try:
+                from .lesson_cache import _cache_key as _ck, _lessons_dir as _ld
+                key = _ck(st.student_id or "", st.subject or "", st.topic or "", st.grade or "")
+                p = _ld(deps.settings.SOURCES_CACHE_DIR) / f"lesson_{key}.json"
+                if p.exists():
+                    p.unlink()
+                    logger.info("content_node: кэш урока «%s» удалён (начать с нуля)", st.topic)
+            except Exception as exc:
+                logger.warning("content_node: не удалось удалить кэш урока: %s", exc)
             st.force_source_refresh = True
             st.sources = []
             st.collection_id = None
@@ -1520,25 +1685,52 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
                   kind="lesson.repeat")
             return st.model_dump()
         if _is_not_ready(raw):
-            # Явный отказ («нет», «не готов», «пока нет») → сбрасываем и перегенерируем
-            st.clear_lesson()
+            # «Нет» на «перейти к квизу?» / «дополнить материал?» — урок НЕ перегенерируем
+            # (иначе «нет» запускает «повторение с нуля» и урок бесконечно пересказывается).
+            # Оставляем показанный урок и предлагаем задать вопрос или перейти к квизу.
             st.agent_question = None
-            _emit(deps, "system", message="Повторяем материал по теме.", kind="lesson.repeat")
+            _emit(deps, "system",
+                  message="Хорошо. Урок остаётся. Можно задать вопрос по теме или сказать «да», чтобы перейти к квизу.",
+                  kind="agent.message")
+            return st.model_dump()
         else:
-            # Любой другой ответ (вопрос, просьба, короткая фраза) → отвечаем по RAG,
-            # НЕ сбрасываем урок (иначе урок пересказывается заново — баг).
+            # Свободный запрос (вопрос по теме, «подробнее», «объясни», иная просьба) —
+            # интерпретирует АГЕНТ (модель), а не regex. Офлайн-фолбэк — RAG-ответ.
+            from .agent_loop import agent_available, run_tutor_agent
+            if agent_available(deps):
+                _emit(deps, "source.progress", stage="tutor", url="", status="generating",
+                      message=f"Обрабатываю запрос: «{raw}»…")
+                st, final_text = run_tutor_agent(st, deps)
+                if st.current_question:
+                    # Агент решил начать квиз → карточка вопроса
+                    card = st.current_question
+                    st.lesson_confirmed = True
+                    st.mode = "quiz"
+                    st.lesson_done = True
+                    st.agent_question = None
+                    _emit(deps, "system", message="Отлично! Начинаем квиз.", kind="lesson.done")
+                    _emit(deps, "quiz.card", question_id=card.question_id, question=card.question,
+                          options=card.options, answer_type=card.answer_type, difficulty=card.difficulty,
+                          topic=card.topic, num_questions=st.num_questions,
+                          question_num=st.answered_count + 1)
+                else:
+                    st.agent_question = None
+                    _emit(deps, "system", message=final_text or st.agent_message or "Готово.",
+                          kind="agent.message")
+                return st.model_dump()
             st.agent_message = _answer_free_question(st, deps, raw)
             st.agent_question = None
             _emit(deps, "system", message=st.agent_message, kind="agent.message")
             return st.model_dump()
 
-    # «Дополнить материал»: после поиска новых источников (sources обновлены) —
-    # старый урок пересобирается заново из расширенного контекста, а не показывается как есть.
+    # «Дополнить материал» / «Начать с нуля»: после поиска свежих источников
+    # (sources обновлены) старый урок пересобирается заново из расширенного контекста.
     if st.lesson_rebuild and (st.sources or st.collection_id or st.source_status == "ready"):
-        logger.info("content_node: «дополнить» — пересборка урока после обновления источников")
+        logger.info("content_node: пересборка урока после обновления источников")
         st.lesson_rebuild = False
         st.clear_lesson()
-        st.lesson_done = False  # сбрасываем флаг — иначе _load_cached_lesson может вернуть старое и блокировать перегенерацию
+        st.lesson_done = False
+        _skip_cache_this_pass = True  # не подставлять кэш урока в этом проходе
 
     if st.lesson_text:
         # материал уже показан — ждём подтверждения
@@ -1558,9 +1750,9 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
 
     # Кэш урока (3.1/7.2): повторное прохождение темы — показываем урок из прошлого раза,
     # не генерируя заново (пользователь сам решит, дополнять ли материал).
-    # При пересборке ("дополнить материал") или явном запросе свежих источников ("с нуля")
-    # кэш не подставляем — нужен свежий контент.
-    if not st.lesson_rebuild and not getattr(st, "force_source_refresh", False):
+    # При пересборке ("дополнить материал"/"начать с нуля") кэш не подставляем — нужен свежий контент.
+    if not _skip_cache_this_pass and not st.lesson_rebuild \
+            and not getattr(st, "force_source_refresh", False):
         cached_lesson = _load_cached_lesson(st, deps, topic)
         if cached_lesson is not None:
             logger.info("content_node: кэшированный урок по теме «%s» — без генерации", topic)
@@ -1613,7 +1805,26 @@ def content_node(state: TutorState, deps: GraphDeps) -> Dict[str, Any]:
         if on_token is not None:
             _emit(deps, "source.progress", stage="content", url="", status="generating",
                   message=f"Генерирую урок по теме «{topic}»…")
-        lesson = tutor_mod.generate_lesson(topic, context, st, llm_call=deps.tutor_llm, on_token=on_token, sources=sources)
+        # Гейт качества (7.x): мусорный урок (мета-комментарий о источнике вместо
+        # темы) не показываем и не кэшируем. Фолбэк — детерминированная сборка из
+        # реальных предложений контекста; если и она не проходит — «нет материала».
+        lesson, quality = tutor_mod.build_quality_lesson(
+            topic, context, st, llm_call=deps.tutor_llm, on_token=on_token, sources=sources
+        )
+        if lesson is None:
+            st.lesson_done = False
+            st.agent_message = (
+                f"По теме «{topic}» не удалось собрать содержательный урок из найденных "
+                "материалов. Загрузите учебник (PDF/DOCX) или нажмите «Найти учебник» — "
+                "и я подготовлю материал."
+            )
+            st.agent_question = st.agent_message
+            _emit(deps, "source.progress", stage="content", url="", status="empty",
+                  message=st.agent_message)
+            _emit(deps, "system", message=st.agent_message, kind="content.empty")
+            _emit(deps, "intake.question", question=st.agent_question, missing_fields=["textbook_file"])
+            return st.model_dump()
+        logger.info("content_node: урок по «%s» прошёл гейт качества (reason=%s)", topic, quality)
         st.set_lesson(lesson)
         st.agent_message = "Урок по теме готов. Можно задать вопрос или перейти к квизу."
         # Кэш урока (3.1/7.2): сохраняем для повторного прохождения темы.
@@ -2483,6 +2694,7 @@ def build_graph(deps: Optional[GraphDeps] = None, checkpointer: Any = None) -> A
             NODE_FIND_TEXTBOOK: NODE_FIND_TEXTBOOK,
             NODE_WAIT_FOR_UPLOAD: NODE_WAIT_FOR_UPLOAD,
             NODE_REUSE_GATE: NODE_REUSE_GATE,
+            NODE_TUTOR_NEXT: NODE_TUTOR_NEXT,
         },
     )
     g.add_conditional_edges(

@@ -324,8 +324,8 @@ def judge_session(session_id: str, body: JudgeBody, store: SessionStore = Depend
     target = (body.target or "").strip().lower()
     if target not in ("lesson", "question"):
         raise HTTPException(422, "target должен быть 'lesson' или 'question'")
-    if session.step_active:
-        raise HTTPException(409, "Шаг уже выполняется — дождитесь завершения")
+    # NB: judge НЕ проверяет step_active — это read-only LLM-оценка,
+    # не мутирующая граф. Пользователь может оценить урок в любой момент.
 
     st = session.state
     def _run() -> Dict[str, Any]:

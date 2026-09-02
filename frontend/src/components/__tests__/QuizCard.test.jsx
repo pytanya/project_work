@@ -50,4 +50,36 @@ describe('QuizCard', () => {
     expect(fill).toBeInTheDocument()
     expect(fill.style.width).toBe('30%')
   })
+
+  it('рисует подсказки и шаги декомпозиции внутри карточки', () => {
+    const { container } = render(
+      <QuizCard
+        q={{
+          ...question,
+          hints: [{ text: 'Подумай про газовый состав.', level: 1 }],
+          steps: [{ text: 'Разбей задачу на части.', index: 1, total: 3 }],
+        }}
+        onSelect={() => {}}
+      />,
+    )
+    expect(screen.getByText('Подумай про газовый состав.')).toBeInTheDocument()
+    expect(container.querySelector('.quiz-hintbox')).toBeInTheDocument()
+    expect(screen.getByText('Шаг 1 из 3')).toBeInTheDocument()
+    expect(container.querySelector('.quiz-stepbox')).toBeInTheDocument()
+  })
+
+  it('кнопка подсказки: «Подсказка» → «Ещё подсказка», скрыта после 2 уровней/при шагах', () => {
+    const onHint = vi.fn()
+    const { rerender } = render(<QuizCard q={question} onSelect={() => {}} onHint={onHint} />)
+    expect(screen.getByRole('button', { name: '💡 Подсказка' })).toBeInTheDocument()
+
+    rerender(<QuizCard q={{ ...question, hints: [{ text: 'x', level: 1 }] }} onSelect={() => {}} onHint={onHint} />)
+    expect(screen.getByRole('button', { name: '💡 Ещё подсказка' })).toBeInTheDocument()
+
+    rerender(<QuizCard q={{ ...question, hints: [{ text: 'x', level: 1 }, { text: 'y', level: 2 }] }} onSelect={() => {}} onHint={onHint} />)
+    expect(screen.queryByRole('button', { name: /подсказка/i })).not.toBeInTheDocument()
+
+    rerender(<QuizCard q={{ ...question, steps: [{ text: 's', index: 1, total: 2 }] }} onSelect={() => {}} onHint={onHint} />)
+    expect(screen.queryByRole('button', { name: /подсказка/i })).not.toBeInTheDocument()
+  })
 })

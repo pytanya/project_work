@@ -32,6 +32,24 @@ MAX_AGENT_STEPS = 6
 MAX_AGENT_TIME_SEC = 150  # жёсткий бюджет на один ход агента (стоп-кран при зависании)
 
 
+def _log_agent_decision(decision: str, step: int, step_logger: Any = None) -> None:
+    """Наблюдаемость решения модели завершить агентный цикл (agent.decision).
+
+    Логирует, что модель решила остановиться вместо вызова инструмента.
+    step_logger — JsonlStepLogger (JSONL-трассировка запроса с request_id); None — пропуск.
+    """
+    logger.info("agent.decision action=%s step=%d", decision, step)
+    if step_logger is not None:
+        try:
+            step_logger.log_step(
+                agent_action="agent.decision", status="completed",
+                duration=step,
+                extra={"decision": decision, "step": step},
+            )
+        except Exception:
+            logger.warning("agent_loop: JSONL-запись решения не удалась", exc_info=True)
+
+
 def _log_tool_action(tool: str, args: Dict[str, Any], result: str, elapsed_ms: int,
                      step_logger: Any = None) -> None:
     """Наблюдаемость (roadmap #5.7, 10.2): action/reason/status по каждому инструменту.
@@ -238,6 +256,7 @@ def run_intake_agent(state: TutorState, deps: Any) -> Tuple[TutorState, bool]:
             break  # агентная LLM недоступна — детерминированный путь
         if not resp.tool_calls:
             final_text = (resp.content or "").strip() or None
+            _log_agent_decision("stop", _step, step_logger=getattr(deps, "step_logger", None))
             break
         tools_used = True
         for tc in resp.tool_calls:
@@ -295,8 +314,11 @@ TUTOR_AGENT_PROMPT = (
     "4. УГЛУБЛЕНИЕ: Если ученик просит подробнее — вызови deep_dive.\n"
     "5. ЗАВЕРШЕНИЕ: Если ученик хочет закончить или quiz_complete — вызови finish_session.\n"
     "6. ПЕРВЫЙ ВОПРОС: Квиз запускается ТОЛЬКО когда ученик явно подтвердил готовность "
-    "(«да», «готов», «начинаем»). Если активного вопроса нет и ученик задал вопрос или "
-    "просит объяснить — сначала ответь на вопрос (правило 3), а не начинай квиз.\n"
+    "(«да», «готов», «начинаем») ИЛИ прямо попросил квиз/тест/проверку («квиз», «тест», "
+    "«проверь меня», «давай квиз»). В этих случаях активного вопроса ещё нет — вызови "
+    "generate_quiz, чтобы задать ПЕРВЫЙ вопрос (не отвечай текстом). "
+    "Если активного вопроса нет и ученик задал вопрос по теме или просит объяснить — "
+    "сначала ответь на вопрос (правило 3), а не начинай квиз.\n"
     "7. ФИНАЛЬНЫЙ ТЕКСТ: Твой ответ ученику — короткий дружелюбный фидбек. "
     "Если оценил ответ — похвали или подбодри. Если дал новый вопрос — подведи.\n"
     "8. НИКОГДА не отвечай только текстом при наличии активного вопроса и ответа ученика. "
@@ -413,6 +435,17 @@ def _is_ready_to_quiz(text: Optional[str]) -> bool:
         if any(w in t for w in (
             "разбор", "вопрос", "объясн", "материал", "подробн", "глубок",
             "расскаж", "покаж", "покажи", "узна", "покажи урок"
+        )):
+            return False
+        return True
+    # Прямое требование квиза: «квиз», «сделай тест», «проверь знания» и т.п.
+    # (без «не», вопросов и команд на другое действие).
+    if "квиз" in t or "викторин" in t or "тест" in t or "проверь" in t or "проверка" in t:
+        if any(x in t for x in ("не хочу", "не буду", "не надо", "не хотел", "отмена", "стоп", "позже", "потом")):
+            return False
+        if any(w in t for w in (
+            "разбор", "объясн", "материал", "подробн", "глубок", "расскаж",
+            "покажи урок", "напомни", "повтори объясн"
         )):
             return False
         return True
@@ -590,6 +623,7 @@ def run_tutor_agent(state: TutorState, deps: Any) -> Tuple[TutorState, Optional[
             break
         if not resp.tool_calls:
             final_text = (resp.content or "").strip() or None
+            _log_agent_decision("stop", _step, step_logger=getattr(deps, "step_logger", None))
             logger.info("run_tutor_agent: модель дала финальный ответ (%d символов)", len(final_text or ""))
             break
         for tc in resp.tool_calls:

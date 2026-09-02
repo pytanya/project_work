@@ -173,7 +173,15 @@ def generate_lesson(args: Dict[str, Any], ctx: AgentToolContext) -> Tuple[str, T
     context = [r.chunk.text for r in results]
     sources = [r.chunk.metadata() for r in results]  # честный groundedness судьи
     # Прямой стриминг: markdown текст идёт мгновенно через on_token → WS event "token"
-    lesson = tutor_mod.generate_lesson(topic, context, st, llm_call=ctx.llm_call, on_token=ctx.on_token, sources=sources)
+    lesson, quality = tutor_mod.build_quality_lesson(
+        topic, context, st, llm_call=ctx.llm_call, on_token=ctx.on_token, sources=sources
+    )
+    if lesson is None:
+        return _err(
+            "По найденным материалам не удалось собрать содержательный урок (контент не раскрывает тему). "
+            "Соберите больше материалов (route_to_source) и повторите generate_lesson.",
+            required_action="route_to_source"
+        ), ctx.state
     st = st.model_copy(deep=True)
     st.set_lesson(lesson)
     st.lesson_done = True

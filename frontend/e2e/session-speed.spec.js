@@ -17,15 +17,12 @@ test.describe('EduTutor - Session Creation Speed', () => {
     const sessionTime = Date.now() - startTime
     console.log(`Session created in: ${sessionTime}ms`)
 
-    // Ждём первый вопрос чек-листа (может прийти через WS асинхронно)
-    await expect(page.locator('.card.intake, .empty-chat')).toBeVisible({ timeout: 30000 })
+    // Ждём первый шаг intake (карточка знакомства приходит через WS асинхронно)
+    await expect(page.locator('.card.intake-card, .card.intake, .empty-chat')).toBeVisible({ timeout: 30000 })
     const questionTime = Date.now() - startTime
     console.log(`First question visible in: ${questionTime}ms`)
 
     // Нет 500 ошибок
     expect(networkErrors).toEqual([])
-
-    // Проверяем что есть поле ввода для ответа
-    await expect(page.getByPlaceholder('Ваш ответ…')).toBeVisible()
   })
 })

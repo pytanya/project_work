@@ -21,9 +21,9 @@ const SIDEBAR_MAX = 560
 
 function loadSettings() {
   try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY)) || { show_file_upload: false }
+    return JSON.parse(localStorage.getItem(STORAGE_KEY)) || { show_file_upload: true }
   } catch {
-    return { show_file_upload: false }
+    return { show_file_upload: true }
   }
 }
 
@@ -84,8 +84,8 @@ export default function App() {
   const [progressPhase, setProgressPhase] = useState(null)
   // Счётчик вопросов квиза из записей
   const [questionNum, setQuestionNum] = useState(0)
-  // Баннер кэшированного урока (7.3): «Этот урок из прошлого занятия»
-  const [cachedLessonBanner, setCachedLessonBanner] = useState(false)
+  // Результат LLM-судьи (по запросу): отображается на карточке урока асинхронно
+  const [judgeResult, setJudgeResult] = useState(null)
   const wsRef = useRef(null)
   const sessionIdRef = useRef(null)
   const inputRef = useRef(null)
@@ -158,11 +158,17 @@ export default function App() {
 
   const push = useCallback((kind, text, data) => {
     setFeed((f) => {
-      // Глобальная проверка на дубли по тексту (исправляет повторение одного сообщения разными kind)
+      // Дедупликация по тексту — ТОЛЬКО для служебных сообщений (агент/система/
+      // статусы): бэкенд может повторить одно событие под разными kind.
+      // Пользовательский ввод (kind === 'user') дедуплицировать НЕЛЬЗЯ: в повторных
+      // циклах (reuse-вопрос с кнопками, повторное «да»/ответ) одинаковый текст
+      // отправляется заново, и его выбор обязан появляться в ленте («протокол»).
       const textStr = typeof text === 'string' ? text : String(text || '')
       const normalized = textStr.trim().toLowerCase()
-      const alreadyExists = f.some((m) => (typeof m.text === 'string' ? m.text : String(m.text || '')).trim().toLowerCase() === normalized)
-      if (alreadyExists && normalized) return f
+      if (normalized && kind !== 'user') {
+        const alreadyExists = f.some((m) => (typeof m.text === 'string' ? m.text : String(m.text || '')).trim().toLowerCase() === normalized)
+        if (alreadyExists) return f
+      }
       return [...f, { id: `${Date.now()}-${Math.random()}`, kind, text: textStr, data }]
     })
   }, [])
@@ -261,6 +267,10 @@ export default function App() {
         if (answerResolvedEvents.includes(evt.event)) {
           setChatBusy(false)
           isWaitingForAnswer.current = false
+          // Шаг завершён результатом (вопрос/подсказка/урок/сводка) — сбрасываем
+          // фазу прогресса, иначе устаревший текст («Генерирую урок…») «всплывёт»
+          // при следующем busy (например, по клику на подсказку).
+          setProgressPhase(null)
         }
         // `system` сбрасывает busy только когда это финал шага (не intent/warning):
         // topic.all / topic.selected / lesson.done / lesson.repeat / lesson.ready /
@@ -273,6 +283,7 @@ export default function App() {
           if (finalSystemKinds.includes(d.kind)) {
             setChatBusy(false)
             isWaitingForAnswer.current = false
+            setProgressPhase(null)
           }
         }
       }
@@ -308,7 +319,6 @@ export default function App() {
           break
         case 'quiz.card':
           finalizeStream('quiz', d.question)
-          setCachedLessonBanner(false)
           setMasteryGate(null)
           // Счётчик вопросов (6.2): авторитетный номер из бэкенда (answered+1)
           if (d.review && typeof d.num_questions === 'number' && d.num_questions > 0) {
@@ -321,6 +331,8 @@ export default function App() {
           } else {
             setQuestionNum((n) => n + 1)
           }
+          // Удалить процессные статусы предыдущего цикла перед показом нового вопроса
+          removeProcessStatuses()
           setCurrent({
             kind: 'quiz',
             question: d.question,
@@ -331,11 +343,33 @@ export default function App() {
             questionId: d.question_id,
             excerpt: d.excerpt || '',
             review: d.review,
+            hints: [],
+            steps: [],
           })
           break
         case 'quiz.hint':
-          const hKind = d.subtask ? 'subtask' : 'hint'
-          setFeed((f) => [...f, { id: `hint-${Date.now()}`, kind: hKind, text: d.hint, data: d }])
+          // Подсказка/шаг декомпозиции живут ВНУТРИ карточки вопроса (аккордеон):
+          // лента не дёргается, вопрос и варианты остаются на месте. Если карточки
+          // нет (редкий случай, например после resync) — показываем в ленте.
+          if (currentRef.current?.kind === 'quiz') {
+            const curQuiz = currentRef.current
+            if (d.subtask) {
+              setCurrent({
+                ...curQuiz,
+                steps: [...(curQuiz.steps || []), {
+                  text: d.hint, index: d.subtask_index, total: d.subtask_total,
+                }],
+              })
+            } else {
+              setCurrent({
+                ...curQuiz,
+                hints: [...(curQuiz.hints || []), { text: d.hint, level: d.level || 1 }],
+              })
+            }
+          } else {
+            const hKind = d.subtask ? 'subtask' : 'hint'
+            setFeed((f) => [...f, { id: `hint-${Date.now()}`, kind: hKind, text: d.hint, data: d }])
+          }
           break
         case 'review.done':
           setFeed((f) => [...f, {
@@ -350,6 +384,8 @@ export default function App() {
           setCurrent(null)
           // Удалить процессные статусы («Объясняю...», «Собираю...») при завершении объяснения
           removeProcessStatuses()
+          // Сбросить индикатор фазы прогресса при завершении объяснения
+          setProgressPhase(null)
           // Живой счётчик правильных (6.2): обновляем после каждого ответа
           if (typeof d.correct_count === 'number') {
             setScore({ correct: d.correct_count, total: d.answered_count || 0 })
@@ -359,6 +395,8 @@ export default function App() {
           finalizeStream('lesson', d.text, { topic: d.topic, lesson: d.lesson, sources: d.sources || [] })
           // Удалить процессные статусы («Генерирую урок...», «Собираю урок...») при завершении урока
           removeProcessStatuses()
+          // Сбросить результат судьи (старый не актуален для нового урока)
+          setJudgeResult(null)
           // История занятий: урок показан — сводка сессии уже записана на бэкенде
           setSessionHistoryReloadKey((k) => k + 1)
           break
@@ -387,10 +425,11 @@ export default function App() {
           setFeed((f) => f.filter((m) => m.kind !== 'intake'))
           setIntake({ missingFields: [], complete: true })
           push('source', d.message)
-          // Гранулярный прогресс при подготовке темы (оптимизация #1)
-          if (isPreparingTopic.current && d.message && d.status !== 'done' && d.status !== 'ready') {
-            setProgressPhase({ stage: d.stage, message: d.message, status: d.status })
-          }
+          // Фаза прогресса из source.progress НЕ дублируем: то же сообщение уже
+          // показано в ленте как шаг «Подготовка материалов…» (SourceProgressCard).
+          // Нижний индикатор фазы (.bubble.progress.has-phase) оставляем только для
+          // долгой подготовки темы (handleSelectTopic + heartbeat с elapsed-секундами),
+          // чтобы текст не «ехал» и не дублировался («Оцениваю ответ…» и т.п.).
           // Завершение поиска источников — удалить процессные статусы («Ищу...», «Генерирую...»)
           if (d.status === 'done' || d.status === 'ready') {
             removeProcessStatuses()
@@ -401,13 +440,16 @@ export default function App() {
           // elapsed (сек) показываем в сообщении — пользователь видит, что генерация идёт.
           resetBusyAfterTimeout()
           if (isPreparingTopic.current) {
-            setProgressPhase((p) => ({
-              stage: p?.stage || 'topic',
-              message: `${d.message || p?.message || 'Обработка продолжается…'}${
-                d.elapsed ? ` (${d.elapsed} сек)` : ''
-              }`,
-              status: 'working',
-            }))
+            setProgressPhase((p) => {
+              // Держим контекст фазы («Готовимся по теме…»), а не заменяем его на
+              // generic-heartbeat; elapsed-секунды — чтобы видно: генерация идёт.
+              const base = (p?.message || d.message || 'Обработка продолжается…').replace(/\s*\(\d+ сек\)\s*$/, '')
+              return {
+                stage: p?.stage || 'topic',
+                message: d.elapsed ? `${base} (${d.elapsed} сек)` : base,
+                status: 'working',
+              }
+            })
           }
           break
         case 'source.failed':
@@ -439,9 +481,20 @@ export default function App() {
           break
         case 'system':
           endStream()
-          // Информационные события (фоновый судья, RAG-гейт, агент-сообщения)
-          // НЕ должны сносить активный UI (карточка квиза / чек-лист).
-          if (!['content.empty', 'agent.message', 'lesson.ready'].includes(d.kind)) {
+          // Информационные системные события (фоновый судья, RAG-гейт, reuse-кэш,
+          // агент-сообщения) НЕ сносят активную карточку вопроса: иначе запрос
+          // подсказки/сообщение «убирает» вопрос вместе с вариантами (в момент
+          // подсказки бэкенд может прислать source.cached/source.reused от фоновых
+          // гейтов повторного входа). Карточка квиза снимается ТОЛЬКО событием
+          // результата ответа: system с correct_count (фидбек «Верно…») или
+          // tutor.explanation / tutor.summary.
+          if (currentRef.current?.kind === 'quiz') {
+            if (typeof d.correct_count === 'number') {
+              setCurrent(null)
+              removeProcessStatuses()
+              setProgressPhase(null)
+            }
+          } else if (!['content.empty', 'agent.message', 'lesson.ready'].includes(d.kind)) {
             setCurrent(null)
           }
           // Агент-сообщения и lesson.ready — как чат репетитора (не системное)
@@ -454,6 +507,8 @@ export default function App() {
               .map(([k, v]) => `${k}: ${Math.round((v || 0) * 10)}/10`)
               .join(' · ')
             push('system', `${d.message}${crits ? ` — ${crits}` : ''}`)
+            // Сохраняем результат для inline-рендера на карточке урока
+            if (j.criteria) setJudgeResult(j)
           } else if (d.kind !== 'mastery.gate') {
             push('system', d.message)
           }
@@ -465,10 +520,8 @@ export default function App() {
           if (d.kind === 'mastery.gate') {
             setMasteryGate({ message: d.message, gaps: d.gaps || [] })
           }
-          // Кэшированный урок из прошлого занятия (7.3): показываем баннер над уроком.
-          if (d.kind === 'lesson.cached') {
-            setCachedLessonBanner(true)
-          }
+          // Кэшированный урок из прошлого занятия (7.3): выбор действий идёт обычным
+          // сообщением в чат («да» — квиз, «дополнить материал», «начать с нуля», вопрос).
           // Белый список активен, а материала в разрешённых источниках нет —
           // предлагаем включить любые источники.
           if (d.kind === 'content.empty' && sourcePolicyRef.current && !sourcePolicyRef.current.allow_any_sources) {
@@ -630,7 +683,7 @@ export default function App() {
         setCurrent({
           kind: 'quiz', question: q.question, options: q.options, answerType: q.answer_type,
           topic: q.topic, difficulty: q.difficulty, questionId: q.question_id,
-          review: q.review,
+          review: q.review, hints: [], steps: [],
         })
         // Обновляем счётчик вопросов из records
         if (d.records && d.records.length > 0) {
@@ -856,16 +909,18 @@ export default function App() {
   }
 
   // Судья-оценщик по запросу (кнопка в UI): урок или вопрос квиза
+  // Fire-and-forget: НЕ блокируем чат (chatBusy), результат придёт через WS
+  // событие «judge.result» и обновит карточку урока асинхронно.
   async function handleJudgeLesson() {
     if (!sessionId) return
-    setChatBusy(true)
+    // Показываем прогресс только в ленте, не блокируя ввод
+    push('system', '🔍 Оцениваю урок… (это может занять несколько секунд)')
     try {
       await api.judge(sessionId, 'lesson')
     } catch (e) {
       push('error', String(e.message || e))
-    } finally {
-      setChatBusy(false)
     }
+    // результат придёт через WS-событие judge.result → обновит LessonPanel
   }
 
   async function handleSelectTopic(node) {
@@ -920,6 +975,11 @@ export default function App() {
     setChatBusy(false)
     setUploadBusy(false)
     setProgressPhase(null)
+    setJudgeResult(null)
+    setMasteryGate(null)
+    setIntake({ missingFields: [], complete: false })
+    setSourcePolicy({ allow_any_sources: true, whitelist: [] })
+    setSourceProposal(null)
     isWaitingForAnswer.current = false
     isPreparingTopic.current = false
     pendingAnswer.current = null
@@ -1110,7 +1170,7 @@ export default function App() {
       </aside>
       <div className="sidebar-resizer" ref={sidebarDragRef} title="Изменить ширину панели" />
       <main className="chat">
-        <ChatStream feed={feed} busy={chatBusy || uploadBusy} progressPhase={progressPhase} onJudgeLesson={handleJudgeLesson} />
+        <ChatStream feed={feed} busy={chatBusy || uploadBusy} progressPhase={progressPhase} onJudgeLesson={handleJudgeLesson} judgeResult={judgeResult} />
         {current &&
           (current.kind === 'quiz' ? (
             <QuizCard
@@ -1152,18 +1212,6 @@ export default function App() {
             Вы выбрали: <strong>{confirmedOption}</strong>
             <button className="btn-confirm" onClick={handleConfirmOption}>Подтвердить</button>
             <button className="btn-cancel" onClick={handleCancelOption}>Отмена</button>
-          </div>
-        )}
-        {cachedLessonBanner && (
-          <div className="cached-lesson-banner">
-            <span className="cached-lesson-banner__icon">📋</span>
-            <span className="cached-lesson-banner__text">Этот урок из прошлого занятия.</span>
-            <button className="btn small" onClick={() => { setCachedLessonBanner(false); sendMessage('Дополнить материал') }}>
-              Дополнить материал
-            </button>
-            <button className="btn small ghost" onClick={() => { setCachedLessonBanner(false); sendMessage('Начать с нуля') }}>
-              Начать с нуля
-            </button>
           </div>
         )}
         {masteryGate && (

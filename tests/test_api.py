@@ -594,6 +594,9 @@ class TestWikiPerStudent:
         from src.wiki import KnowledgeWiki, WikiArticle
 
         monkeypatch.setattr("api.routes.wiki.default_settings.KNOWLEDGE_WIKI_DIR", tmp_path)
+        # Сессии учеников — wiki-доступ по student_id разрешён только при активной сессии
+        _new_session(client, student_id="stu_a")
+        _new_session(client, student_id="stu_b")
         # статья ученика A
         wiki_a = KnowledgeWiki(tmp_path, student_id="stu_a")
         wiki_a.upsert(WikiArticle(subject="География", topic="Атмосфера", mastery=0.9, attempts=3))

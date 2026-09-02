@@ -21,6 +21,64 @@ RouterAI или sentence-transformers) → LangGraph (intake → источни�
      ↑  уточнения (≤8 итераций, 2 без прогресса → экстренный старт)
 ```
 
+### Архитектура (Mermaid)
+
+```mermaid
+flowchart TD
+    USER["👤 Обучаемый<br/>CLI для MVP / React UI для расширений"] -->|HTTP| API["FastAPI<br/>REST API + WebSocket"]
+    API -->|запуск| GRAPH["LangGraph<br/>Граф агента + checkpointer"]
+
+    subgraph INTAKE["📋 Intake-фаза (чек-лист + валидация + прогресс)"]
+        direction LR
+        Q1["Тип: студент / ученик класса?"]
+        Q2["Класс / курс / программа?"]
+        Q3["Тема/предмет?"]
+        Q4["Есть учебник? Автор?"]
+        Q5["Глава/раздел?"]
+        Q6["Режим: квиз/объяснение/deep dive?"]
+        Q1 --> Q2 --> Q3 --> Q4 --> Q5 --> Q6
+        VALIDATE["validate_intake<br/>достаточно ли данных?"]
+        Q6 --> VALIDATE
+        VALIDATE -->|"не хватает"| ASK["Цикл уточнений<br/>макс. 3 итерации<br/>+ контроль прогресса"]
+        ASK --> Q1
+    end
+    GRAPH --> INTAKE
+
+    subgraph SOURCE["🔎 Поиск источника знаний"]
+        direction TB
+        DOC["Docling<br/>разбор PDF/DOCX"] --> CHUNK["Chunking<br/>по главам/параграфам"]
+        FIND["find_textbook<br/>crawl4ai по легальным источникам"] -->|"скачан PDF"| DOC
+        SEARCH["search_web<br/>Yandex → DDGS"] --> FETCH["fetch_url / crawl_page_js<br/>загрузка страниц"]
+        SEARCH -->|"нет учебника"| MAT["Материалы по теме<br/>подграф web_search"]
+        CHUNK --> VDB["Qdrant<br/>векторное хранилище"]
+        FETCH --> MAT --> VDB
+        EMB["Embeddings<br/>sentence-transformers (обяз.)<br/>Ollama nomic-embed-text (опц.)"] -.-> VDB
+    end
+    INTAKE -->|"есть учебник"| DOC
+    INTAKE -->|"нет учебника"| FIND
+
+    subgraph TUTOR["🎓 Тьюторинг"]
+        direction TB
+        RAG["RAG-поиск<br/>семантический retrieval + реранкинг"] --> GEN["Генерация<br/>квиз / объяснение"]
+        GEN --> EVAL["Оценка ответа<br/>студента"]
+        EVAL -->|"update_knowledge_map"| KM["Карта знаний<br/>тема → мастерство"]
+        KM -->|"корректировка<br/>сложности"| RAG
+    end
+    VDB --> RAG
+
+    subgraph LLM["🤖 LLM-провайдеры (каскад по провайдерам)"]
+        direction LR
+        L1["RouterAI primary<br/>qwen3.7-flash / deepseek-v4-flash"]
+        L2["OpenRouter fallback<br/>только под VPN<br/>заблокирован в РФ"]
+        L1 -->|недоступен| L2
+    end
+    GEN --> LLM
+    EVAL --> LLM
+
+    OBS["📊 Observability<br/>JSONL-трассировка"] -.-> GRAPH
+    GR["🛡️ Guardrails<br/>injection-фильтр<br/>контент-фильтр<br/>circuit breaker<br/>бюджеты по ролям"] -.-> GRAPH
+```
+
 ## Установка (кросплатформенно)
 
 ### 0. Системные требования (один раз)
@@ -281,7 +339,7 @@ python evals/edututor_eval.py --mock    # офлайн-режим
 | Судья (К-4) | Gemini на RouterAI (без VPN); OpenRouter для судьи не используется |
 | Источники (К-2) | Только легальные: локальные PDF (Plan B), Викиучебник, открытые страницы; капчу не обходим |
 | Сканы (3.2) | `detect_text_layer` → агент просит **страницы + тему** → OCR **только их** (`ocr_pages`, ru+en) с буфером `OCR_PAGE_BUFFER` и автодетекцией смещения номера; валидация темы; CPU-OCR медленный — поэтому только нужные страницы. **OCR-движок — EasyOCR** (лёгкий, без MSVC). PaddleOCR (точнее для русского, быстрее на CPU) отклонён: `paddlepaddle` ~500МБ и конфликтует с принципом портативности MVP; при необходимости замена — через абстракцию OCR-провайдера с нормализацией формата к `(bbox, text, conf)` |
-| Дешёвые роли (В-2) | `CHEAP_MODEL=google/gemma-3-4b-it` на RouterAI; при отказе — fallback TUTOR_MODEL |
+| Дешёвые роли (В-2) | `CHEAP_MODEL=google/gemma-3-12b-it` на RouterAI; при отказе — fallback TUTOR_MODEL |
 | **Quick answer toggle** (Фаза 1) | Popup settings ⚙ → quickAnswer: true = автоотправка мгновенно; false = полоса подтверждения «Вы выбрали X» |
 | **Разделение busy** (Фаза 1) | uploadBusy (индексация) / chatBusy (квиз); Banner индексации не мешает квизу |
 | SQLite персистентность (Фаза 2) | `SessionSQLiteStore` сохраняет состояние после каждого шага в `data/session_persist.db`. Восстановление сессий между перезапусками сервера (`restore_or_create`) — TODO: вызывается только из тестов, не из production-потока `create_session`. |
@@ -317,7 +375,7 @@ curl -X POST http://127.0.0.1:8000/api/sessions/a3f9k2/message \
 ```jsonl
 {"ts": "2026-09-01T14:30:01", "request_id": "req_a3f9k2", "step": "source_find", "action": "find_textbook", "status": "completed", "model": "qwen/qwen3.7-flash", "duration_ms": 12500}
 {"ts": "2026-09-01T14:30:15", "request_id": "req_a3f9k2", "step": "quiz_card", "action": "generate_question", "status": "completed", "model": "qwen/qwen3.7-flash", "tokens": 342, "cost_usd": 0.001}
-{"ts": "2026-09-01T14:30:28", "request_id": "req_a3f9k2", "step": "evaluate_answer", "action": "check_answer", "status": "correct", "model": "google/gemma-3-4b-it", "judge_criteria": {"relevance": 0.9, "completeness": 0.7}}
+{"ts": "2026-09-01T14:30:28", "request_id": "req_a3f9k2", "step": "evaluate_answer", "action": "check_answer", "status": "correct", "model": "google/gemma-3-12b-it", "judge_criteria": {"relevance": 0.9, "completeness": 0.7}}
 ```
 
 Полный пример работает через:
@@ -386,3 +444,83 @@ PRIMARY → [доступные с ключами] → stepik → lesson_edu(opt
 2. **Фильтрация лицензий** (`license_check`) — прямое скачивание файлов разрешено только с `ALLOWED_DOWNLOAD_HOSTS` (wikibooks.org, wikipedia.org, openbooks, openedu.ru, school-collection.edu.ru). Каталоги-«склады» (reshak.ru, gdz, obuchalka и др.) используются только как источник ссылок, не для прямого скачивания. Blacklist (infourok.ru, dzen.ru, studfile.net, yaklass.ru и др.) исключается полностью — ненадёжный/мусорный контент.
 
 Список предпочтительных образовательных доменов (_PREFERRED_DOMAINS) ранжируется выше в результатах (ранг 0), мусорные промо-домены _AVOIDED_DOMAINS — ниже (ранг 4+). При наличии 2+ preferred-источников все avoided-результаты исключаются жёстко.
+
+---
+
+## Каскад LLM-провайдеров и фолбеки моделей
+
+### Поддерживаемые провайдеры
+
+В каскаде LLM участвуют **два провайдера** — оба OpenAI-совместимые шлюзы
+(`src/config.py:provider_configs`, `src/llm_client.py`):
+
+- **RouterAI** (`routerai`) — основной, работает в РФ **без VPN** (по умолчанию).
+- **OpenRouter** (`openrouter`) — fallback; в РФ заблокирован, нужен VPN.
+
+Провайдер попадает в каскад **только если задан его API-ключ** (`ROUTERAI_API_KEY` /
+`OPENROUTER_API_KEY`). Если не задан ни один ключ — LLM-клиент не стартует
+(`RuntimeError: Нет ни одного настроенного LLM-провайдера`).
+
+> **Судья (role=judge)** ходит **только через RouterAI** (Gemini без VPN, требование К-4);
+> OpenRouter для роли судьи исключается из каскада.
+
+> Настройки YandexGPT (`YANDEX_GPT_*`) и Ollama (`OLLAMA_*`) задекларированы в `config.py`,
+> но **в runtime-каскад LLM-клиента не подключены** — это задел, не рабочие провайдеры.
+
+### Порядок обхода
+
+```
+LLM_PRIMARY_PROVIDER (первый, если есть ключ) → остальные доступные провайдеры (алфавитно)
+```
+
+`LLM_PRIMARY_PROVIDER` (по умолчанию `routerai`) задаёт **только приоритет**, а не
+подставляет ключ. Примеры фактического каскада:
+
+- ключи RouterAI + OpenRouter, `LLM_PRIMARY_PROVIDER=routerai` → `routerai → openrouter`;
+- только OpenRouter → `openrouter` (RouterAI автоматически пропускается, без ключа);
+- оба ключа, `LLM_PRIMARY_PROVIDER=openrouter` → `openrouter → routerai`.
+
+### Логика выбора по регионам
+
+- **Россия**: `LLM_PRIMARY_PROVIDER=routerai` (по умолчанию) + `ROUTERAI_API_KEY`.
+  OpenRouter-ключ можно тоже задать — он станет запасным шлюзом под VPN.
+- **Другие регионы**: `LLM_PRIMARY_PROVIDER=openrouter` + `OPENROUTER_API_KEY`,
+  RouterAI — вторым (fallback).
+
+> Автодетекции региона нет — пользователь сам выбирает primary в `.env`.
+
+### Двухуровневый фолбек
+
+1. **По провайдеру** — серьёзная ошибка шлюза (не 4xx/429 модели) → переход на следующий
+   провайдер из каскада (`src/llm_client.py`).
+2. **По модели** — внутри провайдера перебираются модели роли до первого успеха:
+   `403`/недоступность модели → следующая модель списка. На `408/429/5xx` — retry с backoff
+   (до 3 попыток) внутри пары (провайдер, модель).
+
+### Роли моделей и фолбеки (по умолчанию)
+
+| Роль | Основная модель | Модельные фолбеки |
+|------|-----------------|-------------------|
+| тьютор (`tutor`) | `qwen/qwen3.7-flash` | `FALLBACK_MODELS` |
+| эксперт (`expert`) | `deepseek/deepseek-v4-flash` | `FALLBACK_MODELS` |
+| дешёвая (`cheap`) | `google/gemma-3-12b-it` | `FALLBACK_MODELS` |
+| судья (`judge`) | `google/gemini-3.5-flash-lite` | `JUDGE_FALLBACK_MODELS` (только RouterAI) |
+
+Списки фолбеков:
+- `FALLBACK_MODELS` = `deepseek/deepseek-v4-flash-0731,qwen/qwen3.7-flash` (роли tutor/expert/cheap);
+- `JUDGE_FALLBACK_MODELS` = `google/gemini-3.1-flash-lite` (роль judge).
+
+### .env настройки LLM
+
+| Переменная | Обязательна | Описание |
+|------------|-------------|----------|
+| `LLM_PRIMARY_PROVIDER` | Нет (по умолч. `routerai`) | Первый провайдер каскада: `routerai` или `openrouter`. |
+| `ROUTERAI_API_KEY` | Для `routerai` | Ключ RouterAI (РФ, без VPN). |
+| `ROUTERAI_BASE_URL` | Нет | База RouterAI (по умолч. `https://routerai.ru/api/v1`). |
+| `OPENROUTER_API_KEY` | Для `openrouter` | Ключ OpenRouter (fallback-шлюз, нужен VPN в РФ). |
+| `OPENROUTER_BASE_URL` | Нет | База OpenRouter (по умолч. `https://openrouter.ai/api/v1`). |
+| `TUTOR_MODEL` / `EXPERT_MODEL` | Нет | Основные модели ролей тьютора и эксперта. |
+| `JUDGE_MODEL` | Нет | Основная модель судьи (только RouterAI). |
+| `CHEAP_MODEL` | Нет | Дешёвая модель (простые вызовы). |
+| `FALLBACK_MODELS` | Нет | Модельные фолбеки для ролей tutor/expert/cheap. |
+| `JUDGE_FALLBACK_MODELS` | Нет | Модельные фолбеки для судьи. |

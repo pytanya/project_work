@@ -101,7 +101,7 @@ function SourceProgressCard({ items }) {
   )
 }
 
-export default function ChatStream({ feed, busy = false, progressPhase = null, onJudgeLesson = null }) {
+export default function ChatStream({ feed, busy = false, progressPhase = null, onJudgeLesson = null, judgeResult = null }) {
   const endRef = useRef(null)
   useEffect(() => {
     try {
@@ -123,7 +123,7 @@ export default function ChatStream({ feed, busy = false, progressPhase = null, o
           {m.kind === 'quiz' && <div className="bubble agent quiz">🎯 {m.text}</div>}
           {m.kind === 'lesson' && (
             <div className="bubble agent">
-              <LessonPanel text={m.text} topic={m.data?.topic} lesson={m.data?.lesson} sources={m.data?.sources || []} onJudge={onJudgeLesson} />
+              <LessonPanel text={m.text} topic={m.data?.topic} lesson={m.data?.lesson} sources={m.data?.sources || []} onJudge={onJudgeLesson} judgeResult={judgeResult} />
             </div>
           )}
           {m.kind === 'stream' && (

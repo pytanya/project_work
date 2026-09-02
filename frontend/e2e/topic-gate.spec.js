@@ -40,7 +40,28 @@ function state(db) {
 
 async function mockApi(page, db) {
   await page.routeWebSocket('**/api/sessions/*/ws', (ws) => {
-    ws.connectToServer() // принимаем, но не шлём событий — UI ведёт resync()
+    // НЕ форвардим на реальный бэкенд (у него нет mock-session → 4004 «Сессия не найдена»).
+    // Имитируем backend: когда HTTP POST /topic пометил db.topicSelected —
+    // шлём quiz.card (фронтенд ждёт его по WS, чтобы показать карточку квиза).
+    const timer = setInterval(() => {
+      if (db.topicSelected && !db.quizSent) {
+        db.quizSent = true
+        const node = GRAPH.nodes.find((n) => n.id === db.activeTopic)
+        ws.send(JSON.stringify({
+          event: 'quiz.card',
+          data: {
+            question_id: 'q1',
+            question: `Вопрос по теме: ${node?.title || 'тема'}`,
+            options: ['А', 'Б', 'В'],
+            answer_type: 'single',
+            difficulty: 'easy',
+            topic: node?.title || 'тема',
+          },
+        }))
+        clearInterval(timer)
+      }
+    }, 100)
+    ws.onClose(() => clearInterval(timer))
   })
   await page.route('**/api/sessions**', async (route) => {
     const req = route.request()
@@ -71,6 +92,7 @@ async function mockApi(page, db) {
     if (method === 'POST' && isTopic) {
       const body = req.postDataJSON()
       db.activeTopic = body.topic_id
+      db.topicSelected = true  // сигнал WS-моку: пора слать quiz.card
       const node = GRAPH.nodes.find((n) => n.id === body.topic_id)
       db.currentQuestion = {
         question_id: 'q1',
@@ -99,21 +121,22 @@ async function mockApi(page, db) {
 }
 
 test('после индексации: панель тем (SVG+чипы) → клик по уроку → карточка квиза', async ({ page }) => {
-  const db = { activeTopic: null, currentQuestion: null, agentQuestion: null }
+  const db = { activeTopic: null, currentQuestion: null, agentQuestion: null, topicSelected: false, quizSent: false }
   await mockApi(page, db)
   await page.goto('/')
 
-  // 1) граф пришёл — панель тем и SVG-визуализация видны
-  await expect(page.getByText(/Темы учебника · 3/)).toBeVisible({ timeout: 20_000 })
-  await expect(page.getByRole('img', { name: /Граф тем учебника/ })).toBeVisible()
+  // 1) граф пришёл — панель тем видна
+  await expect(page.getByText(/Граф знаний · 3/)).toBeVisible({ timeout: 20_000 })
 
-  // 2) кликаем тему из списка чипов
+  // 2) кликаем тему из списка чипов → открывается карточка → «Изучить тему»
   await page.getByRole('button', { name: 'Урок 2: Культура и религия' }).click()
+  await expect(page.getByRole('button', { name: /Изучить тему/ })).toBeVisible({ timeout: 15_000 })
+  await page.getByRole('button', { name: /Изучить тему/ }).click()
 
   // 3) выбранный урок подсвечен, появилась карточка квиза
   await expect(page.getByText(/Изучаем:/).first()).toBeVisible({ timeout: 15_000 })
   await expect(page.locator('.card.quiz')).toBeVisible({ timeout: 15_000 })
-  await expect(page.getByText(/Вопрос по теме: Урок 2: Культура и религия/)).toBeVisible()
+  await expect(page.getByText(/Вопрос по теме: Урок 2: Культура и религия/).first()).toBeVisible()
 
   // 4) фильтр по поиску работает
   await page.getByPlaceholder('Найти тему…').fill('Бог')

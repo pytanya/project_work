@@ -625,7 +625,7 @@ function SourcesSection({ sources }) {
     Главный компонент LessonPanel
     ═══════════════════════════════════════════ */
 
-export default function LessonPanel({ text, topic, lesson, sources = [], onJudge = null }) {
+export default function LessonPanel({ text, topic, lesson, sources = [], onJudge = null, judgeResult = null }) {
   /* ═ Hooks вызываем всегда в одинаковом порядке, ДО любых return = */
   
   /* ── Санитизация структурированного урока (всегда вызывается) ── */
@@ -716,8 +716,14 @@ export default function LessonPanel({ text, topic, lesson, sources = [], onJudge
         <SourcesSection sources={sources} />
       </div>
 
+      {/* Inline оценка детерм. судьи-lite (eval из generate_lesson, всегда есть) */}
+      {data.eval && <EvalBadge evalData={data.eval} />}
+
+      {/* Inline оценка LLM-судьи (по запросу, через WS judge.result) */}
+      {judgeResult && <EvalBadge evalData={judgeResult} />}
+
       {/* Footer — кнопка оценки (LLM-судья по запросу) */}
-      {onJudge && (
+      {onJudge && !judgeResult && (
         <div className="lesson-card__actions">
           <button className="btn btn-small" onClick={onJudge} title="Запустить LLM-судью качества урока">
             🔍 Оценить урок

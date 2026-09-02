@@ -1593,3 +1593,35 @@ def test_review_quiz_flow(make_settings, tmp_path):
     updated = bank.get(card_id_for("Что такое атмосфера?"))
     assert updated is not None
     assert updated.reps == 1  # SM-2 применён при верном повторе
+
+
+def test_route_source_skips_source_gates_on_active_question():
+    """При АКТИВНОМ вопросе квиза ответ/подсказка ученика идут сразу на тьютора
+    (оценка/подсказка), а не в источники/гейты — иначе reuse_gate эмитит
+    system/source.progress (сносит карточку в UI) и перехватывает ответ вместо оценки.
+    Ожидающий reuse-вопрос и ввод без активного вопроса идут старым путём."""
+    from api.schemas import QuizCard
+    from src.graph import NODE_REUSE_GATE, NODE_TUTOR_NEXT, route_source
+
+    active = TutorState(
+        mode="quiz",
+        current_question=QuizCard(
+            question_id="q1", question="Вопрос?", topic="Т", answer_type="single",
+            options=["A"], difficulty="easy",
+        ),
+    )
+    # обычный ответ при активном вопросе → оценка, а не reuse_gate
+    st = active.model_copy(update={"pending_answer": "Это ответ"})
+    assert route_source(st) == NODE_TUTOR_NEXT
+    # подсказка при активном вопросе → тоже на тьютора
+    st2 = active.model_copy(update={"pending_answer": "Подскажи, пожалуйста"})
+    assert route_source(st2) == NODE_TUTOR_NEXT
+    # ожидающий reuse-вопрос → решение по материалам идёт в reuse_gate
+    st3 = active.model_copy(update={"pending_answer": "Да, использовать", "reuse_pending": True})
+    assert route_source(st3) == NODE_REUSE_GATE
+    # без активного вопроса ответ/подсказка не «убегают» мимо гейтов
+    st4 = TutorState(mode="quiz", pending_answer="подсказка")
+    assert route_source(st4) == NODE_REUSE_GATE
+    # активный вопрос, но нет сообщения — обычный роутинг не ломаем
+    st5 = TutorState(mode="quiz", current_question=active.current_question)
+    assert route_source(st5) == NODE_REUSE_GATE

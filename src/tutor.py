@@ -868,6 +868,42 @@ def _repair_lesson_from_text(text: str, topic: str, *, raw_text: Optional[str] =
     return lesson
 
 
+# Паттерны «мета-комментария»: модель описывает источник/структуру учебника
+# вместо самой темы («В предоставленном отрывке указано…», «раскрывается в
+# пятом параграфе…», «требует обращения к полному тексту учебника»). Такой урок
+# структурно валиден (длинное определение, секции, термины), но не объясняет тему.
+_META_COMMENTARY_RE = [
+    r"в предоставленном отрывке указано",
+    r"согласно указанной структуре",
+    r"в соответствии с указанной структурой",
+    r"относится к курсу .{0,30} для .{0,10}класса",
+    r"требует обращения к полному тексту",
+    r"обращения к полному тексту учебника",
+    r"раскрывается в .{0,15}параграфе",
+    r"входит в .{0,15}параграф учебного пособия",
+    r"в .{0,15}параграфе курса",
+    r"материал охватывает общие вопросы",
+    r"освоение материала формирует базу",
+    r"рекомендуется внимательно читать",
+    r"следует использовать соответствующий раздел",
+    r"детального разбора следует использовать",
+    r"школьная дисциплина .{0,30} уровня",
+    r"структурная единица учебника",
+    r"тема включена в программу",
+    r"изучаемая тема рассматривается в",
+    r"учебник предлагает последовательное изучение",
+    r"разъяснение конкретных явлений требует",
+    r"полный текст учебника",
+]
+
+_META_COMMENTARY_COMPILED = [re.compile(p, re.IGNORECASE) for p in _META_COMMENTARY_RE]
+
+
+def _meta_commentary_count(text: str) -> int:
+    """Число РАЗЛИЧНЫХ паттернов мета-комментария в тексте урока."""
+    return sum(1 for rx in _META_COMMENTARY_COMPILED if rx.search(text or ""))
+
+
 def lesson_quality_ok(lesson: Lesson) -> Tuple[bool, str]:
     """Синхронный гейт качества урока перед показом (защита от «выплюнутого» контекста).
 
@@ -879,8 +915,18 @@ def lesson_quality_ok(lesson: Lesson) -> Tuple[bool, str]:
     Голые фрагменты-заголовки («Тест „Творцы Серебряного века“», «Литературная
     гостиная …») и служебный хром слайд-шоу не проходят — такой урок невозможно
     «открыть» как описание, его не показываем.
+
+    Мета-комментарии (≥2 разных паттернов) — урок описывает источник вместо
+    темы («В предоставленном отрывке указано…») — тоже не проходят.
     """
     from .knowledge import _is_publication_metadata, _is_research_methodology, _is_slide_chrome, _is_slideshow_text, _is_web_noise
+
+    # Мета-комментарий: модель пересказывает структуру учебника, а не тему.
+    lesson_text = (lesson.definition or "") + "\n" + "\n".join(
+        (s.body or "") for s in (lesson.sections or [])
+    ) + "\n" + (lesson.summary or "")
+    if _meta_commentary_count(lesson_text) >= 2:
+        return False, "meta_commentary"
 
     # Урок из методологии исследовательской работы (≥30% строк) — не объяснение темы.
     # Проверяем СЫРЫЕ поля (до _clean_prose), иначе урок уже вычистился бы в «пусто».
@@ -1299,10 +1345,11 @@ def generate_lesson(
     # Проверяем, вернулся ли JSON (backward-compatibility)
     data = parse_llm_json(raw)
     if data:
-        if data.get("title") is not None:
-            # Старый JSON-формат с title — собираем Lesson из данных
+        structured_keys = ("title", "definition", "sections", "diagram")
+        if any(k in data for k in structured_keys):
+            # Старый JSON-формат (title/definition/sections/diagram) — собираем Lesson
             lesson = _lesson_from_data(data, topic)
-            logger.info("generate_lesson[%s]: JSON path with title, keys=%s",
+            logger.info("generate_lesson[%s]: JSON path, keys=%s",
                         topic, list(data.keys()))
             return lesson
         elif "text" in data and isinstance(data.get("text"), str):
@@ -1383,6 +1430,42 @@ def _lesson_stream_prompt(
     ctx = "\n---\n".join(_prepare_lesson_context(context))[:MAX_LESSON_CONTEXT_CHARS]
     user = f"Тема: {topic}\nКонтекст учебника:\n{ctx}"
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def build_quality_lesson(
+    topic: str,
+    context: List[str],
+    state: TutorState,
+    llm_call: Optional[Callable[[List[Dict[str, str]]], str]] = None,
+    on_token: Optional[Callable[[str], None]] = None,
+    sources: Optional[List[Optional[Dict[str, Any]]]] = None,
+) -> Tuple[Optional[Lesson], str]:
+    """Генерация урока с гейтом качества (защита от мусора).
+
+    Пробует LLM-урок (generate_lesson). Если результат не проходит
+    lesson_quality_ok (мета-комментарий/пусто/фрагменты) — фолбэк на
+    детерминированную сборку из реальных предложений контекста
+    (_synthesize_lesson_from_context). Если и он мусорный — возвращает
+    (None, reason): вызывающий показывает «нет материала», не кэширует мусор.
+
+    Возвращает (lesson|None, reason): reason = "ok" при проходе гейта,
+    иначе причина отклонения.
+    """
+    lesson = generate_lesson(
+        topic, context, state, llm_call=llm_call, on_token=on_token, sources=sources
+    )
+    ok, reason = lesson_quality_ok(lesson)
+    if ok:
+        return lesson, "ok"
+    logger.info("build_quality_lesson[%s]: LLM-урок отклонён (%s) — детерминированный фолбэк", topic, reason)
+    fallback = _synthesize_lesson_from_context(topic, context)
+    ok2, reason2 = lesson_quality_ok(fallback)
+    if ok2:
+        # Сохраняем сырой текст LLM-попытки для диагностики (но показываем чистый урок)
+        fallback.raw_text = lesson.raw_text or fallback.raw_text
+        return fallback, "ok"
+    logger.info("build_quality_lesson[%s]: и фолбэк отклонён (%s) — контента нет", topic, reason2)
+    return None, reason2
 
 
 # ----------------------------------------------------------------------
@@ -1698,8 +1781,6 @@ def explain_error(
 
     if llm_call is not None:
         raw = llm_call(messages)
-        if on_token is not None:
-            on_token(raw)
     else:
         client = LLMClient(role="expert")
         try:
@@ -1714,8 +1795,13 @@ def explain_error(
             raw = ""
     data = parse_llm_json(raw)
     citation = data.get("citation") if isinstance(data.get("citation"), dict) else {}
+    text = str(data.get("text", "") or "Разберём ошибку подробнее.")
+    # При инъекции llm_call не стримим сырой JSON-ответ в UI (это «словарь» в чате).
+    # Стримим только распарсенный текст объяснения (human-readable).
+    if llm_call is not None and on_token is not None and text and not text.startswith("{"):
+        on_token(text)
     return {
-        "text": str(data.get("text", "") or "Разберём ошибку подробнее."),
+        "text": text,
         "citation": {
             "paragraph": citation.get("paragraph", ""),
             "source": citation.get("source", ""),

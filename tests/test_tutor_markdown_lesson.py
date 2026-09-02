@@ -6,6 +6,8 @@
 - Краевые случаи: пустой текст, отсутствие секций, незнакомые заголовки
 """
 
+import json
+
 import pytest
 from src.tutor import _normalize_heading, _parse_markdown_lesson, _extract_markdown_sections
 

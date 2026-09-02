@@ -319,6 +319,12 @@ class SessionStore:
         if session is not None:
             _close_logger(session.step_logger)
             self._log_session_history(session)
+            # Удаляем из SQLite, чтобы при перезагрузке не восстановилась
+            if self._sqlite is not None:
+                try:
+                    self._sqlite.delete(session_id)
+                except Exception:
+                    logger.exception("Ошибка удаления сессии %s из SQLite", session_id)
         return session is not None
 
     def _history_entry(self, session: SessionData) -> Optional[Dict[str, Any]]:
@@ -474,6 +480,12 @@ async def run_step(session: SessionData, answer: Optional[str] = None) -> TutorS
         st.session_status = "failed"
         session.state = st
         return st
+
+    # Guard: если шаг уже выполняется, логируем предупреждение (race condition).
+    # Основная защита — на уровне API-маршрутов (select_topic, review)
+    # и UI (chatBusy блокирует повторную отправку). Здесь — safety net.
+    if session.step_active:
+        logger.warning("run_step: step already active for session %s — proceeding (race condition)", session.id)
 
     if answer is not None:
         session.state = session.state.model_copy(update={"pending_answer": answer})

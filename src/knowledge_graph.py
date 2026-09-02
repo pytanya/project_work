@@ -143,22 +143,25 @@ def clean_title(text: str) -> str:
     return text
 
 
-def _is_valid_topic_title(title: str) -> bool:
+def _is_valid_topic_title(title: str, min_words: int = 2) -> bool:
     """Проверяет, что title — реальная тема, а не instruction/навигация.
 
     Отсекает:
-    - слишком короткие titles (<3 слов)
+    - слишком короткие titles (<min_words слов; 2 по умолчанию — для веб-заголовков)
     - titles которые являются instruction (вернуться, продолжить, см. также)
     - titles которые похожи на навигацию (оглавление, примечания, источники)
     - интерактивные элементы (задания, оценки, комментарии)
     - задания-инструкции (глаголы: выполните, прочитайте, напишите)
     - класс-специфичные ссылки (5-Б класс, 7-А класс)
+
+    Для секций учебника (build_textbook_graph) min_words=1: подзаголовок
+    «Параграф 12: Атмосфера» — одно слово, но это валидная тема.
     """
     if not title:
         return False
     title_lower = title.lower().strip()
-    # Слишком короткое — не тема (минимум 2 слова для тем, 3 для секций)
-    if len(title_lower.split()) < 2:
+    # Слишком короткое — не тема (минимум 2 слова для веб-тем, 1 для секций учебника)
+    if len(title_lower.split()) < min_words:
         return False
     # Instruction/навигация
     _INSTRUCTIONS = {
@@ -710,8 +713,9 @@ def build_textbook_graph(
     for label, num, title, _content in sections:
         nid = f"sec:{source}:{num}"
         cleaned_title = clean_title(title) if title else ""
-        # Фильтруем невалидные titles (instructions, навигация, слишком короткие)
-        if cleaned_title and not _is_valid_topic_title(cleaned_title):
+        # Фильтруем невалидные titles (instructions, навигация, слишком короткие).
+        # Подзаголовок секции учебника может быть одним словом («Параграф 12: Атмосфера»).
+        if cleaned_title and not _is_valid_topic_title(cleaned_title, min_words=1):
             # Если title невалидный — используем только "Урок N" без подзаголовка
             node_title = f"{label.capitalize()} {num}"
         else:
@@ -734,8 +738,8 @@ def build_textbook_graph(
                 found.append(key)
                 nid = f"sec:{source}:{num}"
                 lesson_title = clean_title(titles.get(num, ""))
-                # Фильтруем невалидные titles
-                if lesson_title and not _is_valid_topic_title(lesson_title):
+                # Фильтруем невалидные titles (одно слово — валидная тема секции)
+                if lesson_title and not _is_valid_topic_title(lesson_title, min_words=1):
                     lesson_title = ""
                 node_title = f"{label.capitalize()} {num}"
                 if lesson_title:
