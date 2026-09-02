@@ -32,6 +32,9 @@ data/*
 # --- Черновики / заметки ---
 tmp/
 
+# --- Личные документы (не коммитить) ---
+/СТЕК_ПРОЕКТА_И_ПЕДАГОГИКА.md
+
 # --- Временные артефакты и логи (не коммитить) ---
 *.log
 tmp_patch*.py
@@ -65,3 +68,28 @@ Thumbs.db
 # Результаты Этапа 0 (доступность моделей) коммитятся в репозиторий — каталог evals/.
 model_probe_results*.json
 !evals/model_probe_results*.json
+/.opencode
+/plans
+/implementation_plan.md
+/info.txt
+/AUTONOMOUS_WORK_REPORT.md
+/edututor_improvement_plan.md
+/ideas_for_project.md
+/SESSION_REPORT_2026-08-18_QDRANT.md
+/SPECIFICATION.md
+/RUN_INSTRUCTIONS.md
+/PROGRESS_REPORT.md
+/project_report.md
+/roadmap.md
+/PROGRESS_REPORT.md
+/project_report.md
+/roadmap.md
+/RUN_INSTRUCTIONS.md
+/project_report.md
+/roadmap.md
+/RUN_INSTRUCTIONS.md
+/PROGRESS_REPORT.md
+/Памятка_по_проектнои__работе.txt
+/walkthrough.md
+/SESSION_REPORT_2026-08-18_QDRANT.md
+/SPECIFICATION.md
