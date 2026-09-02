@@ -252,7 +252,7 @@ stateDiagram-v2
 > - [x] **Агент в квизе (Фаза 2, опция `USE_AGENT_TUTOR`)**: `src/evaluation.py` —
 >       единая логика оценки (узел + инструмент `evaluate_answer`); `agent_tutor_node` +
 >       ReAct-цикл `run_tutor_agent` (evaluate_answer/generate_quiz/explain_error/deep_dive/
->       finish_session). По умолчанию выключен — ход агента ~60с (2-3 LLM-вызова),
+>       finish_session). По умолчанию включен (`USE_AGENT_TUTOR=True` в config.py) — ход агента ~60с (2-3 LLM-вызова),
 >       детерминированный квиз быстрее.
 > Осталось (Фаза 4): наблюдаемость инструментов (`action`/`reason_summary`/`status`).
 
