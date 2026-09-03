@@ -171,7 +171,7 @@ class Settings(BaseSettings):
     QUESTION_DEDUPE_RETRIES: int = Field(default=2, ge=0)
 
     # --- Адаптивное обучение (roadmap: scaffolding + spaced repetition) ---
-    ENABLE_SCAFFOLDING: bool = Field(default=True)
+    ENABLE_SCAFFOLDING: bool = Field(default=False)
     ENABLE_SPACED_REPETITION: bool = Field(default=True)
     MAX_HINTS_PER_QUESTION: int = Field(default=2)
     REVIEW_QUIZ_SIZE: int = Field(default=5)

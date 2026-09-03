@@ -60,7 +60,7 @@ class TestDefaults:
 
     def test_adaptive_learning_defaults(self, make_settings):
         s = make_settings()
-        assert s.ENABLE_SCAFFOLDING is True
+        assert s.ENABLE_SCAFFOLDING is False
         assert s.ENABLE_SPACED_REPETITION is True
         assert s.MAX_HINTS_PER_QUESTION == 2
         assert s.REVIEW_QUIZ_SIZE == 5
