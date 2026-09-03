@@ -14,3 +14,4 @@ qdrant-client
 beautifulsoup4
 fastapi
 uvicorn
+networkx

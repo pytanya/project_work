@@ -75,3 +75,6 @@ openinference-instrumentation-openai
 # --- API (расширение заказчика) ---
 fastapi
 uvicorn
+
+# --- Граф знаний (NetworkX) ---
+networkx
