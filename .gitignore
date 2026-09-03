@@ -1,6 +1,7 @@
 # --- Секреты и конфигурация ---
 # ВАЖНО: .env содержит реальные API-ключи (RouterAI, OpenRouter, Yandex) — НИКОГДА не коммитить!
 .env
+.env.local
 !.env.example
 
 # --- Виртуальное окружение ---
@@ -39,7 +40,9 @@ tmp/
 *.log
 tmp_patch*.py
 fix_ui.py
-None
+fix-*.mjs
+lint*.txt
+test_output.txt
 _tmp_gh/
 _gh/
 *.PNG
@@ -49,6 +52,8 @@ _gh/
 node_modules/
 frontend/node_modules/
 frontend/dist/
+dist/
+build/
 .playwright-cli/
 
 # --- IDE ---
@@ -70,6 +75,7 @@ model_probe_results*.json
 !evals/model_probe_results*.json
 /.opencode
 /plans
+/.kilo
 /implementation_plan.md
 /info.txt
 /AUTONOMOUS_WORK_REPORT.md
@@ -80,14 +86,9 @@ model_probe_results*.json
 /PROGRESS_REPORT.md
 /project_report.md
 /roadmap.md
-/PROGRESS_REPORT.md
-/project_report.md
-/roadmap.md
-/RUN_INSTRUCTIONS.md
-/project_report.md
-/roadmap.md
-/RUN_INSTRUCTIONS.md
-/PROGRESS_REPORT.md
 /Памятка_по_проектнои__работе.txt
 /walkthrough.md
-/SESSION_REPORT_2026-08-18_QDRANT.md
+/task.md
+/analysis_report.md
+/критика.md
+/EDUTUTOR_MANAGEMENT.md

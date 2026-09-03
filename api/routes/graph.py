@@ -136,7 +136,7 @@ def get_graph(session_id: str, store: SessionStore = Depends(get_store)):
                 n["attempts"] = art.attempts
                 n["correct"] = art.correct
                 n["accuracy"] = art.accuracy
-    except Exception:
+    except (OSError, IOError, FileNotFoundError):
         pass  # wiki недоступен — граф без mastery
 
     return {
@@ -175,7 +175,7 @@ def node_wiki(session_id: str, node_id: str, store: SessionStore = Depends(get_s
         art = _match_article(wiki, session.state.subject, title) if title else None
         if art is not None:
             return {"node": node, "wiki": art.to_dict()}
-    except Exception:
+    except (OSError, IOError, FileNotFoundError):
         pass
     return {"node": node, "wiki": None}
 
@@ -267,7 +267,7 @@ async def start_review(session_id: str, store: SessionStore = Depends(get_store)
     try:
         bank = ReviewBank(default_settings.REVIEW_BANK_DIR, student_id)
         due_count = len(bank.get_due(limit=50))
-    except Exception:
+    except (OSError, IOError, FileNotFoundError):
         due_count = 0
 
     session.state = session.state.model_copy(
@@ -391,8 +391,8 @@ def judge_session(session_id: str, body: JudgeBody, store: SessionStore = Depend
             "kind": "judge.result",
             "judge": result,
         }))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("judge WS event skipped: %s", e)
 
     # Сохраняем результат судьи урока в состояние (для повторного показа при resync)
     if target == "lesson":
@@ -402,7 +402,7 @@ def judge_session(session_id: str, body: JudgeBody, store: SessionStore = Depend
             session.state = st2
             if session.store and getattr(session.store, "_sqlite", None):
                 session.store._save_state(session.id, st2)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to persist lesson judge state: %s", e)
 
     return result

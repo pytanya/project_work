@@ -77,8 +77,8 @@ def _close_logger(step_logger: Any) -> None:
     if step_logger is not None:
         try:
             step_logger.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Не удалось закрыть JSONL-логгер: %s", e)
 
 
 def _fallback_deps() -> GraphDeps:
@@ -495,8 +495,8 @@ async def run_step(session: SessionData, answer: Optional[str] = None) -> TutorS
         try:
             sl.log_step(agent_action="user_request", status="start",
                         extra={"text": (answer or "")[:200]})
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("run_step: не удалось записать старт шага в логгер: %s", e)
 
     def _invoke():
         if session.cancel_event.is_set():
@@ -556,8 +556,8 @@ async def run_step(session: SessionData, answer: Optional[str] = None) -> TutorS
         try:
             sl.log_step(agent_action="user_request", status="end",
                         extra={"session_status": session.state.session_status or ""})
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("run_step: не удалось записать конец шага в логгер: %s", e)
 
     # Сохраняем состояние после каждого шага (персистентность)
     if session.store and session.store._sqlite:

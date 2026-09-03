@@ -2,6 +2,7 @@
 
 Запуск: python scripts/reproduce_topic_500.py
 """
+import os
 import sys
 import time
 from pathlib import Path
@@ -28,7 +29,7 @@ r = requests.get(f"{BASE}/api/sessions/{sid}/intake/status")
 print("Intake status:", r.json())
 
 # 4) Загружаем учебник
-pdf = Path(r"C:\otus\project_work\data\uploads\fcde261d.pdf")
+pdf = Path(os.environ.get("TEST_PDF_PATH", "data/uploads/fcde261d.pdf"))
 if pdf.exists():
     with pdf.open("rb") as f:
         r = requests.post(

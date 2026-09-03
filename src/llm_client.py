@@ -16,6 +16,7 @@ EduTutor — единый LLM-клиент (доработка llm_client.py и�
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -122,7 +123,7 @@ class LLMClient:
                 self._clients[p["name"]] = _cached_openai_client(
                     p["base_url"], p["api_key"], client_timeout
                 )
-            except Exception as e:  # pragma: no cover
+            except openai.OpenAIError as e:  # pragma: no cover
                 logger.warning("Не удалось создать клиент для %s: %s", p["name"], e)
 
         if not self._clients:
@@ -343,7 +344,11 @@ class LLMClient:
                 except openai.APIStatusError as e:
                     errors.append(f"{provider['name']}/{model}: {e}")
                     logger.warning("Провайдер %s, модель %s недоступна (%s).", provider["name"], model, e)
-                except Exception as e:
+                except (
+                    openai.OpenAIError,
+                    ConnectionError,
+                    TimeoutError,
+                ) as e:
                     errors.append(f"{provider['name']}/{model}: {e}")
                     logger.error("Провайдер %s, модель %s не смог обработать запрос. %s", provider["name"], model, e)
                     break  # серьёзная ошибка с моделью провайдера — следующий провайдер
@@ -459,7 +464,11 @@ class LLMClient:
                     return resp
                 except openai.APIStatusError as e:
                     errors.append(f"{name}/{model}: {e}")
-                except Exception as e:
+                except (
+                    openai.OpenAIError,
+                    ConnectionError,
+                    TimeoutError,
+                ) as e:
                     errors.append(f"{name}/{model}: {e}")
                     break
         raise RuntimeError("Стриминг недоступен: " + "; ".join(errors))

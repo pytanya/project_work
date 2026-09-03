@@ -1,0 +1,16 @@
+# Лёгкие зависимости для CI (тесты), без torch/chromadb/easyocr/crawl4ai/docling
+pydantic>=2.7.0
+pydantic-settings>=2.2.0
+rich
+pytest
+pytest-asyncio
+httpx
+python-dotenv
+openai>=1.0
+requests
+langgraph>=0.2
+langgraph-checkpoint-sqlite
+qdrant-client
+beautifulsoup4
+fastapi
+uvicorn

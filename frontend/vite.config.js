@@ -1,8 +1,9 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import { katexPlugin } from './vite-plugin-katex.js'
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), katexPlugin()],
   optimizeDeps: {
     include: ['katex'],
   },

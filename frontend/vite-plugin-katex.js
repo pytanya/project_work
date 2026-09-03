@@ -1,39 +1,33 @@
-// Плагин для Vite: корректная обработка katex CSS и шрифтов
-import { readFileSync, existsSync } from 'fs'
-import { resolve, dirname, join } from 'path'
+import { createHash } from 'crypto'
 
-const KATEX_DIST = resolve(process.cwd(), 'node_modules/katex/dist')
-
+/**
+ * Vite plugin that rewrites KaTeX CSS font url() paths to absolute paths
+ * served from node_modules, ensuring fonts load correctly in both dev and build.
+ */
 export function katexPlugin() {
+  const KATEX_FONT_RE = /url\((['"]?)fonts\//g
+
   return {
     name: 'vite-plugin-katex',
     enforce: 'pre',
-    
-    // Переписываем пути к шрифтам в CSS
+
     transform(code, id) {
-      if (id.includes('katex') && id.endsWith('.css')) {
-        // Заменяем относительные пути на абсолютные
-        const katexCss = readFileSync(id, 'utf-8')
-        const relativePath = dirname(id)
-        
-        // Заменяем font-url('/fonts/...') на font-url('/node_modules/katex/dist/fonts/...')
-        const transformed = katexCss.replace(
-          /url\(['"]?\/fonts\//g,
-          `url('/node_modules/katex/dist/fonts/`
-        )
-        
-        // Заменяем url('./fonts/...') на url('/node_modules/katex/dist/fonts/...')
-        const transformed2 = transformed.replace(
-          /url\(['"]?\.\.\/fonts\//g,
-          `url('/node_modules/katex/dist/fonts/`
-        )
-        
-        return {
-          code: transformed2,
-          map: null,
-        }
+      if (!id.includes('katex') || !id.endsWith('.css')) return null
+
+      let result = code
+      let count = 0
+
+      result = result.replace(KATEX_FONT_RE, (match, quote) => {
+        count++
+        return `url(${quote}/node_modules/katex/dist/fonts/`
+      })
+
+      if (count === 0) return null
+
+      return {
+        code: result,
+        map: null,
       }
-      return null
     },
   }
 }
