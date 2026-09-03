@@ -21,7 +21,7 @@ export default defineConfig({
     globals: true,
     setupFiles: ['./src/test/setup.js'],
     css: false,
-    pool: 'threads',
+    pool: 'forks',
     testTimeout: 30000,
     exclude: ['node_modules/**', 'dist/**', 'e2e/**'],
   },
